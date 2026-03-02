@@ -1,0 +1,50 @@
+Bootstrap: docker
+From: condaforge/miniforge3
+
+%labels
+    Author PIRD_Team
+    Version v4.0_Conda
+    Description PIRD GUI using Conda (Rootless)
+
+%post
+    # 1. Configure Conda to use conda-forge (standard for scientific libs)
+    # This comes pre-configured in miniforge3, but good to be explicit
+    conda config --set channel_priority strict
+
+    # 2. Install all dependencies via Conda
+    # Conda packages include the binary system libraries (X11, GL, Qt) 
+    # inside the environment, bypassing the need for apt-get/root.
+    # We install:
+    # - python 3.10
+    # - pyqt (includes Qt5 binaries)
+    # - opencv (includes libraries)
+    # - nibabel, scipy (standard deps)
+    # - mesalib (provides libGL.so without root)
+    
+    conda install -y python=3.10 \
+        numpy \
+        opencv \
+        nibabel \
+        scipy \
+        pyqt \
+        mesalib \
+        xorg-libx11 \
+        xorg-libxext \
+        xorg-libxrender \
+        xorg-libxi
+
+    # Clean up to reduce image size
+    conda clean -afy
+
+%environment
+    # Ensure the container uses the Conda environment
+    export PATH=/opt/conda/bin:$PATH
+    
+    # QT Configuration to ensure it finds the Conda-installed libraries
+    export QT_X11_NO_MITSHM=1
+    export LC_ALL=C.UTF-8
+    export LANG=C.UTF-8
+
+%runscript
+    echo "Starting PIRD (Conda Environment)..."
+    exec python "$@"

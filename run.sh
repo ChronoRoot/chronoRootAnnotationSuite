@@ -17,8 +17,7 @@ xhost +local: > /dev/null 2>&1
 
 # 4. Run Apptainer
 # We pass $BINDS which now contains the valid system paths
-apptainer exec  $BINDS --env DISPLAY=$DISPLAY "/home/IPS2/rgaggio/.local/chronoroot/Image_ChronoRoot.sif" \
-  bash -c "source /opt/conda/etc/profile.d/conda.sh && conda activate ChronoRoot && python main.py"
+apptainer exec  $BINDS --env DISPLAY=$DISPLAY "image.sif" bash -c "python main.py"
 
 # 5. Cleanup
 xhost -local: > /dev/null 2>&1
