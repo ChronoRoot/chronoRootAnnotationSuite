@@ -31,7 +31,8 @@ From: condaforge/miniforge3
         xorg-libx11 \
         xorg-libxext \
         xorg-libxrender \
-        xorg-libxi
+        xorg-libxi \
+        scikit-image
 
     # Clean up to reduce image size
     conda clean -afy

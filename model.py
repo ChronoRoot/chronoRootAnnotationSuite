@@ -198,37 +198,35 @@ class PlantImageModel:
             self._get_class_patch(uid)
 
     def clean_and_validate_masks(self):
-        """
-        Removes noise (<5 area) and validates that each plant has only 1 connected component.
-        Uses RETR_EXTERNAL so internal holes are perfectly legal and ignored.
-        """
         needs_metadata_update = False
         
         for uid, mask in list(self.masks.items()):
             if np.sum(mask) == 0: 
                 continue
             
-            # Use RETR_EXTERNAL to ONLY look at the outer boundaries, ignoring holes
-            contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            # Use SciPy Label to find true 8-connected pixel components
+            labeled_mask, num_features = label(mask, structure=np.ones((3,3)))
             
             valid_count = 0
-            for c in contours:
-                # Discard spurious pixels / ghost polygons
-                if cv2.contourArea(c) < 5:
-                    # Permanently erase this noise from the binary mask
-                    cv2.drawContours(mask, [c], -1, 0, -1)
-                    self.dirty = True
-                    needs_metadata_update = True
-                else:
-                    valid_count += 1
-                    
+            if num_features > 0:
+                sizes = np.bincount(labeled_mask.ravel())
+                sizes[0] = 0 # Ignore the background (label 0)
+                
+                for i in range(1, num_features + 1):
+                    # Discard spurious noise strictly by pixel count, not polygon area
+                    if sizes[i] < 5:
+                        mask[labeled_mask == i] = 0
+                        self.dirty = True
+                        needs_metadata_update = True
+                    else:
+                        valid_count += 1
+                        
             # After cleaning, check if we still have multiple disconnected parts
             if valid_count > 1:
                 return False, uid
                 
         if needs_metadata_update:
-            # We don't notify the UI here because the background thread is running
-            # It will automatically refresh when the save finishes.
+            # Re-generate bounding boxes for any masks that had noise erased
             for uid in self.masks.keys():
                 coords = cv2.findNonZero(self.masks[uid])
                 if coords is not None:
@@ -291,12 +289,13 @@ class PlantImageModel:
         with open(json_path, 'w') as f:
             json.dump(data, f)
             
-        if mark_finished:
-            final_labels = self._flatten_multiclass()
-            if final_labels is not None:
-                nii_path = os.path.join(task_path, f"{base_name}.nii.gz")
-                new_nifti = nib.Nifti1Image(final_labels.astype(np.uint8).T, np.eye(4))
-                nib.save(new_nifti, nii_path)
+        final_labels = self._flatten_multiclass()
+        self.original_multiclass = final_labels
+        
+        if final_labels is not None:
+            nii_path = os.path.join(task_path, f"{base_name}.nii.gz")
+            new_nifti = nib.Nifti1Image(final_labels.astype(np.uint8).T, np.eye(4))
+            nib.save(new_nifti, nii_path)
                 
         self.dirty = False
         
@@ -308,14 +307,14 @@ class PlantImageModel:
     def _load_mask_from_nifti(self, nii_path, shape):
         try:
             data = np.squeeze(nib.load(nii_path).get_fdata())
-            if data.shape != shape: data = data.T
+            data = data.T
             self.original_multiclass = data.astype(np.uint8)
         except Exception as e: print(f"NIfTI Error: {e}")
         
     def _load_instances_from_nifti(self, nii_path, shape):
         try:
             data = np.squeeze(nib.load(nii_path).get_fdata())
-            if data.shape != shape: data = data.T
+            data = data.T
             self.original_multiclass = data.astype(np.uint8)
             
             labeled_map, _ = label((data > 0).astype(np.int32), structure=np.ones((3,3)))
