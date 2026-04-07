@@ -56,6 +56,7 @@ class FrangiTab(QWidget):
         self.p_allow_disconnected = False
         self.p_channel_mode = "Red-Blue Avg (RB)"
         self.p_smooth_mode = "Medium"
+        self.p_clahe_mode = "None"  
         
         self.strict_full_mask = None
         self.strict_tight_patch = None
@@ -109,6 +110,11 @@ class FrangiTab(QWidget):
         self.cb_smooth.addItems(["None", "Light", "Medium", "High"])
         self.cb_smooth.setCurrentText(self.p_smooth_mode)
 
+        self.cb_clahe = QComboBox()
+        self.cb_clahe.addItems(["None", "Before Smoothing", "After Smoothing"])
+        self.cb_clahe.setCurrentText(self.p_clahe_mode)
+        self.cb_clahe.currentIndexChanged.connect(self.refresh_proposals)
+
         # Connect ALL parameters to live-update the proposals instantly
         self.sp_search.valueChanged.connect(self.refresh_proposals)
         self.sp_bridge.valueChanged.connect(self.refresh_proposals)
@@ -140,6 +146,8 @@ class FrangiTab(QWidget):
         # Row 2: Visual Adjustments & Execution
         row2.addWidget(QLabel("Image Mode:"))
         row2.addWidget(self.cb_channel)
+        row2.addWidget(QLabel(" | Contrast Enhancement:"))
+        row2.addWidget(self.cb_clahe)
         row2.addWidget(QLabel(" | Smoothing:"))
         row2.addWidget(self.cb_smooth)
         row2.addWidget(QLabel(" | "))
@@ -314,6 +322,7 @@ class FrangiTab(QWidget):
         self.p_allow_disconnected = self.chk_disconnected.isChecked()
         self.p_channel_mode = self.cb_channel.currentText()
         self.p_smooth_mode = self.cb_smooth.currentText()
+        self.p_clahe_mode = self.cb_clahe.currentText() 
         
         self.generate_and_display_proposal()
 
@@ -408,6 +417,13 @@ class FrangiTab(QWidget):
         else:
             gray_crop = B.astype(np.uint8)
 
+        # <-- NEW: Initialize CLAHE -->
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+
+        # <-- NEW: Option to apply BEFORE smoothing -->
+        if self.p_clahe_mode == "Before Smoothing":
+            gray_crop = clahe.apply(gray_crop)
+
         # Dynamic Smoothing based on selection
         if self.p_smooth_mode == "Light":
             gray_crop = cv2.bilateralFilter(gray_crop, d=3, sigmaColor=20, sigmaSpace=20)
@@ -415,7 +431,11 @@ class FrangiTab(QWidget):
             gray_crop = cv2.bilateralFilter(gray_crop, d=5, sigmaColor=25, sigmaSpace=25)
         elif self.p_smooth_mode == "High":
             gray_crop = cv2.bilateralFilter(gray_crop, d=7, sigmaColor=35, sigmaSpace=35)
-        
+
+        # <-- NEW: Option to apply AFTER smoothing -->
+        if self.p_clahe_mode == "After Smoothing":
+            gray_crop = clahe.apply(gray_crop)
+            
         current_cls_crop = self._get_current_multiclass_crop(x1, y1, x2, y2, self.current_uid)
         
         # --- 2. Safe Zone Dilation ---

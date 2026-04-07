@@ -14,6 +14,7 @@ from review_tab import ReviewTab
 from guidelines_tab import GuidelinesTab
 from about_tab import AboutTab
 from frangi_tab import FrangiTab 
+from graph_tab import ChronoRootTab  
 
 # ==========================================
 # CONFIGURATION
@@ -178,11 +179,13 @@ class MainWindow(QMainWindow):
         
         self.tab_review = ReviewTab(self.global_model)   
         self.tab_frangi = FrangiTab(self.global_model)  
+        self.tab_graph = ChronoRootTab(self.global_model) # <-- NEW: Instantiate Graph Tab
         self.tab_guidelines = GuidelinesTab() 
         self.tab_about = AboutTab()    
         
         self.tabs.addTab(self.tab_review, "Annotation Tool")
         self.tabs.addTab(self.tab_frangi, "Frangi Refinement")  
+        self.tabs.addTab(self.tab_graph, "Graph Editor")      # <-- NEW: Add to Interface
         self.tabs.addTab(self.tab_guidelines, "Guidelines")
         self.tabs.addTab(self.tab_about, "About")
         
