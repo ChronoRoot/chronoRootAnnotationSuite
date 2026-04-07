@@ -1,17 +1,12 @@
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QListWidget, 
                              QListWidgetItem, QPushButton, QLabel, QGraphicsView, 
                              QGraphicsScene, QGraphicsPixmapItem, QGraphicsRectItem, 
-                             QMessageBox, QSlider, QTreeWidget, QTreeWidgetItem, QHeaderView)
+                             QMessageBox, QSlider, QTreeWidgetItem)
+
 from PyQt5.QtCore import Qt, pyqtSignal, QRectF
 from PyQt5.QtGui import (QImage, QPixmap, QPainter, QPainterPath, QPen, QColor, 
                          QBrush, QIcon)
 
-class SortableTreeItem(QTreeWidgetItem):
-    def __lt__(self, other):
-        col = self.treeWidget().sortColumn()
-        # Sort numerically using the hidden UserRole data (either ID or Area)
-        return self.data(col, Qt.UserRole) < other.data(col, Qt.UserRole)
-    
 # ==========================================
 # HELPER: DATA TO GUI TRANSLATION
 # ==========================================
@@ -239,60 +234,248 @@ class PaintCanvas(BaseCanvas):
                     rect.setPen(pen)
                     self.bbox_group.addToGroup(rect)
 
-# ==========================================
-# UNIFIED REVIEW TAB
-# ==========================================
-class ReviewTab(QWidget):
+
+class ReviewCanvasTab(QWidget):
+    """
+    Handles ONLY the visual canvas, overlay rendering, and stroke translation.
+    Listens to the shared PlantImageModel for state changes.
+    """
     def __init__(self, shared_model):
         super().__init__()
         self.model = shared_model
         
-        # State
-        self.selected_ids = set()
-        self.active_uid = None
+        # Canvas State
         self.current_mode = "SELECT" 
         self.previous_view_mode = "SELECT" 
         self.show_bboxes = True
-        self.current_image_path = None
+        self.opacity = 0.40
+        self.brush_size = 5
+        self.active_class_id = 1
+        
+        self.init_ui()
+        
+        # Connect to the pure python backend callbacks
+        self.model.register_data_callback(self.on_data_changed)
+        self.model.register_selection_callback(self.on_selection_changed)
 
-        # Connect to the pure python backend using the callback API
-        self.model.register_callback(self.populate_list)
+    def init_ui(self):
+        rl = QVBoxLayout(self)
         
-        # Layouts
-        main_layout = QHBoxLayout(self)
-        side_panel = QWidget()
-        side_panel.setFixedWidth(320)
-        sl = QVBoxLayout(side_panel)
+        # 1. Top Info Bar
+        self.lbl_info = QLabel()
+        self.lbl_info.setStyleSheet("background-color: #eee; padding: 5px; font-weight: bold;")
+        rl.addWidget(self.lbl_info)
         
-        # UI Definitions
-        self.lbl_instance_count = QLabel("<b>PLANT INSTANCES (0 Total):</b>")
-        sl.addWidget(self.lbl_instance_count)
+        # 2. Main Canvas
+        self.canvas = PaintCanvas()
+        self.canvas.on_stroke_finished.connect(self.handle_stroke)
+        self.canvas.on_click.connect(self.handle_canvas_click)
+        self.canvas.on_split_finish.connect(self.handle_split)
+        rl.addWidget(self.canvas)
         
-        self.list_instances = QTreeWidget()
-        self.list_instances.setHeaderLabels(["Plant ID", "Area (px)"])
-        self.list_instances.setSortingEnabled(True)
-        self.list_instances.setRootIsDecorated(False) # Hides the expansion arrows
-        self.list_instances.setSelectionMode(QTreeWidget.ExtendedSelection)
-        self.list_instances.setFixedHeight(250)
-        self.list_instances.itemSelectionChanged.connect(self.on_list_selection_changed)
+        # 3. Bottom Navigation Instructions
+        self.lbl_navigation = QLabel("Control click and drag for pan, use wheel to zoom")
+        self.lbl_navigation.setStyleSheet("color: #666; font-style: italic; padding: 2px;")
+        self.lbl_navigation.setAlignment(Qt.AlignCenter)
+        rl.addWidget(self.lbl_navigation)
         
-        # Make the ID column fit snugly, and the Area column stretch
-        self.list_instances.header().setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        self.list_instances.header().setSectionResizeMode(1, QHeaderView.Stretch)
-        sl.addWidget(self.list_instances)
+        self.update_info_label()
+
+    # ==========================================
+    # CANVAS STATE & RENDERING
+    # ==========================================
+    def set_mode(self, mode):
+        if self.current_mode in ["SELECT", "GLOBAL"] and mode not in ["SELECT", "GLOBAL"]:
+            self.previous_view_mode = self.current_mode
+            
+        self.current_mode = mode
+        self.canvas.set_mode(mode)
+        self.update_info_label()
+        self.refresh_canvas()
+
+    def set_opacity(self, val):
+        self.opacity = val / 100.0
+        self.refresh_canvas()
+
+    def set_brush_size(self, val):
+        self.brush_size = val
+        self.canvas.set_brush_size(val)
+
+    def set_show_bboxes(self, show):
+        self.show_bboxes = show
+        self.refresh_canvas()
+
+    def set_active_class(self, class_id):
+        self.active_class_id = class_id
+
+    def refresh_canvas(self):
+        raw_data = self.model.get_raw_image_data()
+        if not raw_data: return
         
-        self.btn_new = QPushButton("+ Create New Plant")
-        self.btn_new.clicked.connect(self.action_new_instance)
-        sl.addWidget(self.btn_new)
+        base_pixmap = _bytes_to_pixmap(raw_data, is_rgba=False)
+        
+        # 1. GLOBAL MULTI-CLASS VIEW
+        if self.current_mode == "GLOBAL":
+            overlay_data = self.model.get_full_class_overlay_data(selected_ids=list(self.model.selected_uids), opacity=self.opacity)
+            overlay_pixmap = _bytes_to_pixmap(overlay_data, is_rgba=True)
+            self.canvas.update_view(base_pixmap, overlay_pixmap)
+            self.canvas.update_bboxes(self.model.bboxes, self.model.color_map, self.show_bboxes)
+
+        # 2. SELECT MODE
+        elif self.current_mode == "SELECT":
+            valid_selection = [uid for uid in self.model.selected_uids if uid in self.model.masks]
+            overlay_data = self.model.get_overlay_data(selected_ids=valid_selection, opacity=self.opacity)
+            overlay_pixmap = _bytes_to_pixmap(overlay_data, is_rgba=True)
+            
+            self.canvas.update_view(base_pixmap, overlay_pixmap)
+            self.canvas.update_bboxes(self.model.bboxes, self.model.color_map, self.show_bboxes)
+            
+        # 3. INDIVIDUAL MULTI-CLASS EDITING
+        elif self.current_mode == "SEMANTIC" and self.model.active_uid in self.model.masks:
+            painter = QPainter(base_pixmap)
+            class_data, cx, cy = self.model.get_class_overlay_data(self.model.active_uid, opacity=self.opacity)
+            if class_data:
+                painter.drawPixmap(cx, cy, _bytes_to_pixmap(class_data, is_rgba=True))
+            
+            cont_data, bx, by = self.model.get_binary_contours_data(self.model.active_uid)
+            if cont_data:
+                painter.drawPixmap(bx, by, _bytes_to_pixmap(cont_data, is_rgba=True))
+                
+            painter.end()
+            self.canvas.update_view(base_pixmap, QPixmap()) 
+            self.canvas.update_bboxes({}, {}, False)
+            
+        # 4. ISOLATION MODE (Paint/Split/New Plant)
+        else: 
+            if self.model.active_uid and self.model.active_uid in self.model.masks:
+                overlay_data = self.model.get_overlay_data(isolate_uids=[self.model.active_uid], opacity=self.opacity)
+                overlay_pixmap = _bytes_to_pixmap(overlay_data, is_rgba=True)
+                self.canvas.update_view(base_pixmap, overlay_pixmap)
+            else:
+                self.canvas.update_view(base_pixmap, QPixmap())
+            self.canvas.update_bboxes({}, {}, False)
+
+    def update_info_label(self):
+        """Dynamically updates the top info bar based on current mode and selection."""
+        mode = self.current_mode
+        active = self.model.active_uid
+        selected = self.model.selected_uids
+        
+        if mode == "SELECT":
+            if active:
+                self.lbl_info.setText(f"SELECTION MODE: Plant ID {active} Selected. (Shift+Click to add more)")
+            elif len(selected) > 1:
+                ids_str = ", ".join(str(i) for i in sorted(selected))
+                self.lbl_info.setText(f"SELECTION MODE: {len(selected)} Plants Selected (IDs: {ids_str}).")
+            else:
+                self.lbl_info.setText("SELECTION MODE: No plant selected. Click plants on the canvas or in the list to select.")
+        elif mode == "GLOBAL": 
+            self.lbl_info.setText("GLOBAL VIEW: Showing all Semantic Classes across the image.")
+        elif mode == "PAINT":
+            self.lbl_info.setText(f"SHAPE PAINT [Plant ID {active}]: Left-Click to Paint | Right-Click to Erase.")
+        elif mode == "SEMANTIC":
+            self.lbl_info.setText(f"MULTI-CLASS [Plant ID {active}]: Paint specific biology classes.")
+        elif mode == "SPLIT":
+            self.lbl_info.setText(f"SPLIT MODE [Plant ID {active}]: Draw a red line across the plant to cut it.")
+
+    def zoom_to_plant(self, uid):
+        if uid in self.model.bboxes:
+            x, y, w, h = self.model.bboxes[uid]
+            margin = 80
+            self.canvas.fitInView(QRectF(x-margin, y-margin, w+margin*2, h+margin*2), Qt.KeepAspectRatio)
+
+    # ==========================================
+    # USER INTERACTIONS
+    # ==========================================
+    def handle_canvas_click(self, x, y, shift):
+        uid = self.model.get_id_at(x, y)
+        
+        if uid == 0:
+            if not shift: self.model.set_selection([])
+            return
+
+        current_sel = set(self.model.selected_uids)
+        if shift:
+            if uid in current_sel: current_sel.remove(uid)
+            else: current_sel.add(uid)
+        else:
+            current_sel = {uid}
+
+        # Updating the model automatically triggers on_selection_changed
+        self.model.set_selection(list(current_sel))
+
+    def handle_stroke(self, points, is_erase):
+        uid = self.model.active_uid
+        if not uid: return
+        
+        raw_points = [(p.x(), p.y()) for p in points]
+        
+        if self.current_mode == "SEMANTIC":
+            if not is_erase: 
+                self.model.apply_class_stroke(uid, raw_points, self.brush_size, self.active_class_id)
+        
+        elif self.current_mode == "PAINT":
+            if uid not in self.model.masks:
+                if not is_erase: 
+                    self.model.set_selection([uid])
+                    self.model.commit_new_instance(uid, raw_points, self.brush_size)
+            else:
+                self.model.apply_stroke(uid, raw_points, self.brush_size, is_erase)
+
+    def handle_split(self, pts):
+        if self.model.active_uid and self.current_mode == "SPLIT":
+            raw_pts = [(p.x(), p.y()) for p in pts]
+            success = self.model.split_instance(self.model.active_uid, raw_pts)
+            
+            if success:
+                self.lbl_info.setText("Split successful.")
+                self.model.set_selection([]) 
+            else:
+                self.lbl_info.setText("Split failed (lines didn't cross plant fully).")
+
+    # ==========================================
+    # MODEL CALLBACKS
+    # ==========================================
+    def on_data_changed(self):
+        """Fires when masks are edited."""
+        self.refresh_canvas()
+        
+    def on_selection_changed(self):
+        """Fires when the global selection state changes."""            
+
+        if self.model.active_uid is None:
+            if self.current_mode in ["PAINT", "SPLIT", "SEMANTIC"]:
+                self.set_mode(self.previous_view_mode)
+                
+        self.update_info_label()
+        self.refresh_canvas()
+
+
+class ReviewToolPanel(QWidget):
+    """
+    Handles ONLY the UI controls for the Annotation canvas.
+    Requires a reference to ReviewCanvasTab to push mode/slider changes directly.
+    """
+    def __init__(self, shared_model, canvas_tab: ReviewCanvasTab):
+        super().__init__()
+        self.model = shared_model
+        self.canvas_tab = canvas_tab
+        
+        self.init_ui()
+        self.model.register_selection_callback(self.on_selection_changed)
+
+    def init_ui(self):
+        sl = QVBoxLayout(self)
+        sl.setContentsMargins(5, 5, 5, 5)
         
         row_actions = QHBoxLayout()
         self.btn_unselect = QPushButton("Clear Selection")
-        self.btn_unselect.clicked.connect(self.unselect_instance)
+        self.btn_unselect.clicked.connect(lambda: self.model.set_selection([]))
         
         self.btn_bbox = QPushButton("Show Bounding Boxes")
         self.btn_bbox.setCheckable(True)
         self.btn_bbox.setChecked(True)
-        self.btn_bbox.clicked.connect(self.toggle_bbox)
+        self.btn_bbox.clicked.connect(lambda: self.canvas_tab.set_show_bboxes(self.btn_bbox.isChecked()))
         
         row_actions.addWidget(self.btn_unselect)
         row_actions.addWidget(self.btn_bbox)
@@ -304,8 +487,7 @@ class ReviewTab(QWidget):
         sl.addWidget(self.btn_global)
         
         sl.addSpacing(15)
-        sl.addWidget(QLabel("<b>TOOLS:</b>"))
-
+        
         self.btn_paint = QPushButton("Shape Paint")
         self.btn_paint.setCheckable(True)
         self.btn_paint.clicked.connect(lambda: self.toggle_mode("PAINT"))
@@ -315,14 +497,6 @@ class ReviewTab(QWidget):
         self.btn_split.setCheckable(True)
         self.btn_split.clicked.connect(lambda: self.toggle_mode("SPLIT"))
         sl.addWidget(self.btn_split)
-        
-        self.btn_merge = QPushButton("Merge Selected")
-        self.btn_merge.clicked.connect(self.action_merge)
-        sl.addWidget(self.btn_merge)
-        
-        self.btn_del = QPushButton("Delete Selected")
-        self.btn_del.clicked.connect(self.action_delete)
-        sl.addWidget(self.btn_del)
         
         self.btn_undo = QPushButton("Undo Last Action")
         self.btn_undo.clicked.connect(self.model.undo)
@@ -337,6 +511,7 @@ class ReviewTab(QWidget):
         self.list_classes.setFixedHeight(120)
         self.populate_class_palette()
         self.list_classes.setVisible(False)
+        self.list_classes.itemSelectionChanged.connect(self.on_class_selected)
         sl.addWidget(self.list_classes)
         
         sl.addWidget(QLabel("Brush Size:"))
@@ -357,338 +532,62 @@ class ReviewTab(QWidget):
         self.lbl_op_val = QLabel("40%")
         self.lbl_op_val.setFixedWidth(40)
         self.slider_opacity.valueChanged.connect(lambda v: self.lbl_op_val.setText(f"{v}%"))
-        self.slider_opacity.sliderReleased.connect(self.refresh_canvas)
+        self.slider_opacity.sliderReleased.connect(lambda: self.canvas_tab.set_opacity(self.slider_opacity.value()))
         op_layout.addWidget(self.slider_opacity)
         op_layout.addWidget(self.lbl_op_val)
         sl.addLayout(op_layout)
 
         sl.addStretch()
-        main_layout.addWidget(side_panel)
-        
-        # --- RIGHT CANVAS ---
-        right_panel = QWidget()
-        rl = QVBoxLayout(right_panel)
-        
-        # 1. Top Info Bar
-        self.lbl_info = QLabel()
-        self.lbl_info.setStyleSheet("background-color: #eee; padding: 5px; font-weight: bold;")
-        rl.addWidget(self.lbl_info)
-        
-        # 2. Main Canvas
-        self.canvas = PaintCanvas()
-        self.canvas.on_stroke_finished.connect(self.handle_stroke)
-        self.canvas.on_click.connect(self.handle_canvas_click)
-        self.canvas.on_split_finish.connect(self.handle_split)
-        rl.addWidget(self.canvas)
-        
-        # 3. NEW: Bottom Navigation Instructions
-        self.lbl_navigation = QLabel("Control click and drag for pan, use wheel to zoom")
-        self.lbl_navigation.setStyleSheet("color: #666; font-style: italic; padding: 2px;")
-        self.lbl_navigation.setAlignment(Qt.AlignCenter)
-        rl.addWidget(self.lbl_navigation)
-        
-        main_layout.addWidget(right_panel)
-        main_layout.setStretch(1, 1)
-        
-        # Initialize the dynamic text
-        self.update_info_label()
-        self.apply_tooltips()
 
-    def apply_tooltips(self):
-        """Centralized location for all Review Tab tooltips."""
-        # General Actions
-        self.btn_new.setToolTip("<b>Create New Plant</b><br>Generates a new plant ID and enters paint mode.")
-        self.btn_unselect.setToolTip("<b>Clear Selection</b><br>Deselect current plants to view the whole image.")
-        self.btn_bbox.setToolTip("<b>Toggle Bounding Boxes</b><br>Show or hide the rectangular bounds around plants.")
-        self.btn_global.setToolTip("<b>Global View</b><br>View all plant organs across all plants simultaneously.")
-        
-        # Tools
-        self.btn_paint.setToolTip("<b>Shape Paint Mode</b><br>Modify the general mask for the selected plant.<br>• <i>Left-Click:</i> Paint<br>• <i>Right-Click:</i> Erase")
-        self.btn_split.setToolTip("<b>Split Instance</b><br>Draw a line across a plant to cut it into two separate IDs.<br>• <i>Click:</i> Add points<br>• <i>Double-Click:</i> Finish cut")
-        self.btn_merge.setToolTip("<b>Merge Selected</b><br>Combine two or more selected plants from the list into a single ID.")
-        self.btn_del.setToolTip("<b>Delete Selected</b><br>Permanently remove the selected plants and their masks.")
-        self.btn_undo.setToolTip("<b>Undo</b><br>Revert the last paint, split, merge, or delete action.")
-        self.btn_semantic.setToolTip("<b>Multi-Class Paint</b><br>Paint specific biological parts (e.g., Lateral Root, Hypocotyl) inside the selected plant's mask.")
-        
-        # Controls
-        self.slider_size.setToolTip("Adjust the thickness of the painting brush.")
-        self.slider_opacity.setToolTip("Adjust how transparent the colored mask overlays are.")
-        self.list_instances.setToolTip("<b>Plant Instances</b><br>• <i>Click:</i> Select plant<br>• <i>Ctrl/Shift+Click:</i> Select multiple for merging")
-        
     # ==========================================
-    # MODE MANAGEMENT
+    # TOOL LOGIC
     # ==========================================
-    def toggle_bbox(self):
-        self.show_bboxes = self.btn_bbox.isChecked()
-        self.refresh_canvas()
-
-    def update_brush_size(self, val):
-        self.lbl_size_val.setText(f"{val}px")
-        self.canvas.set_brush_size(val)
-        
     def toggle_mode(self, target_mode):
-        if self.current_mode == target_mode:
-            self.set_mode(self.previous_view_mode) # SMART FALLBACK
+        current = self.canvas_tab.current_mode
+        if current == target_mode:
+            self.force_mode(self.canvas_tab.previous_view_mode) 
             return
 
         if target_mode == "GLOBAL":
-            self.unselect_instance() 
-            self.set_mode("GLOBAL")
+            self.model.set_selection([]) 
+            self.force_mode("GLOBAL")
             return
 
-        if not self.active_uid and target_mode != "SELECT":
+        if not self.model.active_uid and target_mode != "SELECT":
             QMessageBox.warning(self, "Selection Required", "Please select a plant first.")
-            self.set_mode(self.previous_view_mode) # SMART FALLBACK
+            self.force_mode(self.canvas_tab.previous_view_mode) 
             return
             
-        self.set_mode(target_mode)
+        self.force_mode(target_mode)
 
-    def set_mode(self, mode):
-        if self.current_mode in ["SELECT", "GLOBAL"] and mode not in ["SELECT", "GLOBAL"]:
-            self.previous_view_mode = self.current_mode
-            
-        self.current_mode = mode
-        
+    def force_mode(self, mode):
+        """Forces the UI buttons and canvas into a specific mode. Used by MainWindow when creating a new plant."""
         self.btn_paint.setChecked(mode == "PAINT")
         self.btn_semantic.setChecked(mode == "SEMANTIC")
         self.btn_split.setChecked(mode == "SPLIT")
         self.btn_global.setChecked(mode == "GLOBAL") 
         
         self.list_classes.setVisible(mode == "SEMANTIC")
-        self.btn_semantic.setEnabled(self.active_uid is not None)
-        
-        if mode == "SELECT":
-            self.canvas.set_mode("SELECT")
-        elif mode == "GLOBAL": 
-            self.selected_ids.clear()
-            self.active_uid = None
-            self.list_instances.blockSignals(True)
-            self.list_instances.clearSelection()
-            self.list_instances.blockSignals(False)
-            self.canvas.set_mode("SELECT") 
-        elif mode == "PAINT":
-            self.canvas.set_mode("PAINT")
-        elif mode == "SEMANTIC":
-            self.canvas.set_mode("SEMANTIC") 
-        elif mode == "SPLIT":
-            self.canvas.set_mode("SPLIT")
-            
-        self.update_info_label() 
-        self.refresh_canvas()
+        self.canvas_tab.set_mode(mode)
 
-    def refresh_canvas(self):
-        raw_data = self.model.get_raw_image_data()
-        if not raw_data: return
-        
-        base_pixmap = _bytes_to_pixmap(raw_data, is_rgba=False)
-        op = self.slider_opacity.value() / 100.0
-        
-        # 1. GLOBAL MULTI-CLASS VIEW
-        if self.current_mode == "GLOBAL":
-            opacity = self.slider_opacity.value() / 100.0
-            overlay_data = self.model.get_full_class_overlay_data(selected_ids=list(self.selected_ids), opacity=opacity)
-            
-            # Convert the raw bytes to a memory-safe QPixmap, then use the correct canvas method
-            overlay_pixmap = _bytes_to_pixmap(overlay_data, is_rgba=True)
-            self.canvas.update_view(base_pixmap, overlay_pixmap)
-            self.canvas.update_bboxes(self.model.bboxes, self.model.color_map, self.show_bboxes)
+    def update_brush_size(self, val):
+        self.lbl_size_val.setText(f"{val}px")
+        self.canvas_tab.set_brush_size(val)
 
-        # 2. SELECT MODE
-        elif self.current_mode == "SELECT":
-            valid_selection = [uid for uid in self.selected_ids if uid in self.model.masks]
-            overlay_data = self.model.get_overlay_data(selected_ids=valid_selection, opacity=op)
-            overlay_pixmap = _bytes_to_pixmap(overlay_data, is_rgba=True)
-            
-            self.canvas.update_view(base_pixmap, overlay_pixmap)
-            self.canvas.update_bboxes(self.model.bboxes, self.model.color_map, self.show_bboxes)
-            
-        # 3. INDIVIDUAL MULTI-CLASS EDITING
-        elif self.current_mode == "SEMANTIC" and self.active_uid in self.model.masks:
-            # We draw the multi-class directly onto the base background
-            painter = QPainter(base_pixmap)
-            
-            class_data, cx, cy = self.model.get_class_overlay_data(self.active_uid, opacity=op)
-            if class_data:
-                painter.drawPixmap(cx, cy, _bytes_to_pixmap(class_data, is_rgba=True))
-            
-            cont_data, bx, by = self.model.get_binary_contours_data(self.active_uid)
-            if cont_data:
-                painter.drawPixmap(bx, by, _bytes_to_pixmap(cont_data, is_rgba=True))
-                
-            painter.end()
-            
-            self.canvas.update_view(base_pixmap, QPixmap()) 
-            self.canvas.update_bboxes({}, {}, False)
-            
-        # 4. ISOLATION MODE (Paint/Split/New Plant)
-        else: 
-            if self.active_uid and self.active_uid in self.model.masks:
-                overlay_data = self.model.get_overlay_data(isolate_uids=[self.active_uid], opacity=op)
-                overlay_pixmap = _bytes_to_pixmap(overlay_data, is_rgba=True)
-                self.canvas.update_view(base_pixmap, overlay_pixmap)
-            else:
-                self.canvas.update_view(base_pixmap, QPixmap())
-            self.canvas.update_bboxes({}, {}, False)
+    def on_class_selected(self):
+        item = self.list_classes.currentItem()
+        if item:
+            self.canvas_tab.set_active_class(item.data(Qt.UserRole))
 
-    # ==========================================
-    # SELECTION HANDLING
-    # ==========================================
-    def handle_canvas_click(self, x, y, shift):
-        uid = self.model.get_id_at(x, y)
+    def on_selection_changed(self):
+        """Updates the enable/disable state of tools based on global selection."""
+        has_active = self.model.active_uid is not None
+        self.btn_semantic.setEnabled(has_active)
         
-        # 1. Handle deselecting (clicking the background)
-        if uid == 0:
-            if not shift: self.unselect_instance()
-            return
+        # If selection was cleared and we were in a targeted mode, fallback
+        if not has_active and self.canvas_tab.current_mode in ["PAINT", "SPLIT", "SEMANTIC"]:
+            self.force_mode(self.canvas_tab.previous_view_mode)
 
-        # 2. Handle selecting
-        if shift:
-            if uid in self.selected_ids: self.selected_ids.remove(uid)
-            else: self.selected_ids.add(uid)
-        else:
-            self.selected_ids = {uid}
-
-        self.active_uid = uid if len(self.selected_ids) == 1 else None
-        self.btn_semantic.setEnabled(self.active_uid is not None)
-        
-        # 3. SMART MODE FALLBACKS
-        if self.active_uid is None:
-            if self.current_mode in ["PAINT", "SPLIT", "SEMANTIC"]:
-                self.set_mode(self.previous_view_mode)
-
-        self.update_info_label()
-        self.sync_list_selection()
-
-    def on_list_selection_changed(self):
-        self.selected_ids = {item.data(0, Qt.UserRole) for item in self.list_instances.selectedItems()}
-        
-        if self.selected_ids:
-            if len(self.selected_ids) == 1:
-                self.active_uid = list(self.selected_ids)[0]
-                self.zoom_to_plant(self.active_uid)
-            else:
-                self.active_uid = None
-                if self.current_mode in ["PAINT", "SPLIT", "SEMANTIC"]:
-                    self.set_mode(self.previous_view_mode)
-        else:
-            self.active_uid = None
-            if self.current_mode not in ["GLOBAL", "SELECT"]:
-                self.set_mode(self.previous_view_mode)
-                
-        self.btn_semantic.setEnabled(self.active_uid is not None)
-        
-        self.update_info_label()
-        self.refresh_canvas()
-
-    def sync_list_selection(self):
-        self.list_instances.blockSignals(True)
-        for i in range(self.list_instances.topLevelItemCount()):
-            item = self.list_instances.topLevelItem(i)
-            uid = item.data(0, Qt.UserRole)
-            item.setSelected(uid in self.selected_ids)
-            if uid == self.active_uid:
-                self.list_instances.scrollToItem(item)
-        self.list_instances.blockSignals(False)
-        self.refresh_canvas()
-
-    def unselect_instance(self):
-        self.selected_ids.clear()
-        self.active_uid = None
-        
-        self.list_instances.blockSignals(True)
-        self.list_instances.clearSelection()
-        self.list_instances.blockSignals(False)
-        
-        # SMART FALLBACK: Return to your remembered overview
-        if self.current_mode not in ["GLOBAL", "SELECT"]:
-            self.set_mode(self.previous_view_mode) 
-            
-        self.btn_semantic.setEnabled(False)
-        self.update_info_label()
-        self.refresh_canvas()
-
-    # ==========================================
-    # ACTIONS (Converting QPointF to Python tuples)
-    # ==========================================
-    def handle_stroke(self, points, is_erase):
-        if not self.active_uid: return
-        
-        # Translate QPointF objects to basic tuples (x, y) for the pure python model
-        raw_points = [(p.x(), p.y()) for p in points]
-        
-        if self.current_mode == "SEMANTIC":
-            item = self.list_classes.currentItem()
-            cid = item.data(Qt.UserRole) if item else 1
-            if not is_erase: 
-                self.model.apply_class_stroke(self.active_uid, raw_points, self.slider_size.value(), cid)
-        
-        elif self.current_mode == "PAINT":
-            # Check if this is the very first stroke of a newly created plant
-            if self.active_uid not in self.model.masks:
-                if not is_erase: 
-                    self.selected_ids = {self.active_uid}
-                    self.model.commit_new_instance(self.active_uid, raw_points, self.slider_size.value())
-                    self.btn_semantic.setEnabled(True)
-                    self.update_info_label()
-                    self.sync_list_selection() 
-            else:
-                # Standard painting on an existing plant
-                self.model.apply_stroke(self.active_uid, raw_points, self.slider_size.value(), is_erase)
-                
-    def handle_split(self, pts):
-        if self.active_uid and self.current_mode == "SPLIT":
-            # Translate to basic tuples
-            raw_pts = [(p.x(), p.y()) for p in pts]
-            success = self.model.split_instance(self.active_uid, raw_pts)
-            
-            if success:
-                self.lbl_info.setText("Split successful.")
-                self.unselect_instance() 
-            else:
-                self.lbl_info.setText("Split failed (lines didn't cross plant fully).")
-
-    def action_new_instance(self):
-        self.unselect_instance()
-        self.active_uid = self.model.prepare_new_uid()
-        self.current_mode = "PAINT" 
-        self.btn_paint.setChecked(True)
-        self.canvas.set_mode("PAINT")
-        self.lbl_info.setText(f"CREATION MODE: Paint new Plant ID {self.active_uid}")
-        self.refresh_canvas()
-
-    def action_merge(self):
-        if len(self.selected_ids) < 2: return
-        new_id = self.model.merge_instances(list(self.selected_ids))
-        if new_id is not None:
-            self.selected_ids = {new_id}
-            self.active_uid = new_id
-        self.sync_list_selection()
-        self.update_info_label()
-        
-    def action_delete(self):
-        if self.selected_ids:
-            self.model.delete_instances(list(self.selected_ids))
-            self.unselect_instance()
-
-    # ==========================================
-    # UTILS
-    # ==========================================
-    def update_selection_from_mapping(self, mapping):
-        """Translates the active selection to the new UIDs after a save reindexes them."""
-        if not mapping: return
-        
-        new_selected = set()
-        for old_id in self.selected_ids:
-            if old_id in mapping:
-                new_selected.add(mapping[old_id])
-                
-        self.selected_ids = new_selected
-        
-        if self.active_uid in mapping:
-            self.active_uid = mapping[self.active_uid]
-        else:
-            self.active_uid = None
-            
     def populate_class_palette(self):
         self.list_classes.clear()
         classes = [(1, "Main Root", "red"), (2, "Lateral Root", "green"), (3, "Seed", "blue"),
@@ -700,97 +599,3 @@ class ReviewTab(QWidget):
             item.setIcon(QIcon(pix))
             self.list_classes.addItem(item)
         self.list_classes.setCurrentRow(0)
-
-    def populate_list(self):
-        """Called automatically when the Model's data changes via the callback pattern."""
-        current_uids = set(self.model.masks.keys())
-        existing_uids = {self.list_instances.topLevelItem(i).data(0, Qt.UserRole) for i in range(self.list_instances.topLevelItemCount())}
-        
-        # 1. Detect if we loaded a completely new image
-        image_changed = (getattr(self, 'current_image_path', None) != self.model.image_path)
-        if image_changed:
-            self.current_image_path = self.model.image_path
-            # Reset sorting back to Plant ID (Column 0) so the new image loads in logical order
-            self.list_instances.sortItems(0, Qt.AscendingOrder)
-        
-        # 2. PERFORMANCE BOOST: If plants didn't change (just a paint stroke), update areas and abort!
-        if current_uids == existing_uids and not image_changed:
-            
-            # BUGFIX: We MUST disable sorting while updating, otherwise items jump rows mid-loop!
-            self.list_instances.setSortingEnabled(False)
-            
-            for i in range(self.list_instances.topLevelItemCount()):
-                item = self.list_instances.topLevelItem(i)
-                uid = item.data(0, Qt.UserRole)
-                area = self.model.areas.get(uid, 0)
-                item.setText(1, f"{area:,}")
-                item.setData(1, Qt.UserRole, area)
-                
-            self.list_instances.setSortingEnabled(True) # Re-enable sorting safely
-            self.refresh_canvas()
-            return
-
-        # 3. FULL REBUILD (New Image, Split, Merge, or Create)
-        self.lbl_instance_count.setText(f"<b>PLANT INSTANCES ({len(self.model.masks)} Total):</b>")
-        
-        self.selected_ids = {uid for uid in self.selected_ids if uid in self.model.masks}
-        if self.active_uid not in self.model.masks:
-            self.active_uid = None
-            if self.current_mode not in ["SELECT", "GLOBAL"]:
-                self.set_mode("SELECT")
-
-        old_sel = set(self.selected_ids)
-        self.list_instances.blockSignals(True)
-        
-        self.list_instances.clearSelection()
-        self.list_instances.setSortingEnabled(False)
-        self.list_instances.clear()
-        
-        for uid in sorted(self.model.masks.keys()):
-            area = self.model.areas.get(uid, 0)
-            item = SortableTreeItem([f"Plant {uid}", f"{area:,}"])
-            item.setData(0, Qt.UserRole, uid)   # ID for math sorting
-            item.setData(1, Qt.UserRole, area)  # Area for math sorting
-            
-            if uid in self.model.color_map:
-                c = self.model.color_map[uid]
-                pix = QPixmap(16, 16); pix.fill(QColor(c[0], c[1], c[2]))
-                item.setIcon(0, QIcon(pix))
-                
-            self.list_instances.addTopLevelItem(item)
-            if uid in old_sel: item.setSelected(True)
-            
-        self.list_instances.setSortingEnabled(True) # Turn sorting back on
-        self.list_instances.blockSignals(False)
-        self.refresh_canvas()
-
-    def zoom_to_plant(self, uid):
-        if uid in self.model.bboxes:
-            x, y, w, h = self.model.bboxes[uid]
-            margin = 80
-            self.canvas.fitInView(QRectF(x-margin, y-margin, w+margin*2, h+margin*2), Qt.KeepAspectRatio)
-            
-    def update_info_label(self):
-        """Dynamically updates the top info bar based on current mode and selection."""
-        mode = self.current_mode
-        
-        if mode == "SELECT":
-            if self.active_uid:
-                self.lbl_info.setText(f"SELECTION MODE: Plant ID {self.active_uid} Selected. (Shift+Click to add more)")
-            elif len(self.selected_ids) > 1:
-                ids_str = ", ".join(str(i) for i in sorted(self.selected_ids))
-                self.lbl_info.setText(f"SELECTION MODE: {len(self.selected_ids)} Plants Selected (IDs: {ids_str}).")
-            else:
-                self.lbl_info.setText("SELECTION MODE: No plant selected. Click plants on the canvas or in the list to select.")
-                
-        elif mode == "GLOBAL": 
-            self.lbl_info.setText("GLOBAL VIEW: Showing all Semantic Classes across the image.")
-            
-        elif mode == "PAINT":
-            self.lbl_info.setText(f"SHAPE PAINT [Plant ID {self.active_uid}]: Left-Click to Paint | Right-Click to Erase.")
-            
-        elif mode == "SEMANTIC":
-            self.lbl_info.setText(f"MULTI-CLASS [Plant ID {self.active_uid}]: Paint specific biology classes.")
-             
-        elif mode == "SPLIT":
-            self.lbl_info.setText(f"SPLIT MODE [Plant ID {self.active_uid}]: Draw a red line across the plant to cut it.")

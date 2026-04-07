@@ -3,8 +3,8 @@ import numpy as np
 import networkx as nx
 from scipy.ndimage import distance_transform_edt
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton, 
-                             QLabel, QSpinBox, QFrame, QMessageBox)
-from PyQt5.QtGui import QImage, QPixmap
+                             QLabel, QSpinBox, QMessageBox, QFormLayout)
+from PyQt5.QtGui import QImage, QPixmap, QColor
 from PyQt5.QtCore import Qt
 
 # Import the isolated builder
@@ -32,53 +32,34 @@ class AspectRatioLabel(QLabel):
         else:
             super().setPixmap(QPixmap())
 
-
-class ChronoRootTab(QWidget):
+# ==========================================
+# 1. THE MAIN VIEWPORT (CANVAS)
+# ==========================================
+class GraphCanvasTab(QWidget):
+    """Handles the 5-column graph extraction visuals and heavy processing."""
     def __init__(self, model):
         super().__init__()
         self.model = model
-        self.current_uids = []
-        self.current_index = 0
-        self.current_uid = None
+        
+        # Processing Parameters (updated by the ToolPanel)
+        self.p_prune = 0
+        self.p_thick = 1
         
         # State variables for the Bake step
         self.current_graph = None
         self.colored_skeleton = None
         
         self.init_ui()
-        self.model.register_callback(self.on_model_update)
+        self.model.register_data_callback(self.on_data_changed)
+        self.model.register_selection_callback(self.on_selection_changed)
 
     def init_ui(self):
         layout = QVBoxLayout(self)
         
-        # --- Parameter Bar ---
-        param_frame = QFrame()
-        p_layout = QHBoxLayout(param_frame)
-        
-        self.sp_prune = QSpinBox()
-        self.sp_prune.setRange(0, 10)
-        self.sp_prune.setValue(0) # Default to 0
-        self.sp_prune.valueChanged.connect(self.generate_pipeline)
-        
-        p_layout.addWidget(QLabel("Prune Iterations (Roots):"))
-        p_layout.addWidget(self.sp_prune)
-        p_layout.addWidget(QFrame(frameShape=QFrame.VLine, frameShadow=QFrame.Sunken))
-
-        # Apply Actions
-        self.sp_thick = QSpinBox()
-        self.sp_thick.setRange(1, 10)
-        self.sp_thick.setValue(1) # Default to 1
-        self.sp_thick.valueChanged.connect(self.generate_pipeline) 
-
-        self.btn_apply_mask = QPushButton("Apply Graph Colors to Mask")
-        self.btn_apply_mask.setStyleSheet("background-color: #d4edda; font-weight: bold; color: #155724;")
-        self.btn_apply_mask.clicked.connect(self.apply_graph_colors)
-        
-        p_layout.addWidget(QLabel("Dilation Base Thickness:"))
-        p_layout.addWidget(self.sp_thick)
-        p_layout.addWidget(self.btn_apply_mask)
-        p_layout.addStretch()
-        layout.addWidget(param_frame)
+        self.info_label = QLabel("Select a plant from the list to begin graph extraction.")
+        self.info_label.setAlignment(Qt.AlignCenter)
+        self.info_label.setStyleSheet("font-size: 16px; font-weight: bold; margin: 5px; background-color: #eee; padding: 5px;")
+        layout.addWidget(self.info_label)
         
         # --- Visual Layout (5 Static Columns) ---
         visual_layout = QHBoxLayout()
@@ -106,61 +87,56 @@ class ChronoRootTab(QWidget):
         visual_layout.addLayout(make_col("5. Network Graph", self.lbl_graph))
         
         layout.addLayout(visual_layout, stretch=1)
-        
-        # --- Navigation ---
-        nav_layout = QHBoxLayout()
-        self.btn_prev = QPushButton("⬅ Previous Plant")
-        self.btn_prev.clicked.connect(self.prev_plant)
-        
-        self.lbl_info = QLabel("Load an image to begin.")
-        self.lbl_info.setAlignment(Qt.AlignCenter)
-        
-        self.btn_next = QPushButton("Next Plant ➡")
-        self.btn_next.clicked.connect(self.next_plant)
-        
-        nav_layout.addWidget(self.btn_prev)
-        nav_layout.addWidget(self.lbl_info)
-        nav_layout.addWidget(self.btn_next)
-        
-        layout.addLayout(nav_layout)
+        self.clear_to_black()
 
-    def on_model_update(self):
-        if getattr(self, 'model', None) is None or not self.model.image_path: return
-        self.current_uids = sorted(list(self.model.masks.keys()))
-        if self.isVisible(): self.load_current_plant()
+    def clear_to_black(self):
+        """Fills all 5 image viewers with a pure black QPixmap."""
+        black_pixmap = QPixmap(100, 100)
+        black_pixmap.fill(QColor("black"))
+        self.lbl_orig.setPixmap(black_pixmap)
+        self.lbl_sem.setPixmap(black_pixmap)
+        self.lbl_skel.setPixmap(black_pixmap)
+        self.lbl_preview.setPixmap(black_pixmap)
+        self.lbl_graph.setPixmap(black_pixmap)
+        self.current_graph = None
+        self.colored_skeleton = None
+
+    def on_data_changed(self):
+        if self.isVisible(): 
+            self.generate_pipeline()
+
+    def on_selection_changed(self):
+        if not self.model.active_uid:
+            self.info_label.setText("No plant selected. Select a plant from the sidebar.")
+            self.clear_to_black()
+            return
+            
+        self.info_label.setText(f"Processing Plant UID: {self.model.active_uid}")
+        if self.isVisible(): 
+            self.generate_pipeline()
 
     def showEvent(self, event):
         super().showEvent(event)
-        self.on_model_update()
-
-    def prev_plant(self):
-        if self.current_index > 0:
-            self.current_index -= 1
-            self.load_current_plant()
-
-    def next_plant(self):
-        if self.current_index < len(self.current_uids) - 1:
-            self.current_index += 1
-            self.load_current_plant()
-
-    def load_current_plant(self):
-        if not self.current_uids: return
-        if self.current_index >= len(self.current_uids): self.current_index = 0
-            
-        self.current_uid = self.current_uids[self.current_index]
-        self.lbl_info.setText(f"Plant UID: {self.current_uid} ({self.current_index + 1} of {len(self.current_uids)})")
-        self.generate_pipeline()
+        self.on_selection_changed()
 
     def generate_pipeline(self):
-        if self.current_uid not in self.model.masks: return
+        uid = self.model.active_uid
+        if uid is None or uid not in self.model.masks or self.model.raw_image is None: 
+            self.clear_to_black()
+            return
         
-        mask = self.model.masks[self.current_uid]
-        patch_data = self.model._get_class_patch(self.current_uid)
-        if not patch_data: return
+        mask = self.model.masks[uid]
+        patch_data = self.model._get_class_patch(uid)
+        if not patch_data: 
+            self.clear_to_black()
+            return
+            
         patch, x_off, y_off = patch_data
         
-        x, y, w, h = self.model.bboxes.get(self.current_uid, (0,0,0,0))
-        if w == 0: return
+        x, y, w, h = self.model.bboxes.get(uid, (0,0,0,0))
+        if w == 0: 
+            self.clear_to_black()
+            return
         
         img_h, img_w = self.model.raw_image.shape[:2]
         
@@ -193,7 +169,7 @@ class ChronoRootTab(QWidget):
             p_y, p_x = np.where(active)
             root_bin_canvas[p_y + y_off, p_x + x_off] = 1
             
-        full_skel, branches, endpoints, is_valid = extract_skeleton(root_bin_canvas, self.sp_prune.value())
+        full_skel, branches, endpoints, is_valid = extract_skeleton(root_bin_canvas, self.p_prune)
         
         # 3. Skeleton Overlay
         skel_vis = dim_rgb.copy()
@@ -203,8 +179,10 @@ class ChronoRootTab(QWidget):
         
         # 4 & 5. Graph and Preview
         if not is_valid:
-            self.lbl_preview.setPixmap(QPixmap())
-            self.lbl_graph.setPixmap(QPixmap())
+            black_pm = QPixmap(100, 100)
+            black_pm.fill(QColor("black"))
+            self.lbl_preview.setPixmap(black_pm)
+            self.lbl_graph.setPixmap(black_pm)
             self.current_graph = None
             self.colored_skeleton = None
             return
@@ -227,55 +205,37 @@ class ChronoRootTab(QWidget):
         end_node = None
         
         if self.current_graph:
-            # 1. Find the biological "Seed" based ONLY on pixels labeled Main Root (1)
-            # We look at the mc_skel_bin (which is masked by the skeleton)
             c1_ys, c1_xs = np.where(mc_skel_bin == 1)
-            
             if len(c1_ys) > 0:
-                # Topmost Class 1 pixel
                 top_c1_idx = np.argmin(c1_ys)
                 anchor_pt = (c1_xs[top_c1_idx], c1_ys[top_c1_idx])
-                
-                # Snap to the nearest existing graph node
                 nodes_list = list(self.current_graph.nodes)
                 nodes_arr = np.array(nodes_list)
                 dists = np.linalg.norm(nodes_arr - np.array(anchor_pt), axis=1)
                 start_node = nodes_list[np.argmin(dists)]
             else:
-                # Fallback to actual_base if no Class 1 is found at all
                 start_node = tuple(actual_base) if actual_base else None
 
-            # 2. End node is still the bottom-most point of the whole system
             end_node = max(self.current_graph.nodes, key=lambda n: n[1]) 
 
             if start_node and end_node:
-                # 3. Calculate Traversal Cost
-                # We trust the model/manual labels: Class 1 is cheap, Class 2 is expensive
                 for u, v, data in self.current_graph.edges(data=True):
                     phys_len = data.get('weight', 1.0)
-                    # Get the root type assigned during createGraph (from mc_skel_bin)
                     orig_type = data.get('root_type', 2)
-                    
                     if orig_type == 1:
                         data['traversal_cost'] = phys_len
                     else:
-                        # 100x penalty to ensure we stay on Class 1 unless there's a gap
                         data['traversal_cost'] = phys_len * 100.0 
                         
                 try:
-                    # 4. Find the optimal semantic path
                     path = nx.shortest_path(self.current_graph, source=start_node, target=end_node, weight='traversal_cost')
                     path_edges = set(zip(path[:-1], path[1:]))
-                    
-                    # 5. Final Edge Labeling: Path is 1, Everything else is 2
                     for u, v, data in self.current_graph.edges(data=True):
                         if (u, v) in path_edges or (v, u) in path_edges:
                             self.current_graph.edges[u, v]['root_type'] = 1
                         else:
                             self.current_graph.edges[u, v]['root_type'] = 2
-                            
                 except nx.NetworkXNoPath:
-                    # If disconnected, default everything to lateral (2)
                     for u, v, data in self.current_graph.edges(data=True):
                         self.current_graph.edges[u, v]['root_type'] = 2
                 
@@ -303,9 +263,7 @@ class ChronoRootTab(QWidget):
         
         # 4. Dilated/Distance Transform Recolored Preview
         preview_vis = dim_rgb.copy()
-        
         recolored_semantic = self._calculate_recolored_segmentation(mask)
-        
         cls_colors = {1: [255, 0, 0], 2: [0, 255, 0]}
         sem_crop = recolored_semantic[y1:y2, x1:x2]
         
@@ -313,7 +271,6 @@ class ChronoRootTab(QWidget):
             preview_vis[sem_crop == cid] = cls_colors[cid]
             
         self.lbl_preview.setPixmap(self.numpy_to_qpixmap(preview_vis))
-
 
     def _calculate_recolored_segmentation(self, original_mask):
         final_mc_skel = np.zeros_like(self.colored_skeleton)
@@ -324,18 +281,15 @@ class ChronoRootTab(QWidget):
                 if e_col is not None and r_type is not None:
                     final_mc_skel[self.colored_skeleton == e_col] = r_type
 
-        thickness = self.sp_thick.value()
         kernel = np.ones((3, 3), np.uint8)
         dilated_canvas = np.zeros_like(final_mc_skel)
 
-        # Priority Dilation: Draw Lateral (2) then Main (1) over it
         for cls in [2, 1]:
             cls_skel = (final_mc_skel == cls).astype(np.uint8)
             if np.sum(cls_skel) == 0: continue
-            dilated = cv2.dilate(cls_skel, kernel, iterations=thickness)
+            dilated = cv2.dilate(cls_skel, kernel, iterations=self.p_thick)
             dilated_canvas[dilated > 0] = cls
 
-        # Fill unreached parts of the original mask using Euclidean Distance Transform
         unreached = (original_mask > 0) & (dilated_canvas == 0)
         
         if np.any(unreached):
@@ -349,14 +303,15 @@ class ChronoRootTab(QWidget):
         
         return recolored_semantic
 
-
     def apply_graph_colors(self):
-        if not self.current_graph or self.colored_skeleton is None: return
-        uid = self.current_uid
-        if uid not in self.model.masks: return
+        uid = self.model.active_uid
+        if not self.current_graph or self.colored_skeleton is None or not uid: 
+            return
+            
+        if uid not in self.model.masks: 
+            return
         
         original_mask = self.model.masks[uid]
-
         recolored_semantic = self._calculate_recolored_segmentation(original_mask)
 
         self.model.save_state(uid)
@@ -372,17 +327,77 @@ class ChronoRootTab(QWidget):
                 
             self.model.class_patches[uid] = (tight_patch, cx1, cy1)
         else:
-            self.model.masks.pop(uid, None); self.model.class_patches.pop(uid, None)
+            self.model.masks.pop(uid, None)
+            self.model.class_patches.pop(uid, None)
 
         self.model.update_metadata_for_uid(uid)
         self.model.dirty = True
-        self.model._notify_changed()
-
+        
+        # Inform the rest of the application about the data change
+        self.model._notify_data_changed()
+        
         self.generate_pipeline()
-        QMessageBox.information(self, "Semantic Sync", f"Graph colors successfully applied to original mask geometry for Plant {uid}.")
+        QMessageBox.information(self, "Semantic Sync", f"Graph classes successfully applied to original mask for Plant {uid}.")
 
     def numpy_to_qpixmap(self, img_array):
         h, w, ch = img_array.shape
         bytes_per_line = ch * w
         qimg = QImage(img_array.data, w, h, bytes_per_line, QImage.Format_RGB888)
         return QPixmap.fromImage(qimg)
+
+
+# ==========================================
+# 2. THE SIDEBAR TOOL PANEL
+# ==========================================
+class GraphToolPanel(QWidget):
+    """Handles the UI sliders and buttons inside the Sidebar StackedWidget."""
+    def __init__(self, shared_model, canvas_tab: GraphCanvasTab):
+        super().__init__()
+        self.model = shared_model
+        self.canvas_tab = canvas_tab
+        
+        self.init_ui()
+        self.model.register_selection_callback(self.on_selection_changed)
+
+    def init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(5, 5, 5, 5)
+        
+        form = QFormLayout()
+        
+        self.sp_prune = QSpinBox()
+        self.sp_prune.setRange(0, 10)
+        self.sp_prune.setValue(self.canvas_tab.p_prune)
+        self.sp_prune.valueChanged.connect(self.push_params)
+        
+        self.sp_thick = QSpinBox()
+        self.sp_thick.setRange(1, 10)
+        self.sp_thick.setValue(self.canvas_tab.p_thick)
+        self.sp_thick.valueChanged.connect(self.push_params)
+        
+        form.addRow("Prune Iterations:", self.sp_prune)
+        form.addRow("Dilation Base Thick:", self.sp_thick)
+        layout.addLayout(form)
+        
+        layout.addStretch()
+
+        self.btn_apply_mask = QPushButton("Apply Graph Colors")
+        self.btn_apply_mask.setStyleSheet("background-color: #d4edda; font-weight: bold; color: #155724; padding: 15px; font-size: 20px;")
+        self.btn_apply_mask.clicked.connect(self.canvas_tab.apply_graph_colors)
+        
+        layout.addWidget(self.btn_apply_mask)
+        self.toggle_buttons(False)
+
+    def push_params(self):
+        """Passes all UI states down to the Canvas Tab and triggers a regeneration."""
+        self.canvas_tab.p_prune = self.sp_prune.value()
+        self.canvas_tab.p_thick = self.sp_thick.value()
+        
+        if self.model.active_uid:
+            self.canvas_tab.generate_pipeline()
+
+    def toggle_buttons(self, enabled):
+        self.btn_apply_mask.setEnabled(enabled)
+
+    def on_selection_changed(self):
+        self.toggle_buttons(self.model.active_uid is not None)

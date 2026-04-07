@@ -75,17 +75,34 @@ class PlantImageModel:
             6: (255, 0, 255, 255)   
         }
 
-        self._change_callbacks = []
+        # --- NEW: Global Selection State ---
+        self.selected_uids = set()
+        self.active_uid = None
+        
+        # --- NEW: Split Callbacks ---
+        self._data_callbacks = []       # For mask changes (paint, split, etc.)
+        self._selection_callbacks = []  # For UI selection changes
         self.callbacks_muted = False 
 
-    def register_callback(self, callback):
-        self._change_callbacks.append(callback)
+    def register_data_callback(self, callback):
+        self._data_callbacks.append(callback)
+        
+    def register_selection_callback(self, callback):
+        self._selection_callbacks.append(callback)
 
-    def _notify_changed(self):
-        if self.callbacks_muted: 
-            return
-        for callback in self._change_callbacks:
-            callback()
+    def _notify_data_changed(self):
+        if self.callbacks_muted: return
+        for callback in self._data_callbacks: callback()
+        
+    def _notify_selection_changed(self):
+        if self.callbacks_muted: return
+        for callback in self._selection_callbacks: callback()
+
+    # (Optional helper to safely update selection)
+    def set_selection(self, uids):
+        self.selected_uids = set(uids)
+        self.active_uid = list(self.selected_uids)[0] if len(self.selected_uids) == 1 else None
+        self._notify_selection_changed()
 
     # --- FILE SYSTEM & IO (Completely Isolated) ---
     
@@ -541,7 +558,7 @@ class PlantImageModel:
             self.bboxes.pop(uid, None)
             self.areas.pop(uid, None)
             self.masks.pop(uid, None)
-        self._notify_changed()
+        self._notify_data_changed()
 
     def regenerate_metadata(self):
         self.bboxes = {}
@@ -553,7 +570,7 @@ class PlantImageModel:
                 self.areas[uid] = int(np.sum(mask > 0))
                 if uid not in self.color_map:
                     self.color_map[uid] = HIGH_CONTRAST_COLORS[uid % len(HIGH_CONTRAST_COLORS)]
-        self._notify_changed()
+        self._notify_data_changed()
 
     # --- TOOLS (Operating on Specific Masks) ---
     def prepare_new_uid(self):
@@ -573,7 +590,7 @@ class PlantImageModel:
         self.update_metadata_for_uid(uid)
         
         self.dirty = True
-        self._notify_changed() 
+        self._notify_data_changed() 
 
     def merge_instances(self, ids):
         """Creates a brand new UID for the merged result and deletes the originals."""
@@ -604,7 +621,7 @@ class PlantImageModel:
         self.update_metadata_for_uid(new_id)
         
         self.dirty = True
-        self._notify_changed()
+        self._notify_data_changed()
         
         # Return the new ID so the GUI knows what to select
         return new_id
@@ -683,7 +700,7 @@ class PlantImageModel:
                 del self.class_patches[uid]
                 
         self.dirty = True
-        self._notify_changed()
+        self._notify_data_changed()
 
     # --- STROKE RENDERER ---
     
@@ -755,7 +772,7 @@ class PlantImageModel:
         
         self.class_patches[uid] = (patch, x_off, y_off)
         self.dirty = True
-        self._notify_changed()
+        self._notify_data_changed()
 
     def _get_class_patch(self, uid):
         if uid in self.class_patches: return self.class_patches[uid]
@@ -859,5 +876,5 @@ class PlantImageModel:
         self.max_id = old_max_id
         
         self.dirty = True
-        self._notify_changed()
+        self._notify_data_changed()
         return True

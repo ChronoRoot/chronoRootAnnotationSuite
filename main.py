@@ -2,19 +2,24 @@ import os
 import json
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QLabel, QPushButton, QMessageBox, QApplication,
                             QHBoxLayout, QLineEdit, QFileDialog, QListWidget, QListWidgetItem, 
-                            QSplitter, QTabWidget, QStyle, QMainWindow, QProgressDialog)
-from PyQt5.QtGui import QPainter, QColor, QBrush
+                            QSplitter, QTabWidget, QStyle, QMainWindow, QProgressDialog,
+                            QTreeWidget, QHeaderView, QFrame, QStackedWidget, QTreeWidgetItem)
+                            
+from PyQt5.QtGui import QPainter, QColor, QBrush, QPixmap, QIcon
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 
-# ==========================================
-# IMPORT REFACTORED MODULES
-# ==========================================
+class SortableTreeItem(QTreeWidgetItem):
+    def __lt__(self, other):
+        col = self.treeWidget().sortColumn()
+        # Sort numerically using the hidden UserRole data (either ID or Area)
+        return self.data(col, Qt.UserRole) < other.data(col, Qt.UserRole)
+    
 from model import PlantImageModel
-from review_tab import ReviewTab
+from review_tab import ReviewCanvasTab, ReviewToolPanel
 from guidelines_tab import GuidelinesTab
 from about_tab import AboutTab
-from frangi_tab import FrangiTab 
-from graph_tab import ChronoRootTab  
+from frangi_tab import FrangiCanvasTab, FrangiToolPanel
+from graph_tab import GraphCanvasTab, GraphToolPanel
 
 # ==========================================
 # CONFIGURATION
@@ -38,7 +43,7 @@ else:
         config = json.load(f)
         DATABASE_ROOT = config.get("database_root", ".")
         
-        
+
 class FolderStatsWidget(QWidget):
     def __init__(self, text, total, in_progress, completed, is_folder=True):
         super().__init__()
@@ -107,28 +112,32 @@ class HeightProgressBar(QWidget):
             # Draw In Progress (Orange) - Starts where Green ends
             painter.fillRect(int(w_comp), 0, int(w_prog), h, QColor("#ffc107"))
 
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("ChronoRoot Annotation Suite")
         self.resize(1600, 900)
         
-        # Initialize pure Python Backend Model
         self.global_model = PlantImageModel()
         self.current_base_name = ""
         self.current_task_path = ""
         
-        # Navigation State
-        self.root_dir = DATABASE_ROOT # Default "Test"
+        self.root_dir = DATABASE_ROOT 
         self.current_dir = self.root_dir
+        self.folder_cache = {}
         
         main_widget = QWidget()
         self.setCentralWidget(main_widget)
         ml = QHBoxLayout(main_widget)
+        
+        # We now use a splitter with 3 sections!
         splitter = QSplitter(Qt.Horizontal)
         ml.addWidget(splitter)
         
-        # --- LEFT PANEL (Browser) ---
+        # ==========================================
+        # PANE 1: LEFT PANEL (Browser)
+        # ==========================================
         lp = QWidget()
         lpl = QVBoxLayout(lp)
         
@@ -148,25 +157,25 @@ class MainWindow(QMainWindow):
         self.btn_up = QPushButton("⬆ Up Level")
         self.btn_up.clicked.connect(self.navigate_up)
         self.btn_refresh = QPushButton("Refresh")
-        self.btn_refresh.clicked.connect(self.populate_browser)
+        self.btn_refresh.clicked.connect(lambda: self.populate_browser(force_refresh=True))
         nav_layout.addWidget(self.btn_up)
         nav_layout.addWidget(self.btn_refresh)
         lpl.addLayout(nav_layout)
         
         lpl.addWidget(QLabel("CONTENTS:"))
         self.task_list = QListWidget()
-        self.task_list.itemDoubleClicked.connect(self.on_item_double_clicked) # Navigation
-        self.task_list.itemClicked.connect(self.on_item_clicked)              # Preview/Select
+        self.task_list.itemDoubleClicked.connect(self.on_item_double_clicked)
+        self.task_list.itemClicked.connect(self.on_item_clicked)
         lpl.addWidget(self.task_list)
         
         # 3. Save Actions
         action_layout = QHBoxLayout()
         self.btn_save_progress = QPushButton("Save Progress")
-        self.btn_save_progress.setStyleSheet("background-color: #fff3cd; color: #856404;") # Yellowish
+        self.btn_save_progress.setStyleSheet("background-color: #fff3cd; color: #856404;") 
         self.btn_save_progress.clicked.connect(lambda: self.save_task(mark_finished=False))
         
         self.btn_finish = QPushButton("Finish Annotation")
-        self.btn_finish.setStyleSheet("background-color: #d4edda; color: #155724; font-weight: bold;") # Green
+        self.btn_finish.setStyleSheet("background-color: #d4edda; color: #155724; font-weight: bold;") 
         self.btn_finish.clicked.connect(lambda: self.save_task(mark_finished=True))
         
         action_layout.addWidget(self.btn_save_progress)
@@ -174,26 +183,192 @@ class MainWindow(QMainWindow):
         lpl.addLayout(action_layout)
                 
         splitter.addWidget(lp)
+
+        # ==========================================
+        # PANE 2: MIDDLE PANEL (Context Sidebar)
+        # ==========================================
+        mp = QWidget()
+        mpl = QVBoxLayout(mp)
         
+        # --- Top Half: Shared Plant List ---
+        self.lbl_instance_count = QLabel("<b>PLANT INSTANCES (0 Total):</b>")
+        mpl.addWidget(self.lbl_instance_count)
+        
+        self.list_instances = QTreeWidget()
+        self.list_instances.setHeaderLabels(["Plant ID", "Area (px)"])
+        self.list_instances.setSortingEnabled(True)
+        self.list_instances.setRootIsDecorated(False)
+        self.list_instances.setSelectionMode(QTreeWidget.ExtendedSelection)
+        self.list_instances.setFixedHeight(400) # Keep it compact
+        
+        self.list_instances.header().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.list_instances.header().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.list_instances.itemSelectionChanged.connect(self.on_global_list_selection_changed)
+        self.list_instances.itemClicked.connect(self.on_global_list_item_clicked)
+        mpl.addWidget(self.list_instances)
+        
+        # Shared Lifecycle Buttons
+        btn_layout = QHBoxLayout()
+        self.btn_new = QPushButton("+ New")
+        self.btn_new.clicked.connect(self.action_new_instance)
+        
+        self.btn_merge = QPushButton("Merge")
+        self.btn_merge.clicked.connect(self.action_merge)
+        
+        self.btn_del = QPushButton("Delete")
+        self.btn_del.clicked.connect(self.action_delete)
+        
+        btn_layout.addWidget(self.btn_new)
+        btn_layout.addWidget(self.btn_merge)
+        btn_layout.addWidget(self.btn_del)
+        mpl.addLayout(btn_layout)
+        
+        mpl.addSpacing(10)
+        mpl.addWidget(QFrame(frameShape=QFrame.HLine, frameShadow=QFrame.Sunken))
+        mpl.addSpacing(10)
+        
+        # --- Bottom Half: Dynamic Tool Stack ---
+        mpl.addWidget(QLabel("<b>Control Panel:</b>"))
+        self.tool_stack = QStackedWidget()        
+
+        # ==========================================
+        # PANE 3: RIGHT PANEL (Canvases / Viewport)
+        # ==========================================
         self.tabs = QTabWidget()
         
-        self.tab_review = ReviewTab(self.global_model)   
-        self.tab_frangi = FrangiTab(self.global_model)  
-        self.tab_graph = ChronoRootTab(self.global_model) # <-- NEW: Instantiate Graph Tab
-        self.tab_guidelines = GuidelinesTab() 
-        self.tab_about = AboutTab()    
+        self.canvas_review = ReviewCanvasTab(self.global_model) 
+        self.tool_panel_review = ReviewToolPanel(self.global_model, self.canvas_review)
         
-        self.tabs.addTab(self.tab_review, "Annotation Tool")
-        self.tabs.addTab(self.tab_frangi, "Frangi Refinement")  
-        self.tabs.addTab(self.tab_graph, "Graph Editor")      # <-- NEW: Add to Interface
+        self.canvas_frangi = FrangiCanvasTab(self.global_model)
+        self.tool_panel_frangi = FrangiToolPanel(self.global_model, self.canvas_frangi)
+
+        self.canvas_graph = GraphCanvasTab(self.global_model)
+        self.tool_panel_graph = GraphToolPanel(self.global_model, self.canvas_graph)
+        
+        self.tab_guidelines = GuidelinesTab() # Kept as is
+        self.tab_about = AboutTab()           # Kept as is
+        
+        
+        self.tool_stack.addWidget(self.tool_panel_review)
+        self.tool_stack.addWidget(self.tool_panel_frangi)
+        self.tool_stack.addWidget(self.tool_panel_graph)
+        
+        mpl.addWidget(self.tool_stack)
+        splitter.addWidget(mp)
+        
+        self.tabs.addTab(self.canvas_review, "Annotation Tool")
+        self.tabs.addTab(self.canvas_frangi, "Centerline Refinement")  
+        self.tabs.addTab(self.canvas_graph, "Graph Visualization & Correction")
         self.tabs.addTab(self.tab_guidelines, "Guidelines")
         self.tabs.addTab(self.tab_about, "About")
         
+        # === THE MAGIC LINK ===
+        self.tabs.currentChanged.connect(self.tool_stack.setCurrentIndex)
+        
         splitter.addWidget(self.tabs)
-        splitter.setSizes([350, 1250])
+        
+        # Proportions: Browser (300px), Sidebar (300px), Canvas (1000px)
+        splitter.setSizes([300, 300, 1000]) 
         
         self.apply_tooltips()
         self.populate_browser()
+        
+        # Register MainWindow to listen to model data changes to rebuild the tree
+        self.global_model.register_data_callback(self.populate_global_list)
+    
+    def on_global_list_selection_changed(self):
+        """Updates the Model's single source of truth when the user clicks the list."""
+        selected_items = self.list_instances.selectedItems()
+        
+        # --- SAFE CHECK: Block multi-selection if not in Annotation Tab ---
+        if len(selected_items) > 1 and self.tabs.currentIndex() != 0:
+            QMessageBox.warning(
+                self, 
+                "Multi-Selection Disabled", 
+                "Multi-selection is only supported in the 'Annotation Tool' tab.\n\nPlease switch tabs to select multiple plants."
+            )
+            
+            # Force the UI back to a single selection without triggering infinite loops
+            self.list_instances.blockSignals(True)
+            for item in selected_items[1:]:
+                item.setSelected(False)
+            self.list_instances.blockSignals(False)
+            
+            # Proceed with only the first clicked item
+            selected_items = [selected_items[0]]
+        # ------------------------------------------------------------------
+        
+        selected_uids = [item.data(0, Qt.UserRole) for item in selected_items]
+        self.global_model.set_selection(selected_uids)
+
+    def on_global_list_item_clicked(self, item, column):
+        """Manually trigger the zoom ONLY when the user explicitly clicks the sidebar list."""
+        uid = item.data(0, Qt.UserRole)
+        
+        # Check if we are currently looking at the Annotation Tool (Tab 0)
+        if self.tabs.currentIndex() == 0:
+            # We only zoom if it is a single selection to avoid erratic jumping
+            if len(self.global_model.selected_uids) == 1:
+                self.canvas_review.zoom_to_plant(uid)
+                
+    def populate_global_list(self):
+        """Rebuilds the shared tree view when the model data changes."""
+        self.lbl_instance_count.setText(f"<b>PLANT INSTANCES ({len(self.global_model.masks)} Total):</b>")
+        
+        self.list_instances.blockSignals(True)
+        self.list_instances.clearSelection()
+        self.list_instances.setSortingEnabled(False)
+        self.list_instances.clear()
+        
+        for uid in sorted(self.global_model.masks.keys()):
+            area = self.global_model.areas.get(uid, 0)
+            item = SortableTreeItem([f"Plant {uid}", f"{area:,}"])
+            item.setData(0, Qt.UserRole, uid)   
+            item.setData(1, Qt.UserRole, area)  
+            
+            if uid in self.global_model.color_map:
+                c = self.global_model.color_map[uid]
+                pix = QPixmap(16, 16); pix.fill(QColor(c[0], c[1], c[2]))
+                item.setIcon(0, QIcon(pix))
+                
+            self.list_instances.addTopLevelItem(item)
+            
+            # Reselect if it was previously selected
+            if uid in self.global_model.selected_uids:
+                item.setSelected(True)
+            
+        self.list_instances.setSortingEnabled(True)
+        self.list_instances.blockSignals(False)
+
+    def action_new_instance(self):
+        """Prepares a new ID and signals the tools to enter paint mode."""
+        if self.tabs.currentIndex() != 0:
+            QMessageBox.warning(self, "Action Restricted", "Please switch to the 'Annotation Tool' tab to create new plants.")
+            return
+            
+        self.global_model.set_selection([])
+        new_uid = self.global_model.prepare_new_uid()
+        self.global_model.active_uid = new_uid
+        
+        # Automatically switch to the Paint tool when creating a new plant
+        self.tool_panel_review.force_mode("PAINT")
+        
+    def action_merge(self):
+        if self.tabs.currentIndex() != 0:
+            QMessageBox.warning(self, "Action Restricted", "Please switch to the 'Annotation Tool' tab to merge plants.")
+            return
+            
+        if len(self.global_model.selected_uids) < 2: 
+            return
+            
+        new_id = self.global_model.merge_instances(list(self.global_model.selected_uids))
+        if new_id is not None:
+            self.global_model.set_selection([new_id])
+        
+    def action_delete(self):
+        if self.global_model.selected_uids:
+            self.global_model.delete_instances(list(self.global_model.selected_uids))
+            self.global_model.set_selection([])
         
     def apply_tooltips(self):
         """Centralized location for all Main Window tooltips."""
@@ -215,8 +390,9 @@ class MainWindow(QMainWindow):
         if d:
             self.root_dir = d
             self.current_dir = d
+            self.folder_cache = {} # Clear cache when changing root
             self.lbl_path.setText(d)
-            self.populate_browser()
+            self.populate_browser(force_refresh=True)
             
             # 1. Read existing config 
             config = {}
@@ -249,18 +425,49 @@ class MainWindow(QMainWindow):
         self.current_dir = parent
         self.populate_browser()
 
-    def populate_browser(self):
-        """Delegates completely to the backend model to retrieve folder stats and contents."""
-        self.task_list.clearSelection() 
-        self.task_list.clear()
+    def populate_browser(self, force_refresh=False):
+        """Checks cache or delegates to background thread to retrieve folder stats."""
         self.lbl_path.setText(self.current_dir)
         
-        try:
-            # Replaced all the nested os.walk/json code with a single isolated API call!
-            contents = self.global_model.scan_directory(self.current_dir)
-        except Exception as e:
-            self.task_list.addItem(f"Error reading directory: {e}")
-            return
+        if force_refresh:
+            # Clear cache for the current directory AND all subdirectories recursively
+            keys_to_delete = [k for k in self.folder_cache if k.startswith(self.current_dir)]
+            for k in keys_to_delete:
+                del self.folder_cache[k]
+
+        if self.current_dir in self.folder_cache:
+            # Load instantly from cache
+            self._render_browser_contents(self.folder_cache[self.current_dir])
+        else:
+            # Clear UI while loading
+            self.task_list.clearSelection() 
+            self.task_list.clear()
+            
+            # Spin up the background thread
+            self.show_loading(f"Scanning directory stats...\n{self.current_dir}")
+            
+            self.worker = ModelWorker(self.global_model.scan_directory, self.current_dir)
+            self.worker.finished.connect(self._on_scan_finished)
+            self.worker.error.connect(self._on_thread_error)
+            self.worker.start()
+
+    def _on_scan_finished(self, contents):
+        """Receives data from thread, caches it, and triggers render."""
+        self.hide_loading()
+        
+        # Clean up the worker
+        if hasattr(self, 'worker') and self.worker:
+            self.worker.deleteLater()
+            self.worker = None
+            
+        # Save to memory cache
+        self.folder_cache[self.current_dir] = contents
+        self._render_browser_contents(contents)
+
+    def _render_browser_contents(self, contents):
+        """Handles the actual UI widget creation (must run on main thread)."""
+        self.task_list.clearSelection() 
+        self.task_list.clear()
 
         for item in contents:
             if item["type"] == "dir":
@@ -338,8 +545,8 @@ class MainWindow(QMainWindow):
         self.current_task_path = os.path.dirname(nii_path)
         self.current_base_name = os.path.basename(nii_path).replace('.nii.gz', '')
         
-        self.tab_review.unselect_instance()
-        self.tab_review.set_mode("SELECT")
+        self.global_model.set_selection([])
+        self.tool_panel_review.force_mode("SELECT")        
         self.global_model.callbacks_muted = True
         
         self.show_loading(f"Loading {self.current_base_name}...\n(Parsing masks and NIfTI data)")
@@ -353,12 +560,11 @@ class MainWindow(QMainWindow):
         self.hide_loading()
         self.global_model.callbacks_muted = False
         
-        # Safely detach and schedule the thread for deletion
         if hasattr(self, 'worker') and self.worker:
             self.worker.deleteLater()
             self.worker = None
             
-        self.global_model._notify_changed() 
+        self.global_model._notify_data_changed() 
         self.setWindowTitle(f"ChronoRoot Annotation Suite | {self.current_base_name} [{self.global_model.status.upper()}]")
         
     # --- ASYNC SAVING ---
@@ -387,14 +593,14 @@ class MainWindow(QMainWindow):
         
         # If mapping is a dictionary, the save was successful
         if mapping:
-            # 1. Translate the GUI's selection using the new IDs
-            self.tab_review.update_selection_from_mapping(mapping)
+            new_selection = [mapping[uid] for uid in self.global_model.selected_uids if uid in mapping]
+            self.global_model.set_selection(new_selection)
             
-            # 2. Force the model to broadcast the changes to trigger a tree rebuild
-            self.global_model._notify_changed()
+            # Force the model to broadcast the changes to trigger a tree rebuild
+            self.global_model._notify_data_changed()
             
             self.setWindowTitle(f"ChronoRoot Annotation Suite | {self.current_base_name} [{self.global_model.status.upper()}]")
-            self.populate_browser() 
+            self.populate_browser(force_refresh=True)
             
             if getattr(self, '_is_closing', False):
                 self.close() 
