@@ -122,6 +122,7 @@ class MainWindow(QMainWindow):
         self.global_model = PlantImageModel()
         self.current_base_name = ""
         self.current_task_path = ""
+        self.active_workers = set()
         
         self.root_dir = DATABASE_ROOT 
         self.current_dir = self.root_dir
@@ -262,8 +263,8 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.tab_guidelines, "Guidelines")
         self.tabs.addTab(self.tab_about, "About")
         
-        # === THE MAGIC LINK ===
-        self.tabs.currentChanged.connect(self.tool_stack.setCurrentIndex)
+        # === THE SMART TAB ROUTER ===
+        self.tabs.currentChanged.connect(self.on_tab_changed)
         
         splitter.addWidget(self.tabs)
         
@@ -275,7 +276,49 @@ class MainWindow(QMainWindow):
         
         # Register MainWindow to listen to model data changes to rebuild the tree
         self.global_model.register_data_callback(self.populate_global_list)
+        
+        # Register MainWindow to listen to selection changes from the canvas ---
+        self.global_model.register_selection_callback(self.sync_global_list_selection)
     
+    def on_tab_changed(self, index):
+        """Handles QoL state changes when navigating between tabs."""
+        
+        # 1. Always sync the sidebar tool stack with the main canvas tab
+        self.tool_stack.setCurrentIndex(index)
+        
+        # 2. Moving TO Frangi (1) or Graph (2)
+        if index in [1, 2]:
+            # If no plant is selected, auto-select the first available one
+            if not self.global_model.active_uid and self.global_model.masks:
+                first_uid = sorted(self.global_model.masks.keys())[0]
+                self.global_model.set_selection([first_uid])
+                
+        # 3. Moving TO Annotation Tool (0)
+        elif index == 0:
+            # Drop whatever tool they were using and return to normal pointer
+            self.tool_panel_review.force_mode("SELECT")
+            
+            # If a plant is currently active, snap the camera to it
+            if self.global_model.active_uid:
+                self.canvas_review.zoom_to_plant(self.global_model.active_uid)
+    
+    def sync_global_list_selection(self):
+        """Visually updates the lateral bar to match the model's selection state."""
+        self.list_instances.blockSignals(True)
+        
+        for i in range(self.list_instances.topLevelItemCount()):
+            item = self.list_instances.topLevelItem(i)
+            uid = item.data(0, Qt.UserRole)
+            
+            # Highlight the item if it exists in the model's selected set
+            item.setSelected(uid in self.global_model.selected_uids)
+            
+            # Automatically scroll to the active plant so it's always in view
+            if uid == self.global_model.active_uid:
+                self.list_instances.scrollToItem(item)
+                
+        self.list_instances.blockSignals(False)
+          
     def on_global_list_selection_changed(self):
         """Updates the Model's single source of truth when the user clicks the list."""
         selected_items = self.list_instances.selectedItems()
@@ -312,9 +355,24 @@ class MainWindow(QMainWindow):
                 self.canvas_review.zoom_to_plant(uid)
                 
     def populate_global_list(self):
-        """Rebuilds the shared tree view when the model data changes."""
+        """Rebuilds or updates the shared tree view efficiently."""
         self.lbl_instance_count.setText(f"<b>PLANT INSTANCES ({len(self.global_model.masks)} Total):</b>")
         
+        current_uids = set(self.global_model.masks.keys())
+        existing_uids = {self.list_instances.topLevelItem(i).data(0, Qt.UserRole) for i in range(self.list_instances.topLevelItemCount())}
+        
+        if current_uids == existing_uids:
+            self.list_instances.setSortingEnabled(False)
+            for i in range(self.list_instances.topLevelItemCount()):
+                item = self.list_instances.topLevelItem(i)
+                uid = item.data(0, Qt.UserRole)
+                area = self.global_model.areas.get(uid, 0)
+                item.setText(1, f"{area:,}")
+                item.setData(1, Qt.UserRole, area)
+                
+            self.list_instances.setSortingEnabled(True)
+            return
+
         self.list_instances.blockSignals(True)
         self.list_instances.clearSelection()
         self.list_instances.setSortingEnabled(False)
@@ -333,12 +391,12 @@ class MainWindow(QMainWindow):
                 
             self.list_instances.addTopLevelItem(item)
             
-            # Reselect if it was previously selected
             if uid in self.global_model.selected_uids:
                 item.setSelected(True)
             
         self.list_instances.setSortingEnabled(True)
         self.list_instances.blockSignals(False)
+        self.list_instances.viewport().update()
 
     def action_new_instance(self):
         """Prepares a new ID and signals the tools to enter paint mode."""
@@ -367,8 +425,14 @@ class MainWindow(QMainWindow):
         
     def action_delete(self):
         if self.global_model.selected_uids:
-            self.global_model.delete_instances(list(self.global_model.selected_uids))
+            # 1. Capture the IDs we want to delete
+            uids_to_delete = list(self.global_model.selected_uids)
+            
+            # 2. Clear the UI selection FIRST to prevent ghosting
             self.global_model.set_selection([])
+            
+            # 3. Destroy the data and trigger the tree rebuild
+            self.global_model.delete_instances(uids_to_delete)
         
     def apply_tooltips(self):
         """Centralized location for all Main Window tooltips."""
@@ -446,19 +510,21 @@ class MainWindow(QMainWindow):
             # Spin up the background thread
             self.show_loading(f"Scanning directory stats...\n{self.current_dir}")
             
-            self.worker = ModelWorker(self.global_model.scan_directory, self.current_dir)
-            self.worker.finished.connect(self._on_scan_finished)
-            self.worker.error.connect(self._on_thread_error)
-            self.worker.start()
+            worker = ModelWorker(self.global_model.scan_directory, self.current_dir)
+            self.active_workers.add(worker)
+            worker.finished.connect(self._on_scan_finished)
+            worker.error.connect(self._on_thread_error)
+            worker.start()
 
     def _on_scan_finished(self, contents):
         """Receives data from thread, caches it, and triggers render."""
         self.hide_loading()
         
         # Clean up the worker
-        if hasattr(self, 'worker') and self.worker:
-            self.worker.deleteLater()
-            self.worker = None
+        worker = self.sender()
+        if worker in getattr(self, 'active_workers', set()):
+            self.active_workers.remove(worker)
+            worker.deleteLater()
             
         # Save to memory cache
         self.folder_cache[self.current_dir] = contents
@@ -551,21 +617,25 @@ class MainWindow(QMainWindow):
         
         self.show_loading(f"Loading {self.current_base_name}...\n(Parsing masks and NIfTI data)")
         
-        self.worker = ModelWorker(self.global_model.load_task, self.current_task_path, self.current_base_name)
-        self.worker.finished.connect(self._on_load_finished)
-        self.worker.error.connect(self._on_thread_error)
-        self.worker.start()
-
+        worker = ModelWorker(self.global_model.load_task, self.current_task_path, self.current_base_name)
+        self.active_workers.add(worker)
+        worker.finished.connect(self._on_load_finished)
+        worker.error.connect(self._on_thread_error)
+        worker.start()
+        
     def _on_load_finished(self, _):
         self.hide_loading()
         self.global_model.callbacks_muted = False
         
-        if hasattr(self, 'worker') and self.worker:
-            self.worker.deleteLater()
-            self.worker = None
+        worker = self.sender()
+        if worker in getattr(self, 'active_workers', set()):
+            self.active_workers.remove(worker)
+            worker.deleteLater()
             
         self.global_model._notify_data_changed() 
         self.setWindowTitle(f"ChronoRoot Annotation Suite | {self.current_base_name} [{self.global_model.status.upper()}]")
+        
+        self.populate_browser(force_refresh=True)
         
     # --- ASYNC SAVING ---
     def save_task(self, mark_finished=False):
@@ -577,36 +647,39 @@ class MainWindow(QMainWindow):
         # Store state to use in the callback
         self._pending_mark_finished = mark_finished 
         
-        self.worker = ModelWorker(self.global_model.save_current_task, self.current_task_path, self.current_base_name, mark_finished=mark_finished)
-        self.worker.finished.connect(self._on_save_finished)
-        self.worker.error.connect(self._on_thread_error)
-        self.worker.start()
+        worker = ModelWorker(self.global_model.save_current_task, self.current_task_path, self.current_base_name, mark_finished=mark_finished)
+        self.active_workers.add(worker)
+        worker.finished.connect(self._on_save_finished)
+        worker.error.connect(self._on_thread_error)
+        worker.start()
 
     def _on_save_finished(self, mapping):
         self.hide_loading()
         self.global_model.callbacks_muted = False
         
-        # Safely detach and schedule the thread for deletion
-        if hasattr(self, 'worker') and self.worker:
-            self.worker.deleteLater()
-            self.worker = None
+        worker = self.sender()
+        if worker in getattr(self, 'active_workers', set()):
+            self.active_workers.remove(worker)
+            worker.deleteLater()
         
         # If mapping is a dictionary, the save was successful
-        if mapping:
+        if mapping is not None:
             new_selection = [mapping[uid] for uid in self.global_model.selected_uids if uid in mapping]
             self.global_model.set_selection(new_selection)
             
             # Force the model to broadcast the changes to trigger a tree rebuild
             self.global_model._notify_data_changed()
-            
             self.setWindowTitle(f"ChronoRoot Annotation Suite | {self.current_base_name} [{self.global_model.status.upper()}]")
-            self.populate_browser(force_refresh=True)
             
+            # --- FIXED: Strictly serialize the next action to prevent orphaned dialogs ---
             if getattr(self, '_is_closing', False):
                 self.close() 
             elif getattr(self, '_pending_load_data', None):
-                self._execute_load(self._pending_load_data)
+                data_to_load = self._pending_load_data
                 self._pending_load_data = None
+                self._execute_load(data_to_load)
+            else:
+                self.populate_browser(force_refresh=True)
 
     def _on_thread_error(self, err_msg):
         self.hide_loading()

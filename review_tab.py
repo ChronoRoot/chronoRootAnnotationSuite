@@ -105,9 +105,10 @@ class PaintCanvas(BaseCanvas):
         self.mode = mode
         if mode != "SPLIT": self.clear_poly_visuals()
             
-        if mode == "SELECT":
+        if mode in ["SELECT", "GLOBAL"]:
             self.setCursor(Qt.ArrowCursor)
             if self.brush_cursor: self.brush_cursor.setVisible(False)
+        
         elif mode in ["PAINT", "SEMANTIC"]:
             self.setCursor(Qt.CrossCursor)
             if self.brush_cursor: self.brush_cursor.setVisible(True)
@@ -141,7 +142,7 @@ class PaintCanvas(BaseCanvas):
         if self.is_panning: return
         sp = self.mapToScene(event.pos())
         
-        if self.mode == "SELECT":
+        if self.mode in ["SELECT", "GLOBAL"]:
             if event.button() == Qt.LeftButton:
                 shift = (event.modifiers() & Qt.ShiftModifier)
                 self.on_click.emit(int(sp.x()), int(sp.y()), shift)
@@ -443,10 +444,6 @@ class ReviewCanvasTab(QWidget):
     def on_selection_changed(self):
         """Fires when the global selection state changes."""            
 
-        if self.model.active_uid is None:
-            if self.current_mode in ["PAINT", "SPLIT", "SEMANTIC"]:
-                self.set_mode(self.previous_view_mode)
-                
         self.update_info_label()
         self.refresh_canvas()
 
@@ -497,7 +494,11 @@ class ReviewToolPanel(QWidget):
         self.btn_split.setCheckable(True)
         self.btn_split.clicked.connect(lambda: self.toggle_mode("SPLIT"))
         sl.addWidget(self.btn_split)
-        
+
+        self.btn_split_parts = QPushButton("Split Separated Parts")
+        self.btn_split_parts.clicked.connect(self.action_split_parts)
+        sl.addWidget(self.btn_split_parts)
+
         self.btn_undo = QPushButton("Undo Last Action")
         self.btn_undo.clicked.connect(self.model.undo)
         sl.addWidget(self.btn_undo)
@@ -583,6 +584,7 @@ class ReviewToolPanel(QWidget):
         """Updates the enable/disable state of tools based on global selection."""
         has_active = self.model.active_uid is not None
         self.btn_semantic.setEnabled(has_active)
+        self.btn_split_parts.setEnabled(has_active) 
         
         # If selection was cleared and we were in a targeted mode, fallback
         if not has_active and self.canvas_tab.current_mode in ["PAINT", "SPLIT", "SEMANTIC"]:
@@ -599,3 +601,18 @@ class ReviewToolPanel(QWidget):
             item.setIcon(QIcon(pix))
             self.list_classes.addItem(item)
         self.list_classes.setCurrentRow(0)
+        
+    def action_split_parts(self):
+        uid = self.model.active_uid
+        if not uid:
+            QMessageBox.warning(self, "Selection Required", "Please select a plant first.")
+            return
+            
+        success = self.model.split_disconnected_components(uid)
+        if success:
+            # Clear selection to un-target the destroyed ID and show the new ones
+            self.model.set_selection([])
+            self.force_mode("SELECT")
+            self.canvas_tab.lbl_info.setText("Separated parts split successfully.")
+        else:
+            QMessageBox.information(self, "Split Parts", "No disconnected parts found in this plant.")

@@ -2,26 +2,13 @@ Bootstrap: docker
 From: condaforge/miniforge3
 
 %labels
-    Author PIRD_Team
-    Version v4.0_Conda
-    Description PIRD GUI using Conda (Rootless)
+    Author ChronoRoot Team
+    Version v1.0
+    Description ChronoRootAnnotationSuite using Conda (Named Env)
 
 %post
-    # 1. Configure Conda to use conda-forge (standard for scientific libs)
-    # This comes pre-configured in miniforge3, but good to be explicit
-    conda config --set channel_priority strict
-
-    # 2. Install all dependencies via Conda
-    # Conda packages include the binary system libraries (X11, GL, Qt) 
-    # inside the environment, bypassing the need for apt-get/root.
-    # We install:
-    # - python 3.10
-    # - pyqt (includes Qt5 binaries)
-    # - opencv (includes libraries)
-    # - nibabel, scipy (standard deps)
-    # - mesalib (provides libGL.so without root)
-    
-    conda install -y python=3.10 \
+    # 1. Create a named environment ('chronoroot') instead of using base.
+    conda create -y -n chronoRootAnnotation python=3.10 \
         numpy \
         opencv \
         nibabel \
@@ -34,18 +21,17 @@ From: condaforge/miniforge3
         xorg-libxi \
         scikit-image
 
-    # Clean up to reduce image size
+    # 2. Clean up to reduce image size
     conda clean -afy
 
 %environment
-    # Ensure the container uses the Conda environment
-    export PATH=/opt/conda/bin:$PATH
+    # Point the PATH directly to the new named environment's bin folder
+    export PATH=/opt/conda/envs/chronoRootAnnotation/bin:$PATH
     
-    # QT Configuration to ensure it finds the Conda-installed libraries
     export QT_X11_NO_MITSHM=1
     export LC_ALL=C.UTF-8
     export LANG=C.UTF-8
 
 %runscript
-    echo "Starting PIRD (Conda Environment)..."
+    echo "Starting ChronoRoot Annotation Suite (Environment: chronoRootAnnotation)..."
     exec python "$@"

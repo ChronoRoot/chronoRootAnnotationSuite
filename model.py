@@ -643,19 +643,16 @@ class PlantImageModel:
         sub_labels, num_features = label(roi, structure=np.ones((3,3)))
         
         if num_features > 1:
-            # --- NEW: Filter valid components to eliminate spurious cut pixels ---
             valid_components = []
             for i in range(1, num_features + 1):
                 component_mask = (sub_labels == i).astype(np.uint8)
                 coords = cv2.findNonZero(component_mask)
                 if coords is not None:
                     _, _, bw, bh = cv2.boundingRect(coords)
-                    # Only keep components larger than a 2x2 area
                     if bw >= 3 and bh >= 3:
                         valid_components.append(component_mask)
             
             if len(valid_components) > 1:
-                # True Split: We got 2+ valid pieces. Delete original and create new IDs.
                 self.masks.pop(target_id, None)
                 self.bboxes.pop(target_id, None)
 
@@ -667,27 +664,70 @@ class PlantImageModel:
                     self.update_metadata_for_uid(self.max_id) 
                     
                 self.dirty = True
+                self._notify_data_changed() 
                 return True
                 
             elif len(valid_components) == 1:
-                # Edge Case: The split cut off a speck, but only 1 valid plant remained.
-                # Treat this as an "erase/trim" operation. Keep the original ID!
                 new_mask = np.zeros_like(full_mask)
                 new_mask[y1:y2, x1:x2] = valid_components[0]
                 self.masks[target_id] = new_mask
                 if target_id in self.class_patches: del self.class_patches[target_id]
                 self.update_metadata_for_uid(target_id)
                 self.dirty = True
+                self._notify_data_changed() 
                 return True
                 
             else:
-                # Everything was tiny? Abort.
                 self.undo() 
                 return False
         else:
             self.undo() 
             return False
 
+    def split_disconnected_components(self, target_id):
+        """Scans a mask for disconnected parts and splits them automatically without a line cut."""
+        if target_id not in self.masks: return False
+        
+        full_mask = self.masks[target_id]
+        
+        # Optimize by working only within the bounding box
+        x, y, w, h = self.bboxes[target_id]
+        pad = 2
+        x1, y1 = max(0, x-pad), max(0, y-pad)
+        x2, y2 = min(full_mask.shape[1], x+w+pad), min(full_mask.shape[0], y+h+pad)
+        roi = full_mask[y1:y2, x1:x2]
+        
+        sub_labels, num_features = label(roi, structure=np.ones((3,3)))
+        
+        valid_components = []
+        if num_features > 1:
+            for i in range(1, num_features + 1):
+                component_mask = (sub_labels == i).astype(np.uint8)
+                coords = cv2.findNonZero(component_mask)
+                if coords is not None:
+                    _, _, bw, bh = cv2.boundingRect(coords)
+                    if bw >= 3 and bh >= 3:
+                        valid_components.append(component_mask)
+                        
+        if len(valid_components) > 1:
+            self.save_state(target_uids=target_id)
+            self.masks.pop(target_id, None)
+            self.bboxes.pop(target_id, None)
+            if target_id in self.class_patches: del self.class_patches[target_id]
+            
+            for comp in valid_components:
+                self.max_id += 1
+                new_mask = np.zeros_like(full_mask)
+                new_mask[y1:y2, x1:x2] = comp
+                self.masks[self.max_id] = new_mask
+                self.update_metadata_for_uid(self.max_id)
+                
+            self.dirty = True
+            self._notify_data_changed()
+            return True
+            
+        return False
+    
     def delete_instances(self, ids):
         if not ids: return
         

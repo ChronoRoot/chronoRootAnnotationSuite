@@ -2,35 +2,41 @@ import cv2
 import numpy as np
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QGridLayout, 
                              QPushButton, QLabel, QSpinBox, QDoubleSpinBox, 
-                             QCheckBox, QComboBox, QFormLayout)
-from PyQt5.QtGui import QImage, QPixmap, QColor
+                             QCheckBox, QComboBox, QFormLayout, QStyleOption, QStyle, QSizePolicy)
+from PyQt5.QtGui import QImage, QPixmap, QColor, QPainter
 from PyQt5.QtCore import Qt
 
 from skimage.filters import frangi, apply_hysteresis_threshold
 from skimage.morphology import skeletonize
 from scipy.ndimage import label, distance_transform_edt
 
-class AspectRatioLabel(QLabel):
+# --- FIXED: Upgraded to QWidget with manual paintEvent to stop UI bouncing ---
+class AspectRatioLabel(QWidget):
     def __init__(self):
         super().__init__()
-        self.setMinimumSize(100, 100)
+        self.setMinimumSize(10, 10)
         self._pixmap = None
-        self.setAlignment(Qt.AlignCenter)
-        self.setStyleSheet("background-color: #1e1e1e; border: 1px solid #444;")
+        
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        
+        self.setStyleSheet("background-color: transparent;") 
 
     def setPixmap(self, pixmap):
         self._pixmap = pixmap
-        self.update_scaled_pixmap()
+        self.update() 
 
-    def resizeEvent(self, event):
-        self.update_scaled_pixmap()
-        super().resizeEvent(event)
-
-    def update_scaled_pixmap(self):
-        if self._pixmap and not self.size().isEmpty():
-            super().setPixmap(self._pixmap.scaled(self.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
-        else:
-            super().setPixmap(QPixmap())
+    def paintEvent(self, event):
+        opt = QStyleOption()
+        opt.initFrom(self)
+        p = QPainter(self)
+        self.style().drawPrimitive(QStyle.PE_Widget, opt, p, self)
+        
+        if self._pixmap and not self._pixmap.isNull():
+            rect = self.contentsRect()
+            scaled_pixmap = self._pixmap.scaled(rect.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            x = int((rect.width() - scaled_pixmap.width()) / 2)
+            y = int((rect.height() - scaled_pixmap.height()) / 2)
+            p.drawPixmap(x, y, scaled_pixmap)
 
 # ==========================================
 # 1. THE MAIN VIEWPORT (CANVAS)
@@ -236,28 +242,24 @@ class FrangiCanvasTab(QWidget):
         vesselness = frangi(gray_crop, black_ridges=self.p_roots_dark, sigmas=(1, 10, 1))
         vesselness[search_mask == 0] = 0 
         
-        # --- UPDATED: Hard clip at 0.5 to make thresholds absolute and predictable ---
         vesselness_clipped = np.clip(vesselness, 0.0, 0.5)
-        
-        # Normalize the 0.0 -> 0.5 range to a 0.0 -> 1.0 range for the heatmap/thresholds
         vesselness_norm = vesselness_clipped / 0.5
         
-        # --- Build the Heatmap for Panel 3 with Dedicated Padding ---
+        # --- FIXED: Mathematical bounds for colorbar to prevent shape mismatch crashes ---
         vessel_8u = (vesselness_norm * 255).astype(np.uint8)
         heatmap_bgr = cv2.applyColorMap(vessel_8u, cv2.COLORMAP_JET)
         heatmap_rgb_base = cv2.cvtColor(heatmap_bgr, cv2.COLOR_BGR2RGB)
         
-        # Pad the right side by 60 pixels to guarantee space for the colorbar
         ch, cw = heatmap_rgb_base.shape[:2]
         pad_w = 40
         heatmap_rgb = np.zeros((ch, cw + pad_w, 3), dtype=np.uint8)
         heatmap_rgb[:, :cw] = heatmap_rgb_base
         
-        # Draw a mini colorbar in the new padded area
         cb_w = 10
-        cb_h = min(150, max(30, ch - 10)) # Scale to fit available height, max 150px
+        # Dynamically clamp the colorbar height to guarantee it is strictly smaller than the image height
+        cb_h = max(1, min(150, ch - 4)) 
         cb_x = cw + 5
-        cb_y = max(5, (ch - cb_h) // 2) # Center it vertically
+        cb_y = (ch - cb_h) // 2 
 
         grad = np.linspace(255, 0, cb_h, dtype=np.uint8).reshape(-1, 1)
         grad_color = cv2.applyColorMap(np.tile(grad, (1, cb_w)), cv2.COLORMAP_JET)
@@ -266,10 +268,9 @@ class FrangiCanvasTab(QWidget):
         heatmap_rgb[cb_y:cb_y+cb_h, cb_x:cb_x+cb_w] = grad_rgb
         cv2.rectangle(heatmap_rgb, (cb_x, cb_y), (cb_x+cb_w, cb_y+cb_h), (255, 255, 255), 1)
         
-        # Label the scale to the right of the colorbar
         cv2.putText(heatmap_rgb, "0.5", (cb_x + cb_w + 5, cb_y + 10), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 255), 1)
         cv2.putText(heatmap_rgb, "0.0", (cb_x + cb_w + 5, cb_y + cb_h), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 255), 1)
-        # ------------------------------------------------------------
+        # --------------------------------------------------------------------------------
 
         binary_vessels = apply_hysteresis_threshold(vesselness_norm, self.p_faint_sens, self.p_strong_conf)
         labeled_frangi, num_frangi = label(binary_vessels, structure=np.ones((3,3)))
@@ -281,7 +282,6 @@ class FrangiCanvasTab(QWidget):
                 
         labeled_valid, num_valid = label(core_fragments, structure=np.ones((3,3)))
 
-        # --- SMART REFINEMENT (Formerly Hybrid) ---
         if num_valid <= 1: 
             proposed_blob = core_fragments.copy()
         else:
