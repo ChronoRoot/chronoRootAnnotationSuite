@@ -83,7 +83,7 @@ class GraphCanvasTab(QWidget):
         
         self.crop_x = 0
         self.crop_y = 0
-        self.dim_rgb = None
+        self.base_rgb = None
         self.mc_skel_bin = None
         self.actual_base = None
         self.mask_crop = None
@@ -232,10 +232,14 @@ class GraphCanvasTab(QWidget):
         self.mask_crop = mask[self.crop_y:y2, self.crop_x:x2]
         
         rgb_crop = self.model.raw_image[self.crop_y:y2, self.crop_x:x2].copy()
-        self.dim_rgb = rgb_crop.copy() // 2
+        self.base_rgb = rgb_crop.copy() 
         self.lbl_orig.setPixmap(self.numpy_to_qpixmap(rgb_crop))
         
-        sem_vis = self.dim_rgb.copy()
+        # --- NEW: Alpha Blended Semantic Overlay ---
+        sem_vis = self.base_rgb.copy()
+        overlay_sem = np.zeros_like(self.base_rgb)
+        active_mask = np.zeros(self.base_rgb.shape[:2], dtype=bool)
+        
         bin_crop = mask[y_off:y_off+patch.shape[0], x_off:x_off+patch.shape[1]]
         for cid, color in self.model.class_colors.items():
             if cid != 0:
@@ -243,9 +247,17 @@ class GraphCanvasTab(QWidget):
                 p_y, p_x = np.where(active)
                 global_y, global_x = p_y + y_off, p_x + x_off
                 valid = (global_y >= self.crop_y) & (global_y < y2) & (global_x >= self.crop_x) & (global_x < x2)
-                sem_vis[global_y[valid] - self.crop_y, global_x[valid] - self.crop_x] = color[:3]
+                
+                vy, vx = global_y[valid] - self.crop_y, global_x[valid] - self.crop_x
+                overlay_sem[vy, vx] = color[:3]
+                active_mask[vy, vx] = True
+                
+        alpha = 0.5  # 50% transparency
+        for c in range(3):
+            sem_vis[active_mask, c] = (self.base_rgb[active_mask, c] * (1 - alpha) + overlay_sem[active_mask, c] * alpha).astype(np.uint8)
                 
         self.lbl_sem.setPixmap(self.numpy_to_qpixmap(sem_vis))
+        # -------------------------------------------
         
         root_bin_canvas = np.zeros((img_h, img_w), dtype=np.uint8)
         for cid in [1, 2]:
@@ -255,7 +267,8 @@ class GraphCanvasTab(QWidget):
             
         full_skel, branches, endpoints, is_valid = extract_skeleton(root_bin_canvas, self.p_prune)
         
-        skel_vis = self.dim_rgb.copy()
+        # Skeleton drawn directly over full-brightness image
+        skel_vis = self.base_rgb.copy()
         skel_crop = full_skel[self.crop_y:y2, self.crop_x:x2]
         skel_vis[skel_crop > 0] = [255, 255, 255]
         self.lbl_skel.setPixmap(self.numpy_to_qpixmap(skel_vis))
@@ -328,6 +341,13 @@ class GraphCanvasTab(QWidget):
             auto_start = tuple(self.actual_base) if self.actual_base else None
             auto_end = max(self.current_graph.nodes, key=lambda n: n[1]) if self.current_graph.nodes else None
 
+        if self.user_start_node and self.user_start_node not in self.current_graph:
+            self.user_start_node = None
+        if self.user_end_node and self.user_end_node not in self.current_graph:
+            self.user_end_node = None
+            
+        self.user_waypoints = [wp for wp in self.user_waypoints if wp in self.current_graph]
+        
         start_node = self.user_start_node if self.user_start_node else auto_start
         end_node = self.user_end_node if self.user_end_node else auto_end
 
@@ -363,7 +383,7 @@ class GraphCanvasTab(QWidget):
             else:
                 self.current_graph.edges[u, v]['root_type'] = 2
                 
-        graph_vis = self.dim_rgb.copy()
+        graph_vis = self.base_rgb.copy() # <--- CHANGED
         
         for u, v, data in self.current_graph.edges(data=True):
             r_type = data.get('root_type', 0)
@@ -386,12 +406,22 @@ class GraphCanvasTab(QWidget):
                 
         self.lbl_graph.setPixmap(self.numpy_to_qpixmap(graph_vis))
         
-        preview_vis = self.dim_rgb.copy()
+        # --- NEW: Alpha Blended Preview Overlay ---
+        preview_vis = self.base_rgb.copy() 
+        overlay_prev = np.zeros_like(self.base_rgb)
+        active_mask_prev = np.zeros(self.base_rgb.shape[:2], dtype=bool)
+        
         recolored_semantic = self._calculate_recolored_segmentation()
         cls_colors = {1: [255, 0, 0], 2: [0, 255, 0]}
         
         for cid in [1, 2]:
-            preview_vis[recolored_semantic == cid] = cls_colors[cid]
+            mask = recolored_semantic == cid
+            overlay_prev[mask] = cls_colors[cid]
+            active_mask_prev[mask] = True
+            
+        alpha = 0.5 # 50% transparency
+        for c in range(3):
+            preview_vis[active_mask_prev, c] = (self.base_rgb[active_mask_prev, c] * (1 - alpha) + overlay_prev[active_mask_prev, c] * alpha).astype(np.uint8)
             
         self.lbl_preview.setPixmap(self.numpy_to_qpixmap(preview_vis))
 

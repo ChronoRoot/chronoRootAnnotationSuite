@@ -119,10 +119,16 @@ class PlantImageModel:
             if os.path.isdir(full_path):
                 total, in_progress, completed = 0, 0, 0
                 for root, _, files in os.walk(full_path):
+                    processed_bases = set()
                     for f in files:
-                        if f.endswith('.nii.gz') and f.replace('.nii.gz', '.png') in files:
+                        # Make extension checking case-insensitive
+                        if f.lower().endswith(('.png', '.jpg', '.jpeg')):
+                            base = os.path.splitext(f)[0]
+                            if base in processed_bases: continue
+                            processed_bases.add(base)
+                            
                             total += 1
-                            json_path = os.path.join(root, f.replace('.nii.gz', '.json'))
+                            json_path = os.path.join(root, base + '.json')
                             if os.path.exists(json_path):
                                 try:
                                     with open(json_path, 'r') as jf:
@@ -137,29 +143,55 @@ class PlantImageModel:
                 })
 
         # 2. Files
+        processed_bases = set()
         for item_name in items:
-            if item_name.endswith('.nii.gz'):
-                base = item_name.replace('.nii.gz', '')
-                if (base + '.png') in items:
-                    full_path = os.path.join(folder_path, item_name)
-                    json_path = os.path.join(folder_path, base + ".json")
-                    status = "Pending"
-                    
-                    if os.path.exists(json_path):
-                        try:
-                            with open(json_path, 'r') as f:
-                                st = json.load(f).get("status", "in_progress")
-                                status = "Completed" if st == "completed" else "In Progress"
-                        except: pass
+            # Anchor the search on image files, not the .nii.gz files!
+            if item_name.lower().endswith(('.png', '.jpg', '.jpeg')):
+                base = os.path.splitext(item_name)[0]
+                
+                # Prevent duplicate entries if a folder has both plant.png and plant.jpg
+                if base in processed_bases: continue
+                processed_bases.add(base)
+                
+                full_path = os.path.join(folder_path, item_name)
+                json_path = os.path.join(folder_path, base + ".json")
+                status = "Pending"
+                plant_count = 0  # <--- NEW: Initialize plant count
+                
+                # Determine status based on the existence of companion files
+                if os.path.exists(json_path):
+                    try:
+                        with open(json_path, 'r') as f:
+                            data = json.load(f)  # <--- CHANGED: Load the full JSON into a variable
+                            st = data.get("status", "in_progress")
+                            status = "Completed" if st == "completed" else "In Progress"
+                            
+                            # <--- NEW: Count the annotations to get the number of plants
+                            plant_count = len(data.get("annotations", [])) 
+                    except: pass
+                else:
+                    # If there's no JSON, but a .nii.gz exists, it's technically in progress
+                    nii_path = os.path.join(folder_path, base + ".nii.gz")
+                    if os.path.exists(nii_path):
+                        status = "Pending"
+                        # Note: We leave plant_count at 0 here. Opening a NIfTI file 
+                        # just to count instances during a folder scan would be too slow.
                         
-                    contents.append({
-                        "type": "file", "name": base, "path": full_path, "status": status
-                    })
+                contents.append({
+                    "type": "file", 
+                    "name": base, 
+                    "path": full_path, 
+                    "status": status,
+                    "plant_count": plant_count  # <--- NEW: Expose it to the GUI
+                })
+                
         return contents
 
     def load_task(self, task_path, base_name):
-        """Loads all required files and pre-caches heavy data."""
-        
+        # --- NEW: Sanitize base_name to strip accidental extensions ---
+        if base_name.lower().endswith(('.png', '.jpg', '.jpeg')):
+            base_name = os.path.splitext(base_name)[0]
+            
         # 1. ABSOLUTE MEMORY WIPE
         self.image_path = None
         self.raw_image = None       
@@ -175,12 +207,24 @@ class PlantImageModel:
         
         # 2. LOAD NEW DATA
         self.status = "pending"
-        self.image_path = os.path.join(task_path, f"{base_name}.png")
+        self.image_path = None
+        
+        valid_extensions = ['.png', '.jpg', '.jpeg', '.PNG', '.JPG', '.JPEG']
+        
+        for ext in valid_extensions:
+            potential_path = os.path.join(task_path, f"{base_name}{ext}")
+            if os.path.exists(potential_path):
+                self.image_path = potential_path
+                break
+                
+        if self.image_path is None:
+            raise FileNotFoundError(f"Missing image for task '{base_name}' in '{task_path}'.")
+                
         nii_path = os.path.join(task_path, f"{base_name}.nii.gz")
         json_path = os.path.join(task_path, f"{base_name}.json")
         
         img_bgr = cv2.imread(self.image_path)
-        if img_bgr is None: raise FileNotFoundError(f"Missing PNG: {self.image_path}")
+        if img_bgr is None: raise FileNotFoundError(f"Missing image: {self.image_path}")
         self.raw_image = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
         h, w = self.raw_image.shape[:2]
         

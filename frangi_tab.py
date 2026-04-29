@@ -61,6 +61,8 @@ class FrangiCanvasTab(QWidget):
         self.p_smooth_mode = "Medium"
         self.p_clahe_mode = "None"  
         
+        self.p_centerline_correction = True
+        
         self.proposed_full_mask = None
         self.proposed_tight_patch = None
         self.proposed_x = 0; self.proposed_y = 0
@@ -239,13 +241,15 @@ class FrangiCanvasTab(QWidget):
         if self.p_search_range > 0: search_mask = cv2.dilate(mask_crop, kernel, iterations=self.p_search_range)
         else: search_mask = mask_crop.copy()
         
-        vesselness = frangi(gray_crop, black_ridges=self.p_roots_dark, sigmas=(1, 10, 1))
-        vesselness[search_mask == 0] = 0 
-        
-        vesselness_clipped = np.clip(vesselness, 0.0, 0.5)
-        vesselness_norm = vesselness_clipped / 0.5
-        
-        # --- FIXED: Mathematical bounds for colorbar to prevent shape mismatch crashes ---
+        if self.p_centerline_correction:
+            vesselness = frangi(gray_crop, black_ridges=self.p_roots_dark, sigmas=(1, 10, 1))
+            vesselness[search_mask == 0] = 0 
+            vesselness_clipped = np.clip(vesselness, 0.0, 0.5)
+            vesselness_norm = vesselness_clipped / 0.5
+        else:
+            # If disabled, pass a dummy zero-array so the heatmap renders blank/blue safely
+            vesselness_norm = np.zeros(gray_crop.shape, dtype=np.float32)
+
         vessel_8u = (vesselness_norm * 255).astype(np.uint8)
         heatmap_bgr = cv2.applyColorMap(vessel_8u, cv2.COLORMAP_JET)
         heatmap_rgb_base = cv2.cvtColor(heatmap_bgr, cv2.COLOR_BGR2RGB)
@@ -256,7 +260,6 @@ class FrangiCanvasTab(QWidget):
         heatmap_rgb[:, :cw] = heatmap_rgb_base
         
         cb_w = 10
-        # Dynamically clamp the colorbar height to guarantee it is strictly smaller than the image height
         cb_h = max(1, min(150, ch - 4)) 
         cb_x = cw + 5
         cb_y = (ch - cb_h) // 2 
@@ -270,40 +273,43 @@ class FrangiCanvasTab(QWidget):
         
         cv2.putText(heatmap_rgb, "0.5", (cb_x + cb_w + 5, cb_y + 10), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 255), 1)
         cv2.putText(heatmap_rgb, "0.0", (cb_x + cb_w + 5, cb_y + cb_h), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 255), 1)
-        # --------------------------------------------------------------------------------
-
-        binary_vessels = apply_hysteresis_threshold(vesselness_norm, self.p_faint_sens, self.p_strong_conf)
-        labeled_frangi, num_frangi = label(binary_vessels, structure=np.ones((3,3)))
-        sizes = np.bincount(labeled_frangi.ravel()); sizes[0] = 0
         
-        core_fragments = np.zeros_like(binary_vessels, dtype=np.uint8)
-        for i in range(1, num_frangi + 1):
-            if sizes[i] >= self.p_min_part: core_fragments[labeled_frangi == i] = 1
-                
-        labeled_valid, num_valid = label(core_fragments, structure=np.ones((3,3)))
-
-        if num_valid <= 1: 
-            proposed_blob = core_fragments.copy()
-        else:
-            bridge_kernel = np.ones((3, 3), np.uint8)
-            seen_dilations = np.zeros_like(core_fragments)
-            bridge_seeds = np.zeros_like(core_fragments)
+        if self.p_centerline_correction:
+            binary_vessels = apply_hysteresis_threshold(vesselness_norm, self.p_faint_sens, self.p_strong_conf)
+            labeled_frangi, num_frangi = label(binary_vessels, structure=np.ones((3,3)))
+            sizes = np.bincount(labeled_frangi.ravel()); sizes[0] = 0
             
-            for i in range(1, num_valid + 1):
-                comp_mask = (labeled_valid == i).astype(np.uint8)
-                dilated_comp = cv2.dilate(comp_mask, bridge_kernel, iterations=self.p_bridge_gaps)
-                intersection = cv2.bitwise_and(dilated_comp, seen_dilations)
-                bridge_seeds = cv2.bitwise_or(bridge_seeds, intersection)
-                seen_dilations = cv2.bitwise_or(seen_dilations, dilated_comp)
-                
-            if np.sum(bridge_seeds) > 0:
-                local_bridges = cv2.dilate(bridge_seeds, bridge_kernel, iterations=self.p_bridge_gaps)
-                local_bridges = cv2.bitwise_and(local_bridges, search_mask) 
-                proposed_blob = cv2.bitwise_or(core_fragments, local_bridges)
-            else: 
+            core_fragments = np.zeros_like(binary_vessels, dtype=np.uint8)
+            for i in range(1, num_frangi + 1):
+                if sizes[i] >= self.p_min_part: core_fragments[labeled_frangi == i] = 1
+                    
+            labeled_valid, num_valid = label(core_fragments, structure=np.ones((3,3)))
+
+            if num_valid <= 1: 
                 proposed_blob = core_fragments.copy()
+            else:
+                bridge_kernel = np.ones((3, 3), np.uint8)
+                seen_dilations = np.zeros_like(core_fragments)
+                bridge_seeds = np.zeros_like(core_fragments)
                 
-        proposed_skeleton = skeletonize(proposed_blob).astype(np.uint8)
+                for i in range(1, num_valid + 1):
+                    comp_mask = (labeled_valid == i).astype(np.uint8)
+                    dilated_comp = cv2.dilate(comp_mask, bridge_kernel, iterations=self.p_bridge_gaps)
+                    intersection = cv2.bitwise_and(dilated_comp, seen_dilations)
+                    bridge_seeds = cv2.bitwise_or(bridge_seeds, intersection)
+                    seen_dilations = cv2.bitwise_or(seen_dilations, dilated_comp)
+                    
+                if np.sum(bridge_seeds) > 0:
+                    local_bridges = cv2.dilate(bridge_seeds, bridge_kernel, iterations=self.p_bridge_gaps)
+                    local_bridges = cv2.bitwise_and(local_bridges, search_mask) 
+                    proposed_blob = cv2.bitwise_or(core_fragments, local_bridges)
+                else: 
+                    proposed_blob = core_fragments.copy()
+        else:
+            # If disabled, use the original mask to enforce strict uniform width
+            proposed_blob = mask_crop.copy()
+                
+        proposed_skeleton = skeletonize(proposed_blob > 0).astype(np.uint8)
         proposed_mask_raw = cv2.dilate(proposed_skeleton, kernel, iterations=self.p_final_thick)
         
         if not self.p_allow_disconnected and np.sum(proposed_mask_raw) > 0:
@@ -394,6 +400,10 @@ class FrangiToolPanel(QWidget):
         layout.addLayout(form)
         
         # --- Checkboxes ---
+        self.chk_correction = QCheckBox("Apply Centerline Correction")
+        self.chk_correction.setChecked(self.canvas_tab.p_centerline_correction)
+        layout.addWidget(self.chk_correction)
+
         self.chk_dark = QCheckBox("Dark Roots")
         self.chk_dark.setChecked(self.canvas_tab.p_roots_dark)
         layout.addWidget(self.chk_dark)
@@ -401,9 +411,7 @@ class FrangiToolPanel(QWidget):
         self.chk_disconnected = QCheckBox("Allow Disconnected Parts")
         self.chk_disconnected.setChecked(self.canvas_tab.p_allow_disconnected)
         layout.addWidget(self.chk_disconnected)
-        
-        layout.addSpacing(5)
-        
+                
         # --- Dropdowns ---
         layout.addWidget(QLabel("Image Mode:"))
         self.cb_channel = QComboBox()
@@ -435,6 +443,7 @@ class FrangiToolPanel(QWidget):
         self.cb_channel.currentIndexChanged.connect(self.push_params)
         self.cb_clahe.currentIndexChanged.connect(self.push_params)
         self.cb_smooth.currentIndexChanged.connect(self.push_params)
+        self.chk_correction.stateChanged.connect(self.push_params)
         
         layout.addStretch()
 
@@ -454,6 +463,7 @@ class FrangiToolPanel(QWidget):
         self.canvas_tab.p_faint_sens = self.sp_f_low.value()
         self.canvas_tab.p_strong_conf = self.sp_f_high.value()
         self.canvas_tab.p_final_thick = self.sp_thick.value()
+        self.canvas_tab.p_centerline_correction = self.chk_correction.isChecked()
         self.canvas_tab.p_roots_dark = self.chk_dark.isChecked()
         self.canvas_tab.p_allow_disconnected = self.chk_disconnected.isChecked()
         self.canvas_tab.p_channel_mode = self.cb_channel.currentText()

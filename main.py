@@ -84,6 +84,46 @@ class FolderStatsWidget(QWidget):
             self.bar = HeightProgressBar(total, in_progress, completed)
             layout.addWidget(self.bar)
 
+class FileStatsWidget(QWidget):
+    def __init__(self, name, status, plant_count):
+        super().__init__()
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(5, 5, 5, 5)
+        layout.setSpacing(2)
+        
+        # Top Row: Icon + Name
+        top_row = QHBoxLayout()
+        icon_label = QLabel()
+        
+        # Set icon based on status
+        if status == "Completed":
+            icon = QApplication.style().standardIcon(QStyle.SP_DialogApplyButton)
+        else:
+            icon = QApplication.style().standardIcon(QStyle.SP_FileIcon)
+            
+        icon_label.setPixmap(icon.pixmap(16, 16))
+        
+        name_label = QLabel(name)
+        
+        top_row.addWidget(icon_label)
+        top_row.addWidget(name_label)
+        top_row.addStretch()
+        layout.addLayout(top_row)
+        
+        # Bottom Row: Stats Text
+        stats_txt = f"Status: {status} | Nº Plants: {plant_count}"
+        lbl_stats = QLabel(stats_txt)
+        
+        # Color code the stats text based on the status
+        if status == "Completed":
+            lbl_stats.setStyleSheet("color: #28a745; font-size: 10px; font-weight: bold;") # Green
+        elif status == "In Progress":
+            lbl_stats.setStyleSheet("color: #d68910; font-size: 10px; font-weight: bold;") # Orange
+        else:
+            lbl_stats.setStyleSheet("color: gray; font-size: 10px;") # Gray for Pending
+            
+        layout.addWidget(lbl_stats)
+        
 # Helper for the colored bar
 class HeightProgressBar(QWidget):
     def __init__(self, total, prog, comp):
@@ -200,7 +240,7 @@ class MainWindow(QMainWindow):
         self.list_instances.setSortingEnabled(True)
         self.list_instances.setRootIsDecorated(False)
         self.list_instances.setSelectionMode(QTreeWidget.ExtendedSelection)
-        self.list_instances.setFixedHeight(400) # Keep it compact
+        self.list_instances.setFixedHeight(300) # Keep it compact
         
         self.list_instances.header().setSectionResizeMode(0, QHeaderView.ResizeToContents)
         self.list_instances.header().setSectionResizeMode(1, QHeaderView.Stretch)
@@ -530,6 +570,70 @@ class MainWindow(QMainWindow):
         self.folder_cache[self.current_dir] = contents
         self._render_browser_contents(contents)
 
+    def update_file_status_in_cache(self, file_path, new_status, new_plant_count=None):
+        """Surgically updates the cache for a single file and propagates the changes upwards instantly."""
+        file_dir = os.path.dirname(file_path)
+        
+        # 1. Update the actual file entry and determine the progress deltas
+        delta_in_progress = 0
+        delta_completed = 0
+        
+        if file_dir in self.folder_cache:
+            for item in self.folder_cache[file_dir]:
+                if item["type"] == "file" and item["path"] == file_path:
+                    old_status = item["status"]
+                    old_plant_count = item.get("plant_count", 0)
+                    
+                    # Check if anything actually changed
+                    status_changed = (old_status != new_status)
+                    count_changed = (new_plant_count is not None and old_plant_count != new_plant_count)
+                    
+                    if not status_changed and not count_changed:
+                        return # Nothing changed, do nothing
+                    
+                    # Apply updates to the cache
+                    item["status"] = new_status
+                    if new_plant_count is not None:
+                        item["plant_count"] = new_plant_count
+                    
+                    # Calculate the math for the progress bars (Only if status changed)
+                    if status_changed:
+                        if old_status == "Pending" and new_status == "In Progress":
+                            delta_in_progress = 1
+                        elif old_status == "Pending" and new_status == "Completed":
+                            delta_completed = 1
+                        elif old_status == "In Progress" and new_status == "Completed":
+                            delta_in_progress = -1
+                            delta_completed = 1
+                        elif old_status == "Completed" and new_status == "In Progress":
+                            delta_completed = -1
+                            delta_in_progress = 1
+                    break
+            else:
+                return # File not found in cache
+        else:
+            return # Directory not cached
+
+        # 2. Propagate deltas upwards ONLY if there is a change in status
+        if delta_in_progress != 0 or delta_completed != 0:
+            current_iter_dir = file_dir
+            while True:
+                parent_dir = os.path.dirname(current_iter_dir)
+                if parent_dir in self.folder_cache:
+                    for item in self.folder_cache[parent_dir]:
+                        if item["type"] == "dir" and item["path"] == current_iter_dir:
+                            item["in_progress"] += delta_in_progress
+                            item["completed"] += delta_completed
+                            break
+                
+                # Stop if we've reached the user's root or the system root
+                if current_iter_dir == self.root_dir or parent_dir == current_iter_dir:
+                    break
+                current_iter_dir = parent_dir
+            
+        # 3. Instantly re-render the current view from the modified cache (No rescan!)
+        self.populate_browser(force_refresh=False)
+        
     def _render_browser_contents(self, contents):
         """Handles the actual UI widget creation (must run on main thread)."""
         self.task_list.clearSelection() 
@@ -550,21 +654,15 @@ class MainWindow(QMainWindow):
                 list_item = QListWidgetItem()
                 list_item.setData(Qt.UserRole, {"type": "file", "path": item["path"]})
                 
-                display_text = f"{item['name']}   [{item['status']}]"
-                list_item.setText(display_text)
+                # Use .get() to safely grab the plant count, defaulting to 0 if missing
+                plant_count = item.get("plant_count", 0) 
                 
-                if item["status"] == "Completed":
-                    icon = self.style().standardIcon(QStyle.SP_DialogApplyButton)
-                    list_item.setForeground(QBrush(QColor("green")))
-                elif item["status"] == "In Progress":
-                    icon = self.style().standardIcon(QStyle.SP_FileIcon)
-                    list_item.setForeground(QBrush(QColor("#d68910")))
-                else:
-                    icon = self.style().standardIcon(QStyle.SP_FileIcon)
-                    list_item.setForeground(QBrush(Qt.gray))
-                    
-                list_item.setIcon(icon)
+                # Use our new custom widget for files
+                widget = FileStatsWidget(item["name"], item["status"], plant_count)
+                list_item.setSizeHint(widget.sizeHint())
+                
                 self.task_list.addItem(list_item)
+                self.task_list.setItemWidget(list_item, widget)
 
     def on_item_double_clicked(self, item):
         data = item.data(Qt.UserRole)
@@ -596,7 +694,7 @@ class MainWindow(QMainWindow):
             reply = QMessageBox.question(self, 'Save?', 'Save changes?', QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel)
             if reply == QMessageBox.Yes:
                 # Store the RAW DATA, not the UI item
-                self._pending_load_data = data 
+                self._pending_load_data = data  
                 self.save_task(mark_finished=False)
                 return 
             elif reply == QMessageBox.Cancel:
@@ -607,9 +705,13 @@ class MainWindow(QMainWindow):
 
     def _execute_load(self, data):
         """Now accepts the raw data dictionary instead of the QListWidgetItem."""
-        nii_path = data["path"]
-        self.current_task_path = os.path.dirname(nii_path)
-        self.current_base_name = os.path.basename(nii_path).replace('.nii.gz', '')
+        file_path = data["path"]
+        
+        # Add this line so we remember the exact file path for the fast-save patch
+        self.current_file_path = file_path  
+        
+        self.current_task_path = os.path.dirname(file_path)
+        self.current_base_name = os.path.splitext(os.path.basename(file_path))[0]
         
         self.global_model.set_selection([])
         self.tool_panel_review.force_mode("SELECT")        
@@ -662,16 +764,13 @@ class MainWindow(QMainWindow):
             self.active_workers.remove(worker)
             worker.deleteLater()
         
-        # If mapping is a dictionary, the save was successful
         if mapping is not None:
             new_selection = [mapping[uid] for uid in self.global_model.selected_uids if uid in mapping]
             self.global_model.set_selection(new_selection)
             
-            # Force the model to broadcast the changes to trigger a tree rebuild
             self.global_model._notify_data_changed()
             self.setWindowTitle(f"ChronoRoot Annotation Suite | {self.current_base_name} [{self.global_model.status.upper()}]")
-            
-            # --- FIXED: Strictly serialize the next action to prevent orphaned dialogs ---
+
             if getattr(self, '_is_closing', False):
                 self.close() 
             elif getattr(self, '_pending_load_data', None):
@@ -679,7 +778,21 @@ class MainWindow(QMainWindow):
                 self._pending_load_data = None
                 self._execute_load(data_to_load)
             else:
-                self.populate_browser(force_refresh=True)
+                if hasattr(self, 'current_file_path'):
+                    new_status = "Completed" if getattr(self, '_pending_mark_finished', False) else "In Progress"
+                    
+                    # Grab the exact number of plants currently in the model
+                    current_plant_count = len(self.global_model.masks)
+                    
+                    # Pass the count to the cache updater
+                    self.update_file_status_in_cache(
+                        self.current_file_path, 
+                        new_status, 
+                        new_plant_count=current_plant_count
+                    )
+                else:
+                    # Fallback just in case
+                    self.populate_browser(force_refresh=True)
 
     def _on_thread_error(self, err_msg):
         self.hide_loading()

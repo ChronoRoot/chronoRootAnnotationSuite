@@ -97,6 +97,8 @@ def branchedPoints(skel):
 
 # --- GRAPH BUILDER (State-Safe) ---
 def createGraph(skeleton_image, multiclass_skeleton, root_base_position, end_points, branch_points):
+    skeleton_image = skeleton_image.astype(np.int32)
+    
     graph = nx.Graph()
     edge_state = {'counter': 3}
     
