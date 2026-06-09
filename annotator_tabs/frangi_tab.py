@@ -6,7 +6,7 @@ from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QGridLayout,
                              QListWidget, QListWidgetItem,
                              QScrollArea, QFrame)
 from PyQt5.QtGui import QImage, QPixmap, QColor, QPainter
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QTimer
 
 from skimage.filters import frangi, apply_hysteresis_threshold
 from skimage.morphology import skeletonize
@@ -399,6 +399,11 @@ class FrangiToolPanel(QWidget):
         self.model = shared_model
         self.canvas_tab = canvas_tab
         
+        # --- NEW: Initialize the debounce timer ---
+        self.debounce_timer = QTimer()
+        self.debounce_timer.setSingleShot(True)
+        self.debounce_timer.timeout.connect(self.execute_push_params)
+        
         self.init_ui()
         self.model.register_selection_callback(self.on_selection_changed)
 
@@ -521,6 +526,11 @@ class FrangiToolPanel(QWidget):
         self.toggle_buttons(False)
 
     def push_params(self):
+        """Intercepts the UI signal and restarts the countdown timer."""
+        # Wait 300 milliseconds after the last interaction before processing
+        self.debounce_timer.start(300)
+
+    def execute_push_params(self):
         """Passes all UI states down to the Canvas Tab and triggers a regeneration."""
         self.canvas_tab.p_search_range = self.sp_search.value()
         self.canvas_tab.p_bridge_gaps = self.sp_bridge.value()

@@ -14,12 +14,12 @@ class SortableTreeItem(QTreeWidgetItem):
         # Sort numerically using the hidden UserRole data (either ID or Area)
         return self.data(col, Qt.UserRole) < other.data(col, Qt.UserRole)
     
-from model import PlantImageModel
-from review_tab import ReviewCanvasTab, ReviewToolPanel
-from guidelines_tab import GuidelinesTab
-from about_tab import AboutTab
-from frangi_tab import FrangiCanvasTab, FrangiToolPanel
-from graph_tab import GraphCanvasTab, GraphToolPanel
+from core.model import PlantImageModel
+from annotator_tabs.review_tab import ReviewCanvasTab, ReviewToolPanel
+from annotator_tabs.guidelines_tab import GuidelinesTab
+from annotator_tabs.about_tab import AboutTab
+from annotator_tabs.frangi_tab import FrangiCanvasTab, FrangiToolPanel
+from annotator_tabs.graph_tab import GraphCanvasTab, GraphToolPanel
 
 # ==========================================
 # CONFIGURATION

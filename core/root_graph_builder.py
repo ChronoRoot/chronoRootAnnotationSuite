@@ -95,101 +95,101 @@ def branchedPoints(skel):
     for t in T_BRANCH_KERNELS: bp = bp + cv2.morphologyEx(skel, cv2.MORPH_HITMISS, t)
     return bp
 
-# --- GRAPH BUILDER (State-Safe) ---
+# --- GRAPH BUILDER (Optimized & State-Safe) ---
 def createGraph(skeleton_image, multiclass_skeleton, root_base_position, end_points, branch_points):
     skeleton_image = skeleton_image.astype(np.int32)
-    
     graph = nx.Graph()
     edge_state = {'counter': 3}
     
-    actual_root_base, remaining_endpoints, _ = find_nearest(root_base_position, np.array(end_points))
-    if actual_root_base is None: return graph, None, skeleton_image
-    
+    # 1. Find the topological root base
+    actual_root_base, _, _ = find_nearest(root_base_position, np.array(end_points))
+    if actual_root_base is None: 
+        return graph, None, skeleton_image
     actual_root_base = tuple(actual_root_base)
+    
+    # Initialize the starting node
     graph.add_node(actual_root_base, pos=actual_root_base, type='base', age=0)
     skeleton_image[actual_root_base[1], actual_root_base[0]] = edge_state['counter']
     
-    neighbor_pixels = find_neighbors(skeleton_image, actual_root_base)
-    if not neighbor_pixels: return graph, actual_root_base, skeleton_image
-    
-    skeleton_image, first_node, first_edge_length, bio_class = get_next_node(
-        skeleton_image, multiclass_skeleton, neighbor_pixels[0], actual_root_base, [], 0, actual_root_base, edge_state
-    )
-    first_node = tuple(first_node)
-    
-    graph.add_node(first_node, pos=first_node, type='node', age=0)
-    graph.add_edge(actual_root_base, first_node, weight=first_edge_length, color=edge_state['counter'], root_type=bio_class)
-    edge_state['counter'] += 1
-    
-    rem_endpoints_list = [tuple(ep) for ep in remaining_endpoints]
-    if first_node not in rem_endpoints_list:
-        graph = continue_graph(graph, skeleton_image, multiclass_skeleton, first_node, actual_root_base, rem_endpoints_list, branch_points, edge_state)
+    # 2. Kick off the recursive depth-first trace
+    _trace_graph(graph, skeleton_image, multiclass_skeleton, actual_root_base, edge_state)
     
     return graph, actual_root_base, skeleton_image
 
-def continue_graph(graph, skeleton_image, multiclass_skeleton, current_pos, parent_pos, end_points_list, branch_points, edge_state):
-    neighbor_pixels = find_neighbors(skeleton_image, current_pos)
-    for neighbor_start in neighbor_pixels:
-        if skeleton_image[neighbor_start[1], neighbor_start[0]] != 1:
-            n_tuple = tuple(neighbor_start)
-            if n_tuple in graph.nodes and not graph.has_edge(current_pos, n_tuple):
-                dist = np.linalg.norm(np.array(current_pos) - np.array(neighbor_start))
-                b_class = int(multiclass_skeleton[neighbor_start[1], neighbor_start[0]])
-                graph.add_edge(current_pos, n_tuple, weight=dist, color=edge_state['counter'], root_type=b_class)
-                edge_state['counter'] += 1
+def _trace_graph(graph, skeleton_image, multiclass_skeleton, current_node, edge_state):
+    """Recursively walks the skeleton using dynamic 3x3 neighborhood checks."""
+    # Find all UNTRAVERSED paths originating from this node (value == 1)
+    neighbors = find_neighbors(skeleton_image, current_node, search_value=1)
+    
+    for start_pixel in neighbors:
+        # Double check it wasn't already traversed by a previous branch in this loop
+        if skeleton_image[start_pixel[1], start_pixel[0]] != 1:
             continue
+            
+        edge_color = edge_state['counter']
+        edge_state['counter'] += 1
         
-        skeleton_image, next_node, edge_length, bio_class = get_next_node(
-            skeleton_image, multiclass_skeleton, neighbor_start, current_pos, neighbor_pixels, 0, current_pos, edge_state
-        )
-        next_node = tuple(next_node)
-        if next_node == parent_pos: continue
+        bio_class = int(multiclass_skeleton[start_pixel[1], start_pixel[0]])
+        acc_dist = np.linalg.norm(np.array(current_node) - np.array(start_pixel))
         
+        # Mark as traversed
+        skeleton_image[start_pixel[1], start_pixel[0]] = edge_color
+        
+        curr_pix = start_pixel
+        next_node = None
+        
+        while True:
+            # Look at the 3x3 grid for untraversed pixels
+            next_neighbors = find_neighbors(skeleton_image, curr_pix, search_value=1)
+            
+            # Check if semantic class changes mid-edge
+            color_changed = (multiclass_skeleton[curr_pix[1], curr_pix[0]] != bio_class)
+
+            # If neighbors != 1, we hit a branch (>1), endpoint (0), or semantic split
+            if len(next_neighbors) != 1 or color_changed:
+                next_node = tuple(curr_pix)
+                break
+                
+            # Move forward along the continuous edge
+            next_pix = next_neighbors[0]
+            skeleton_image[next_pix[1], next_pix[0]] = edge_color
+            acc_dist += np.linalg.norm(np.array(curr_pix) - np.array(next_pix))
+            curr_pix = next_pix
+
+        # Create the new node and connect the edge
         if next_node not in graph.nodes:
             graph.add_node(next_node, pos=next_node, type='node', age=0)
-        if not graph.has_edge(current_pos, next_node):
-            graph.add_edge(current_pos, next_node, weight=edge_length, color=edge_state['counter'], root_type=bio_class)
-            edge_state['counter'] += 1
             
-        if skeleton_image[next_node[1], next_node[0]] == 1:
-            skeleton_image[next_node[1], next_node[0]] = edge_state['counter']
-            
-        if next_node not in end_points_list:
-            graph = continue_graph(graph, skeleton_image, multiclass_skeleton, next_node, current_pos, end_points_list, branch_points, edge_state)
-    return graph
+        if not graph.has_edge(current_node, next_node):
+            graph.add_edge(current_node, next_node, weight=acc_dist, color=edge_color, root_type=bio_class)
 
-def get_next_node(skeleton_image, multiclass_skeleton, current_pixel, parent_pixel, sibling_pixels, acc_dist, initial_pos, edge_state):
-    if acc_dist == 0: acc_dist = np.linalg.norm(np.array(current_pixel) - np.array(initial_pos))
-    edge_bio_class = int(multiclass_skeleton[current_pixel[1], current_pixel[0]])
-    
-    while True:
-        neighbors = find_neighbors(skeleton_image, current_pixel)
-        valid_children = [n for n in neighbors if not np.array_equal(n, parent_pixel) and n not in sibling_pixels]
-        
-        color_changed = False
-        if not np.array_equal(current_pixel, initial_pos):
-            if multiclass_skeleton[current_pixel[1], current_pixel[0]] != multiclass_skeleton[parent_pixel[1], parent_pixel[0]]:
-                color_changed = True
-                if len(valid_children) == 1:
-                    next_c = valid_children[0]
-                    if len([n for n in find_neighbors(skeleton_image, next_c) if not np.array_equal(n, current_pixel)]) != 1:
-                        color_changed = False
-
-        if not np.array_equal(current_pixel, initial_pos):
-            skeleton_image[current_pixel[1], current_pixel[0]] = edge_state['counter']
-            
-        if len(valid_children) != 1 or color_changed:
-            return skeleton_image, current_pixel, acc_dist, edge_bio_class
-            
-        skeleton_image[current_pixel[1], current_pixel[0]] = edge_state['counter']
-        next_pixel = valid_children[0]
-        acc_dist += np.linalg.norm(np.array(current_pixel) - np.array(next_pixel))
-        parent_pixel, current_pixel, sibling_pixels = current_pixel, next_pixel, []
+        # Recursively trace outward from this new node
+        _trace_graph(graph, skeleton_image, multiclass_skeleton, next_node, edge_state)
 
 def find_neighbors(skeleton_image, pixel, search_value=1):
-    x, y, h, w = pixel[0], pixel[1], skeleton_image.shape[0], skeleton_image.shape[1]
-    return [[j, i] for i in range(max(0, y-1), min(h, y+2)) for j in range(max(0, x-1), min(w, x+2)) 
-            if skeleton_image[i, j] == search_value and not (x == j and y == i)]
+    """Vectorized C-memory neighborhood search."""
+    x, y = pixel[0], pixel[1]
+    h, w = skeleton_image.shape
+    
+    # Define safe slice boundaries
+    y_min, y_max = max(0, y-1), min(h, y+2)
+    x_min, x_max = max(0, x-1), min(w, x+2)
+    
+    # Instantly extract the 3x3 neighborhood
+    neighborhood = skeleton_image[y_min:y_max, x_min:x_max]
+    
+    # Vectorized search
+    local_ys, local_xs = np.where(neighborhood == search_value)
+    
+    neighbors = []
+    for ly, lx in zip(local_ys, local_xs):
+        global_y = y_min + ly
+        global_x = x_min + lx
+        # Ignore the center pixel
+        if global_x != x or global_y != y:
+            neighbors.append([global_x, global_y])
+            
+    return neighbors
 
 def find_nearest(target_pos, point_list):
     if len(point_list) == 0: return None, point_list, None

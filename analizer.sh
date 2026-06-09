@@ -17,7 +17,7 @@ xhost +local: > /dev/null 2>&1
 
 # 4. Run Apptainer
 # We pass $BINDS which now contains the valid system paths
-apptainer exec  $BINDS --env DISPLAY=$DISPLAY "image.sif" bash -c "python annotator.py"
+apptainer exec  $BINDS --env DISPLAY=$DISPLAY "image.sif" bash -c "python analyzer.py"
 
 # 5. Cleanup
 xhost -local: > /dev/null 2>&1

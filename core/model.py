@@ -145,8 +145,12 @@ class PlantImageModel:
                             json_path = os.path.join(root, base + '.json')
                             if os.path.exists(json_path):
                                 try:
-                                    with open(json_path, 'r') as jf:
-                                        if json.load(jf).get("status") == "completed":
+                                    # --- FAST FOLDER PEEK ---
+                                    # Only read the first 2000 chars to find the status header. 
+                                    # Saves massive amounts of RAM when scanning hundreds of files.
+                                    with open(json_path, 'r', encoding='utf-8') as jf:
+                                        chunk = jf.read(2000).replace(" ", "").replace("\n", "")
+                                        if '"status":"completed"' in chunk:
                                             completed += 1
                                         else:
                                             in_progress += 1
@@ -159,44 +163,43 @@ class PlantImageModel:
         # 2. Files
         processed_bases = set()
         for item_name in items:
-            # Anchor the search on image files, not the .nii.gz files!
             if item_name.lower().endswith(('.png', '.jpg', '.jpeg')):
                 base = os.path.splitext(item_name)[0]
                 
-                # Prevent duplicate entries if a folder has both plant.png and plant.jpg
                 if base in processed_bases: continue
                 processed_bases.add(base)
                 
                 full_path = os.path.join(folder_path, item_name)
                 json_path = os.path.join(folder_path, base + ".json")
                 status = "Pending"
-                plant_count = 0  # <--- NEW: Initialize plant count
+                plant_count = 0  
                 
-                # Determine status based on the existence of companion files
                 if os.path.exists(json_path):
                     try:
-                        with open(json_path, 'r') as f:
-                            data = json.load(f)  # <--- CHANGED: Load the full JSON into a variable
-                            st = data.get("status", "in_progress")
-                            status = "Completed" if st == "completed" else "In Progress"
+                        # --- FAST FILE PEEK ---
+                        # Read the whole file but strip all formatting for robust searching
+                        with open(json_path, 'r', encoding='utf-8') as f:
+                            raw_text = f.read().replace(" ", "").replace("\n", "")
                             
-                            # <--- NEW: Count the annotations to get the number of plants
-                            plant_count = len(data.get("annotations", [])) 
+                            if '"status":"completed"' in raw_text:
+                                status = "Completed"
+                            else:
+                                status = "In Progress"
+                                
+                            # Count the occurrences of category blocks to get plant count safely
+                            plant_count = raw_text.count('"category_id":1') 
                     except: pass
                 else:
-                    # If there's no JSON, but a .nii.gz exists, it's technically in progress
                     nii_path = os.path.join(folder_path, base + ".nii.gz")
                     if os.path.exists(nii_path):
                         status = "Pending"
-                        # Note: We leave plant_count at 0 here. Opening a NIfTI file 
-                        # just to count instances during a folder scan would be too slow.
                         
                 contents.append({
                     "type": "file", 
                     "name": base, 
                     "path": full_path, 
                     "status": status,
-                    "plant_count": plant_count  # <--- NEW: Expose it to the GUI
+                    "plant_count": plant_count  
                 })
                 
         return contents
@@ -376,23 +379,26 @@ class PlantImageModel:
     
     def _load_mask_from_nifti(self, nii_path, shape):
         try:
-            data = np.squeeze(nib.load(nii_path).get_fdata())
+            data = np.squeeze(np.asanyarray(nib.load(nii_path).dataobj))
             data = data.T
             self.original_multiclass = data.astype(np.uint8)
         except Exception as e: print(f"NIfTI Error: {e}")
         
     def _load_instances_from_nifti(self, nii_path, shape):
         try:
-            data = np.squeeze(nib.load(nii_path).get_fdata())
+            # --- FASTER: Bypass get_fdata() float64 casting ---
+            data = np.squeeze(np.asanyarray(nib.load(nii_path).dataobj))
             data = data.T
             self.original_multiclass = data.astype(np.uint8)
             
-            labeled_map, _ = label((data > 0).astype(np.int32), structure=np.ones((3,3)))
-            for uid in np.unique(labeled_map):
-                if uid == 0: continue
+            # --- FASTER: Swap SciPy for OpenCV ---
+            bin_data = (data > 0).astype(np.uint8)
+            num_features, labeled_map = cv2.connectedComponents(bin_data, connectivity=8)
+            
+            for uid in range(1, num_features):
                 self.masks[int(uid)] = (labeled_map == uid).astype(np.uint8)
         except Exception as e: print(f"NIfTI Error: {e}")
-
+    
     def _load_from_json(self, json_path, shape):
         try:
             with open(json_path, 'r') as f: data = json.load(f)
@@ -824,31 +830,40 @@ class PlantImageModel:
             else:
                 cv2.circle(mask, (x, y), circle_radius, color, -1)
 
-        # 2. FAST METADATA UPDATE (No full-image scanning)
+        # 2. FAST METADATA UPDATE
         xs = [int(p[0]) for p in points]
         ys = [int(p[1]) for p in points]
         
-        # Calculate the bounding box of the stroke itself
         sx = max(0, min(xs) - brush_size)
         sy = max(0, min(ys) - brush_size)
         ex = min(mask.shape[1], max(xs) + brush_size)
         ey = min(mask.shape[0], max(ys) + brush_size)
         
+        # --- FIX: Track if the bounding box expands ---
+        bounds_expanded = False 
+        
         if uid in self.bboxes:
             ox, oy, ow, oh = self.bboxes[uid]
-            # If painting (adding pixels), expand the box. 
-            # If erasing, we leave the box as-is for speed (it will recalculate perfectly on save).
             if not is_erase:
                 new_x = min(ox, sx)
                 new_y = min(oy, sy)
                 new_w = max(ox + ow, ex) - new_x
                 new_h = max(oy + oh, ey) - new_y
                 self.bboxes[uid] = (new_x, new_y, new_w, new_h)
+                
+                # If the box grew in any direction, flag it
+                if new_x < ox or new_y < oy or new_w > ow or new_h > oh:
+                    bounds_expanded = True
         else:
             self.bboxes[uid] = (sx, sy, ex - sx, ey - sy)
+            bounds_expanded = True
             
-        # 3. FAST PATCH INJECTION (Prevents slow distance transforms on redraw)
-        if uid in self.class_patches:
+        # 3. FAST PATCH INJECTION
+        if bounds_expanded:
+            # Drop the cached patch. It will safely regenerate at the new 
+            # size the next time _get_class_patch is called.
+            self.class_patches.pop(uid, None)
+        elif uid in self.class_patches:
             patch, px, py = self.class_patches[uid]
             ph, pw = patch.shape
             

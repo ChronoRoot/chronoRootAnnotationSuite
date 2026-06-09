@@ -310,19 +310,24 @@ class ReviewCanvasTab(QWidget):
         self.active_class_id = class_id
 
     def refresh_canvas(self):
-        raw_data = self.model.get_raw_image_data()
-        if not raw_data: return
+        # 1. OPTIMIZATION: Cache the massive Base Image so we don't reconstruct it every stroke
+        if not hasattr(self, '_cached_base_pixmap') or getattr(self, '_last_image_path', None) != self.model.image_path:
+            raw_data = self.model.get_raw_image_data()
+            if not raw_data: return
+            self._cached_base_pixmap = _bytes_to_pixmap(raw_data, is_rgba=False)
+            self._last_image_path = self.model.image_path
+            
+        # Pull from the instant cache
+        base_pixmap = self._cached_base_pixmap
         
-        base_pixmap = _bytes_to_pixmap(raw_data, is_rgba=False)
-        
-        # 1. GLOBAL MULTI-CLASS VIEW
+        # 2. GLOBAL MULTI-CLASS VIEW
         if self.current_mode == "GLOBAL":
             overlay_data = self.model.get_full_class_overlay_data(selected_ids=list(self.model.selected_uids), opacity=self.opacity)
             overlay_pixmap = _bytes_to_pixmap(overlay_data, is_rgba=True)
             self.canvas.update_view(base_pixmap, overlay_pixmap)
             self.canvas.update_bboxes(self.model.bboxes, self.model.color_map, self.show_bboxes)
 
-        # 2. SELECT MODE
+        # 3. SELECT MODE
         elif self.current_mode == "SELECT":
             valid_selection = [uid for uid in self.model.selected_uids if uid in self.model.masks]
             overlay_data = self.model.get_overlay_data(selected_ids=valid_selection, opacity=self.opacity)
@@ -331,9 +336,13 @@ class ReviewCanvasTab(QWidget):
             self.canvas.update_view(base_pixmap, overlay_pixmap)
             self.canvas.update_bboxes(self.model.bboxes, self.model.color_map, self.show_bboxes)
             
-        # 3. INDIVIDUAL MULTI-CLASS EDITING
+        # 4. INDIVIDUAL MULTI-CLASS EDITING
         elif self.current_mode == "SEMANTIC" and self.model.active_uid in self.model.masks:
-            painter = QPainter(base_pixmap)
+            # OPTIMIZATION: Paint onto a transparent overlay, NOT the base image!
+            overlay_pixmap = QPixmap(base_pixmap.size())
+            overlay_pixmap.fill(Qt.transparent)
+            painter = QPainter(overlay_pixmap)
+            
             class_data, cx, cy = self.model.get_class_overlay_data(self.model.active_uid, opacity=self.opacity)
             if class_data:
                 painter.drawPixmap(cx, cy, _bytes_to_pixmap(class_data, is_rgba=True))
@@ -343,10 +352,10 @@ class ReviewCanvasTab(QWidget):
                 painter.drawPixmap(bx, by, _bytes_to_pixmap(cont_data, is_rgba=True))
                 
             painter.end()
-            self.canvas.update_view(base_pixmap, QPixmap()) 
+            self.canvas.update_view(base_pixmap, overlay_pixmap) 
             self.canvas.update_bboxes({}, {}, False)
             
-        # 4. ISOLATION MODE (Paint/Split/New Plant)
+        # 5. ISOLATION MODE (Paint/Split/New Plant)
         else: 
             if self.model.active_uid and self.model.active_uid in self.model.masks:
                 overlay_data = self.model.get_overlay_data(isolate_uids=[self.model.active_uid], opacity=self.opacity)
