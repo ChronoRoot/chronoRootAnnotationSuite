@@ -19,33 +19,47 @@ HIGH_CONTRAST_COLORS = [
 ]
 
 def encode_rle(mask):
-    pixels = mask.flatten()
-    if len(pixels) == 0: return {"size": [0, 0], "counts": []}
-    pixels = np.concatenate([pixels, [-1]])
-    runs = np.where(pixels[1:] != pixels[:-1])[0] + 1
+    """Vectorized RLE encoding using NumPy."""
+    pixels = mask.ravel()
+    if len(pixels) == 0: 
+        return {"size": mask.shape, "counts": []}
     
-    counts = []
-    vals = []
-    prev = 0
-    for idx in runs:
-        vals.append(int(pixels[prev]))
-        counts.append(int(idx - prev))
-        prev = idx
-        
-    rle = []
-    for v, c in zip(vals, counts):
-        rle.extend([v, c])
-    return {"size": mask.shape, "counts": rle}
+    # Identify boolean array where transitions occur
+    changes = np.concatenate(([True], pixels[1:] != pixels[:-1], [True]))
+    
+    # Get the integer indices of those transitions
+    run_indices = np.where(changes)[0]
+    
+    # Extract the values and calculate the lengths (counts) of each run
+    vals = pixels[run_indices[:-1]]
+    counts = np.diff(run_indices)
+    
+    # Interleave values and counts into a single 1D array
+    rle = np.empty(vals.size * 2, dtype=int)
+    rle[0::2] = vals
+    rle[1::2] = counts
+    
+    return {"size": mask.shape, "counts": rle.tolist()}
 
 def decode_rle(rle_data):
+    """Vectorized RLE decoding using NumPy."""
     h, w = rle_data["size"]
-    counts = rle_data["counts"]
-    pixels = []
-    for i in range(0, len(counts), 2):
-        val = counts[i]
-        count = counts[i+1]
-        pixels.extend([val] * count)
-    return np.array(pixels, dtype=np.uint8).reshape((h, w))
+    counts_list = rle_data["counts"]
+    
+    if not counts_list: 
+        return np.zeros((h, w), dtype=np.uint8)
+    
+    # Convert the Python list to a NumPy array for fast C-level slicing
+    rle_arr = np.array(counts_list, dtype=np.uint32)
+    
+    # Slice out the alternating values and repetitions
+    vals = rle_arr[0::2].astype(np.uint8)
+    reps = rle_arr[1::2]
+    
+    # np.repeat reconstructs the 9-million pixel array in milliseconds
+    pixels = np.repeat(vals, reps)
+    
+    return pixels.reshape((h, w))
 
 # ==========================================
 # HYBRID DATA MODEL (Pure Python API)

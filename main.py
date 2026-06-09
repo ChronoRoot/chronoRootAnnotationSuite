@@ -2,7 +2,7 @@ import os
 import json
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QLabel, QPushButton, QMessageBox, QApplication,
                             QHBoxLayout, QLineEdit, QFileDialog, QListWidget, QListWidgetItem, 
-                            QSplitter, QTabWidget, QStyle, QMainWindow, QProgressDialog,
+                            QSplitter, QTabWidget, QStyle, QMainWindow, QProgressDialog, QScrollArea,
                             QTreeWidget, QHeaderView, QFrame, QStackedWidget, QTreeWidgetItem)
                             
 from PyQt5.QtGui import QPainter, QColor, QBrush, QPixmap, QIcon
@@ -38,10 +38,12 @@ if not os.path.exists(GLOBAL_CONFIG_FILE):
         print(f"Created default config at {GLOBAL_CONFIG_FILE}")
         json.dump(default_config, f, indent=4)
     DATABASE_ROOT = "."
+    GLOBAL_CONFIG = default_config  # <--- NEW
 else:
     with open(GLOBAL_CONFIG_FILE, 'r') as f:
         config = json.load(f)
         DATABASE_ROOT = config.get("database_root", ".")
+        GLOBAL_CONFIG = config      # <--- NEW
         
 
 class FolderStatsWidget(QWidget):
@@ -240,7 +242,8 @@ class MainWindow(QMainWindow):
         self.list_instances.setSortingEnabled(True)
         self.list_instances.setRootIsDecorated(False)
         self.list_instances.setSelectionMode(QTreeWidget.ExtendedSelection)
-        self.list_instances.setFixedHeight(300) # Keep it compact
+        self.list_instances.setMinimumHeight(150) 
+        self.list_instances.setMaximumHeight(300) 
         
         self.list_instances.header().setSectionResizeMode(0, QHeaderView.ResizeToContents)
         self.list_instances.header().setSectionResizeMode(1, QHeaderView.Stretch)
@@ -277,18 +280,51 @@ class MainWindow(QMainWindow):
         # ==========================================
         self.tabs = QTabWidget()
         
-        self.canvas_review = ReviewCanvasTab(self.global_model) 
-        self.tool_panel_review = ReviewToolPanel(self.global_model, self.canvas_review)
+        # --- CONFIGURATION INITIALIZATION ---
+        self.config = GLOBAL_CONFIG 
         
+        self.canvas_review = ReviewCanvasTab(self.global_model) 
         self.canvas_frangi = FrangiCanvasTab(self.global_model)
-        self.tool_panel_frangi = FrangiToolPanel(self.global_model, self.canvas_frangi)
-
         self.canvas_graph = GraphCanvasTab(self.global_model)
+        
+        # --- INJECT FRANGI AND GRAPH SETTINGS BEFORE WIDGETS BUILD ---
+        f_cfg = self.config.get("frangi", {})
+        self.canvas_frangi.p_search_range = f_cfg.get("search_range", 0)
+        self.canvas_frangi.p_bridge_gaps = f_cfg.get("bridge_gaps", 1)
+        self.canvas_frangi.p_min_part = f_cfg.get("min_part", 5)
+        self.canvas_frangi.p_faint_sens = f_cfg.get("faint_sens", 0.05)
+        self.canvas_frangi.p_strong_conf = f_cfg.get("strong_conf", 0.20)
+        self.canvas_frangi.p_final_thick = f_cfg.get("final_thick", 1)
+        self.canvas_frangi.p_centerline_correction = f_cfg.get("centerline_correction", True)
+        self.canvas_frangi.p_roots_dark = f_cfg.get("roots_dark", False)
+        self.canvas_frangi.p_allow_disconnected = f_cfg.get("allow_disconnected", False)
+        self.canvas_frangi.p_channel_mode = f_cfg.get("channel_mode", "Red-Blue Avg (RB)")
+        self.canvas_frangi.p_clahe_mode = f_cfg.get("clahe_mode", "None")
+        self.canvas_frangi.p_smooth_mode = f_cfg.get("smooth_mode", "Medium")
+        self.canvas_frangi.p_target_classes = f_cfg.get("target_classes", [1, 2])
+
+        g_cfg = self.config.get("graph", {})
+        self.canvas_graph.p_prune = g_cfg.get("prune", 0)
+        self.canvas_graph.p_thick = g_cfg.get("thick", 1)
+        self.canvas_graph.p_target_classes = g_cfg.get("target_classes", [1, 2])
+
+        # --- BUILD UNIQUE TOOL PANELS ---
+        self.tool_panel_review = ReviewToolPanel(self.global_model, self.canvas_review)
+        self.tool_panel_frangi = FrangiToolPanel(self.global_model, self.canvas_frangi)
         self.tool_panel_graph = GraphToolPanel(self.global_model, self.canvas_graph)
         
-        self.tab_guidelines = GuidelinesTab() # Kept as is
-        self.tab_about = AboutTab()           # Kept as is
+        # --- INJECT REVIEW UI STATE DIRECTLY ---
+        r_cfg = self.config.get("review", {})
+        if "brush_size" in r_cfg:
+            self.tool_panel_review.slider_size.setValue(r_cfg["brush_size"])
+        if "opacity" in r_cfg:
+            self.tool_panel_review.slider_opacity.setValue(r_cfg["opacity"])
+        if "show_bboxes" in r_cfg:
+            self.tool_panel_review.btn_bbox.setChecked(r_cfg["show_bboxes"])
+            self.canvas_review.set_show_bboxes(r_cfg["show_bboxes"])
         
+        self.tab_guidelines = GuidelinesTab() 
+        self.tab_about = AboutTab()           
         
         self.tool_stack.addWidget(self.tool_panel_review)
         self.tool_stack.addWidget(self.tool_panel_frangi)
@@ -807,8 +843,76 @@ class MainWindow(QMainWindow):
         self._is_closing = False
         self._pending_load_data = None
     
+    
+    def save_interface_config(self):
+        """Scrapes current UI state DIRECTLY from the widgets to guarantee accuracy."""
+        
+        try:
+            # 1. Read existing from disk to preserve other keys
+            try:
+                with open(GLOBAL_CONFIG_FILE, 'r') as f:
+                    cfg = json.load(f)
+            except (json.JSONDecodeError, FileNotFoundError):
+                cfg = {}
+                
+            cfg["database_root"] = self.root_dir
+            
+            # 2. Scrape Review UI
+            cfg["review"] = {
+                "brush_size": self.tool_panel_review.slider_size.value(),
+                "opacity": self.tool_panel_review.slider_opacity.value(),
+                "show_bboxes": self.tool_panel_review.btn_bbox.isChecked()
+            }
+            
+            # 3. Scrape Frangi UI
+            f_panel = self.tool_panel_frangi
+            f_targets = []
+            for i in range(f_panel.list_target_classes.count()):
+                item = f_panel.list_target_classes.item(i)
+                if item.checkState() == Qt.Checked:
+                    f_targets.append(item.data(Qt.UserRole))
+
+            cfg["frangi"] = {
+                "search_range": f_panel.sp_search.value(),
+                "bridge_gaps": f_panel.sp_bridge.value(),
+                "min_part": f_panel.sp_min_part.value(),
+                "faint_sens": f_panel.sp_f_low.value(),
+                "strong_conf": f_panel.sp_f_high.value(),
+                "final_thick": f_panel.sp_thick.value(),
+                "centerline_correction": f_panel.chk_correction.isChecked(),
+                "roots_dark": f_panel.chk_dark.isChecked(),
+                "allow_disconnected": f_panel.chk_disconnected.isChecked(),
+                "channel_mode": f_panel.cb_channel.currentText(),
+                "clahe_mode": f_panel.cb_clahe.currentText(),
+                "smooth_mode": f_panel.cb_smooth.currentText(),
+                "target_classes": f_targets
+            }
+            
+            # 4. Scrape Graph UI
+            g_panel = self.tool_panel_graph
+            g_targets = []
+            for i in range(g_panel.list_target_classes.count()):
+                item = g_panel.list_target_classes.item(i)
+                if item.checkState() == Qt.Checked:
+                    g_targets.append(item.data(Qt.UserRole))
+
+            cfg["graph"] = {
+                "prune": g_panel.sp_prune.value(),
+                "thick": g_panel.sp_thick.value(),
+                "target_classes": g_targets
+            }
+            
+            # Write back safely and flush to guarantee disk writing
+            with open(GLOBAL_CONFIG_FILE, 'w') as f:
+                json.dump(cfg, f, indent=4)
+                f.flush() 
+                
+        except Exception as e:
+            print(f"CRITICAL ERROR SAVING CONFIG: {e}")
+            
     def closeEvent(self, event):
         if getattr(self, '_is_closing', False):
+            self.save_interface_config() 
             event.accept()
             return
 
@@ -822,17 +926,16 @@ class MainWindow(QMainWindow):
             )
 
             if reply == QMessageBox.Save:
-                # 2. Flag that we want to close AFTER saving
                 self._is_closing = True 
                 self.save_task(mark_finished=False)
-                
-                # 3. IGNORE the close event for now so the background thread can run!
                 event.ignore()  
             elif reply == QMessageBox.Discard:
+                self.save_interface_config() 
                 event.accept() 
             else:
                 event.ignore()
         else:
+            self.save_interface_config() 
             event.accept()
 
 # ==========================================

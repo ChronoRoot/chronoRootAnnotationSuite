@@ -2,7 +2,9 @@ import cv2
 import numpy as np
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QGridLayout, 
                              QPushButton, QLabel, QSpinBox, QDoubleSpinBox, 
-                             QCheckBox, QComboBox, QFormLayout, QStyleOption, QStyle, QSizePolicy)
+                             QCheckBox, QComboBox, QFormLayout, QStyleOption, QStyle, QSizePolicy,
+                             QListWidget, QListWidgetItem,
+                             QScrollArea, QFrame)
 from PyQt5.QtGui import QImage, QPixmap, QColor, QPainter
 from PyQt5.QtCore import Qt
 
@@ -60,6 +62,7 @@ class FrangiCanvasTab(QWidget):
         self.p_channel_mode = "Red-Blue Avg (RB)"
         self.p_smooth_mode = "Medium"
         self.p_clahe_mode = "None"  
+        self.p_target_classes = [1, 2]
         
         self.p_centerline_correction = True
         
@@ -170,29 +173,47 @@ class FrangiCanvasTab(QWidget):
                 
         return cls_crop
 
-    def _calculate_mapping(self, centered_mask, x1, y1, x2, y2, original_mask, current_cls_crop):
+    def _calculate_mapping(self, combined_mask, x1, y1, x2, y2, original_mask, current_cls_crop, untouched_mask_crop):
         full_mask = np.zeros_like(original_mask)
-        full_mask[y1:y2, x1:x2] = centered_mask
+        full_mask[y1:y2, x1:x2] = combined_mask
         
-        new_multiclass_crop = np.zeros_like(centered_mask)
-        new_multiclass_crop[centered_mask > 0] = current_cls_crop[centered_mask > 0]
+        new_multiclass_crop = np.zeros_like(combined_mask)
         
-        holes = (centered_mask > 0) & (new_multiclass_crop == 0)
+        # 1. Restore untouched classes perfectly
+        new_multiclass_crop[untouched_mask_crop] = current_cls_crop[untouched_mask_crop]
+        
+        # 2. Handle targeted/refined regions
+        refined_area = (combined_mask > 0) & (~untouched_mask_crop)
+        existing_targets = refined_area & np.isin(current_cls_crop, self.p_target_classes)
+        
+        # Copy the existing target classes back in
+        new_multiclass_crop[existing_targets] = current_cls_crop[existing_targets]
+        
+        # 3. Handle newly expanded pixels (Frangi expansion)
+        holes = refined_area & (new_multiclass_crop == 0)
         if np.any(holes):
-            valid = new_multiclass_crop > 0
-            if np.any(valid):
-                _, indices = distance_transform_edt(~valid, return_indices=True)
-                new_multiclass_crop[holes] = new_multiclass_crop[indices[0], indices[1]][holes]
-            else: new_multiclass_crop[holes] = 1 
+            valid_targets = np.zeros_like(combined_mask)
+            valid_targets[existing_targets] = current_cls_crop[existing_targets]
+            
+            if np.any(existing_targets):
+                # Pull the nearest target class for newly expanded pixels
+                _, indices = distance_transform_edt(~existing_targets, return_indices=True)
+                new_multiclass_crop[holes] = valid_targets[indices[0], indices[1]][holes]
+            else:
+                # Fallback if no target classes existed originally (rare)
+                fallback = self.p_target_classes[0] if self.p_target_classes else 1
+                new_multiclass_crop[holes] = fallback
                 
-        ys_c, xs_c = np.where(centered_mask)
+        # 4. Extract tight bounding box
+        ys_c, xs_c = np.where(combined_mask)
         if len(xs_c) > 0:
             cx1, cy1 = int(xs_c.min()), int(ys_c.min())
             cx2, cy2 = int(xs_c.max()), int(ys_c.max())
             tight_patch = new_multiclass_crop[cy1:cy2+1, cx1:cx2+1]
             return full_mask, tight_patch, x1 + cx1, y1 + cy1, new_multiclass_crop
+            
         return full_mask, None, 0, 0, new_multiclass_crop
-
+    
     def generate_and_display_proposal(self):
         uid = self.model.active_uid
         raw_image = self.model.raw_image
@@ -237,9 +258,15 @@ class FrangiCanvasTab(QWidget):
             
         current_cls_crop = self._get_current_multiclass_crop(x1, y1, x2, y2, uid)
         
+        # --- NEW: Isolate target classes and untouched classes ---
+        target_mask_crop = (mask_crop > 0) & np.isin(current_cls_crop, self.p_target_classes)
+        untouched_mask_crop = (mask_crop > 0) & (~np.isin(current_cls_crop, self.p_target_classes))
+        
         kernel = np.ones((3, 3), np.uint8)
-        if self.p_search_range > 0: search_mask = cv2.dilate(mask_crop, kernel, iterations=self.p_search_range)
-        else: search_mask = mask_crop.copy()
+        if self.p_search_range > 0: 
+            search_mask = cv2.dilate(target_mask_crop.astype(np.uint8), kernel, iterations=self.p_search_range)
+        else: 
+            search_mask = target_mask_crop.copy().astype(np.uint8)
         
         if self.p_centerline_correction:
             vesselness = frangi(gray_crop, black_ridges=self.p_roots_dark, sigmas=(1, 10, 1))
@@ -306,31 +333,37 @@ class FrangiCanvasTab(QWidget):
                 else: 
                     proposed_blob = core_fragments.copy()
         else:
-            # If disabled, use the original mask to enforce strict uniform width
-            proposed_blob = mask_crop.copy()
+            # If disabled, enforce strict uniform width ONLY on the targeted classes
+            proposed_blob = target_mask_crop.copy().astype(np.uint8)
                 
         proposed_skeleton = skeletonize(proposed_blob > 0).astype(np.uint8)
         proposed_mask_raw = cv2.dilate(proposed_skeleton, kernel, iterations=self.p_final_thick)
         
-        if not self.p_allow_disconnected and np.sum(proposed_mask_raw) > 0:
-            labeled_prop, num_prop = label(proposed_mask_raw, structure=np.ones((3,3)))
+        # --- Merge with untouched aerial parts before component analysis ---
+        combined_raw = cv2.bitwise_or(proposed_mask_raw, untouched_mask_crop.astype(np.uint8))
+        
+        if not self.p_allow_disconnected and np.sum(combined_raw) > 0:
+            labeled_prop, num_prop = label(combined_raw, structure=np.ones((3,3)))
             if num_prop > 0:
                 prop_sizes = np.bincount(labeled_prop.ravel()); prop_sizes[0] = 0
-                proposed_mask = (labeled_prop == prop_sizes.argmax()).astype(np.uint8)
-            else: proposed_mask = proposed_mask_raw
-        else: proposed_mask = proposed_mask_raw
+                combined_proposed_mask = (labeled_prop == prop_sizes.argmax()).astype(np.uint8)
+            else: 
+                combined_proposed_mask = combined_raw
+        else: 
+            combined_proposed_mask = combined_raw
 
+        # Notice we are passing untouched_mask_crop into the mapping function now
         self.proposed_full_mask, self.proposed_tight_patch, self.proposed_x, self.proposed_y, prop_mc = \
-            self._calculate_mapping(proposed_mask, x1, y1, x2, y2, original_mask, current_cls_crop)
-
+            self._calculate_mapping(combined_proposed_mask, x1, y1, x2, y2, original_mask, current_cls_crop, untouched_mask_crop)
+            
         old_mc = np.zeros_like(mask_crop)
         old_mc[mask_crop > 0] = current_cls_crop[mask_crop > 0]
 
         rgb_base_canvas = cv2.cvtColor(gray_crop, cv2.COLOR_GRAY2RGB) 
 
         rgb_old = self._build_filled_overlay(rgb_base_canvas, mask_crop, old_mc)
-        rgb_proposed = self._build_filled_overlay(rgb_base_canvas, proposed_mask, prop_mc)
-
+        rgb_proposed = self._build_filled_overlay(rgb_base_canvas, combined_proposed_mask, prop_mc)
+        
         self.img_label_orig.setPixmap(self.numpy_to_qpixmap(rgb_base_canvas))
         self.img_label_old.setPixmap(self.numpy_to_qpixmap(rgb_old))
         self.img_label_vesselness.setPixmap(self.numpy_to_qpixmap(heatmap_rgb))
@@ -370,7 +403,17 @@ class FrangiToolPanel(QWidget):
         self.model.register_selection_callback(self.on_selection_changed)
 
     def init_ui(self):
-        layout = QVBoxLayout(self)
+        # 1. Master Layout (holds the scroll area AND the sticky button)
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        
+        # 2. Scroll Area Setup
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFrameShape(QFrame.NoFrame)
+        
+        scroll_content = QWidget()
+        layout = QVBoxLayout(scroll_content) # This layout holds the actual parameters
         layout.setContentsMargins(5, 5, 5, 5)
         
         # --- Form Layout for Numeric Parameters ---
@@ -411,7 +454,7 @@ class FrangiToolPanel(QWidget):
         self.chk_disconnected = QCheckBox("Allow Disconnected Parts")
         self.chk_disconnected.setChecked(self.canvas_tab.p_allow_disconnected)
         layout.addWidget(self.chk_disconnected)
-                
+
         # --- Dropdowns ---
         layout.addWidget(QLabel("Image Mode:"))
         self.cb_channel = QComboBox()
@@ -430,6 +473,24 @@ class FrangiToolPanel(QWidget):
         self.cb_smooth.addItems(["None", "Light", "Medium", "High"])
         self.cb_smooth.setCurrentText(self.canvas_tab.p_smooth_mode)
         layout.addWidget(self.cb_smooth)
+        
+        # --- Target Classes ---
+        layout.addWidget(QLabel("<b>Classes to Modify:</b>"))
+        self.list_target_classes = QListWidget()
+        self.list_target_classes.setFixedHeight(100)
+
+        classes = [(1, "Main Root"), (2, "Lateral Root"), (3, "Seed"),
+                   (4, "Hypocotyl"), (5, "Leaves/Aerial"), (6, "Petiole")]
+
+        for cid, name in classes:
+            item = QListWidgetItem(f"{cid} - {name}")
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Checked if cid in self.canvas_tab.p_target_classes else Qt.Unchecked)
+            item.setData(Qt.UserRole, cid)
+            self.list_target_classes.addItem(item)
+
+        self.list_target_classes.itemChanged.connect(self.push_params)
+        layout.addWidget(self.list_target_classes)
 
         # --- Connections ---
         self.sp_search.valueChanged.connect(self.push_params)
@@ -445,14 +506,18 @@ class FrangiToolPanel(QWidget):
         self.cb_smooth.currentIndexChanged.connect(self.push_params)
         self.chk_correction.stateChanged.connect(self.push_params)
         
-        layout.addStretch()
+        layout.addStretch() # Push everything in the scroll area up
 
-        # --- Accept Button ---
+        # Finalize Scroll Area
+        scroll_area.setWidget(scroll_content)
+        main_layout.addWidget(scroll_area) # Add scrolling content to main layout
+
+        # --- Accept Button (Sticky at the bottom, outside the scroll area) ---
         self.btn_accept = QPushButton("Accept Refinement")
         self.btn_accept.setStyleSheet("background-color: #cceeff; font-weight: bold; color: black; padding: 15px; font-size: 14px;")
         self.btn_accept.clicked.connect(self.canvas_tab.accept_proposal)
         
-        layout.addWidget(self.btn_accept)
+        main_layout.addWidget(self.btn_accept)
         self.toggle_buttons(False)
 
     def push_params(self):
@@ -470,9 +535,18 @@ class FrangiToolPanel(QWidget):
         self.canvas_tab.p_clahe_mode = self.cb_clahe.currentText()
         self.canvas_tab.p_smooth_mode = self.cb_smooth.currentText()
         
+        # Extract checked classes
+        targets = []
+        for i in range(self.list_target_classes.count()):
+            item = self.list_target_classes.item(i)
+            if item.checkState() == Qt.Checked:
+                targets.append(item.data(Qt.UserRole))
+                
+        self.canvas_tab.p_target_classes = targets
+        
         if self.model.active_uid:
             self.canvas_tab.generate_and_display_proposal()
-
+            
     def toggle_buttons(self, enabled):
         self.btn_accept.setEnabled(enabled)
 

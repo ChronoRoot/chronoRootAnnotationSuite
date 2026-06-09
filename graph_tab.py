@@ -4,7 +4,9 @@ import networkx as nx
 from scipy.ndimage import distance_transform_edt
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QPushButton, 
                              QLabel, QSpinBox, QFrame, QFormLayout, 
-                             QComboBox, QGridLayout, QStyleOption, QStyle)
+                             QComboBox, QGridLayout, QStyleOption, QStyle,
+                             QListWidget, QListWidgetItem,
+                             QScrollArea, QFrame)
 from PyQt5.QtGui import QImage, QPixmap, QColor, QPainter
 from PyQt5.QtCore import Qt, pyqtSignal
 
@@ -87,6 +89,7 @@ class GraphCanvasTab(QWidget):
         self.mc_skel_bin = None
         self.actual_base = None
         self.mask_crop = None
+        self.p_target_classes = [1, 2]
         
         self.init_ui()
         self.model.register_data_callback(self.on_data_changed)
@@ -260,11 +263,13 @@ class GraphCanvasTab(QWidget):
         # -------------------------------------------
         
         root_bin_canvas = np.zeros((img_h, img_w), dtype=np.uint8)
-        for cid in [1, 2]:
+
+        # ONLY extract the user-targeted classes for the skeletonizer
+        for cid in self.p_target_classes:
             active = (patch == cid) & (bin_crop > 0)
             p_y, p_x = np.where(active)
             root_bin_canvas[p_y + y_off, p_x + x_off] = 1
-            
+                    
         full_skel, branches, endpoints, is_valid = extract_skeleton(root_bin_canvas, self.p_prune)
         
         # Skeleton drawn directly over full-brightness image
@@ -278,7 +283,7 @@ class GraphCanvasTab(QWidget):
             return
             
         self.mc_skel_bin = np.zeros((img_h, img_w), dtype=np.uint8)
-        for cid in [1, 2]: 
+        for cid in self.p_target_classes: 
             active = (patch == cid) & (bin_crop > 0)
             p_y, p_x = np.where(active)
             self.mc_skel_bin[p_y + y_off, p_x + x_off] = cid
@@ -412,12 +417,16 @@ class GraphCanvasTab(QWidget):
         active_mask_prev = np.zeros(self.base_rgb.shape[:2], dtype=bool)
         
         recolored_semantic = self._calculate_recolored_segmentation()
-        cls_colors = {1: [255, 0, 0], 2: [0, 255, 0]}
         
-        for cid in [1, 2]:
+        for cid, color in self.model.class_colors.items():
+            if cid == 0: 
+                continue # Skip the background
+                
             mask = recolored_semantic == cid
-            overlay_prev[mask] = cls_colors[cid]
-            active_mask_prev[mask] = True
+            if np.any(mask):
+                # Paint using the global class colors (taking only the RGB channels)
+                overlay_prev[mask] = color[:3] 
+                active_mask_prev[mask] = True
             
         alpha = 0.5 # 50% transparency
         for c in range(3):
@@ -436,7 +445,8 @@ class GraphCanvasTab(QWidget):
         kernel = np.ones((3, 3), np.uint8)
         dilated_canvas = np.zeros_like(final_mc_skel)
 
-        for cls in [2, 1]:
+        # Re-dilate the newly assigned classes
+        for cls in self.p_target_classes:
             cls_skel = (final_mc_skel == cls).astype(np.uint8)
             if np.sum(cls_skel) == 0: continue
             dilated = cv2.dilate(cls_skel, kernel, iterations=self.p_thick)
@@ -445,16 +455,43 @@ class GraphCanvasTab(QWidget):
         h, w = self.mask_crop.shape
         dilated_crop = dilated_canvas[self.crop_y : self.crop_y + h, self.crop_x : self.crop_x + w]
 
-        unreached = (self.mask_crop > 0) & (dilated_crop == 0)
+        # --- THE MERGE LOGIC ---
+        recolored_semantic = np.zeros_like(self.mask_crop)
         
+        # 1. Fetch the original patch to salvage the non-targeted classes
+        patch, x_off, y_off = self.model._get_class_patch(self.model.active_uid)
+        
+        # 2. Map the original patch to our current crop coordinates
+        orig_mc_crop = np.zeros_like(self.mask_crop)
+        p_h, p_w = patch.shape
+        cy_start = max(0, y_off - self.crop_y)
+        cx_start = max(0, x_off - self.crop_x)
+        cy_end = min(h, cy_start + p_h)
+        cx_end = min(w, cx_start + p_w)
+        
+        # Handle inner patch slicing if crop cuts off the patch
+        py_start = max(0, self.crop_y - y_off)
+        px_start = max(0, self.crop_x - x_off)
+        py_end = py_start + (cy_end - cy_start)
+        px_end = px_start + (cx_end - cx_start)
+        
+        orig_mc_crop[cy_start:cy_end, cx_start:cx_end] = patch[py_start:py_end, px_start:px_end]
+        
+        # 3. Copy over ANY class that was NOT in p_target_classes
+        untargeted_mask = (self.mask_crop > 0) & (~np.isin(orig_mc_crop, self.p_target_classes))
+        recolored_semantic[untargeted_mask] = orig_mc_crop[untargeted_mask]
+
+        # 4. Handle unreached pixels (distance transform) ONLY for target classes
+        unreached = (self.mask_crop > 0) & (dilated_crop == 0) & (~untargeted_mask)
         if np.any(unreached):
             valid = dilated_crop > 0
             if np.any(valid):
                 _, indices = distance_transform_edt(~valid, return_indices=True)
                 dilated_crop[unreached] = dilated_crop[indices[0], indices[1]][unreached]
                 
-        recolored_semantic = np.zeros_like(self.mask_crop)
-        recolored_semantic[self.mask_crop > 0] = dilated_crop[self.mask_crop > 0]
+        # 5. Overlay the new graph-calculated target classes
+        recolored_semantic[dilated_crop > 0] = dilated_crop[dilated_crop > 0]
+        
         return recolored_semantic
 
     def apply_graph_colors(self):
@@ -510,10 +547,20 @@ class GraphToolPanel(QWidget):
         self.model.register_selection_callback(self.on_selection_changed)
 
     def init_ui(self):
-        layout = QVBoxLayout(self)
+        # 1. Master Layout
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        
+        # 2. Scroll Area Setup
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFrameShape(QFrame.NoFrame)
+        
+        scroll_content = QWidget()
+        layout = QVBoxLayout(scroll_content)
         layout.setContentsMargins(5, 5, 5, 5)
         
-        layout.addWidget(QLabel("<b>GRAPH SETTINGS:</b>"))
+        layout.addWidget(QLabel("<b>Graph Settings:</b>"))
         
         form = QFormLayout()
         self.sp_prune = QSpinBox()
@@ -533,11 +580,10 @@ class GraphToolPanel(QWidget):
         layout.addSpacing(10)
         layout.addWidget(QFrame(frameShape=QFrame.HLine, frameShadow=QFrame.Sunken))
         layout.addSpacing(10)
-        
-        layout.addWidget(QLabel("<b>CLICK INTERACTION:</b>"))
+
+        layout.addWidget(QLabel("<b>Node Click Interaction:</b>"))
         
         self.cb_mode = QComboBox()
-        # --- FIXED: Text matches standard RGB mapping ---
         self.cb_mode.addItems(["Set Start Node (Green)", "Set End Node (Blue)", "Toggle Waypoint (Yellow)"])
         self.cb_mode.currentIndexChanged.connect(self.update_mode)
         layout.addWidget(self.cb_mode)
@@ -545,14 +591,41 @@ class GraphToolPanel(QWidget):
         self.btn_reset_nodes = QPushButton("Reset Nodes to Auto")
         self.btn_reset_nodes.clicked.connect(self.canvas_tab.reset_user_nodes)
         layout.addWidget(self.btn_reset_nodes)
+
+        layout.addSpacing(10)
+        layout.addWidget(QFrame(frameShape=QFrame.HLine, frameShadow=QFrame.Sunken))
+        layout.addSpacing(10)
         
+        # --- Target Classes ---
+        layout.addWidget(QLabel("<b>Classes to Graph:</b>"))
+        self.list_target_classes = QListWidget()
+        self.list_target_classes.setFixedHeight(100)
+
+        classes = [(1, "Main Root"), (2, "Lateral Root"), (3, "Seed"),
+                   (4, "Hypocotyl"), (5, "Leaves/Aerial"), (6, "Petiole")]
+
+        for cid, name in classes:
+            item = QListWidgetItem(f"{cid} - {name}")
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Checked if cid in self.canvas_tab.p_target_classes else Qt.Unchecked)
+            item.setData(Qt.UserRole, cid)
+            self.list_target_classes.addItem(item)
+
+        self.list_target_classes.itemChanged.connect(self.push_params)
+        layout.addWidget(self.list_target_classes)
+
         layout.addStretch()
 
+        # Finalize Scroll Area
+        scroll_area.setWidget(scroll_content)
+        main_layout.addWidget(scroll_area)
+
+        # --- Apply Button (Sticky at the bottom) ---
         self.btn_apply_mask = QPushButton("Apply Graph Colors")
         self.btn_apply_mask.setStyleSheet("background-color: #d4edda; font-weight: bold; color: #155724; padding: 15px; font-size: 14px;")
         self.btn_apply_mask.clicked.connect(self.canvas_tab.apply_graph_colors)
         
-        layout.addWidget(self.btn_apply_mask)
+        main_layout.addWidget(self.btn_apply_mask)
         self.toggle_buttons(False)
 
     def update_mode(self):
@@ -565,9 +638,18 @@ class GraphToolPanel(QWidget):
         self.canvas_tab.p_prune = self.sp_prune.value()
         self.canvas_tab.p_thick = self.sp_thick.value()
         
+        # Extract checked classes
+        targets = []
+        for i in range(self.list_target_classes.count()):
+            item = self.list_target_classes.item(i)
+            if item.checkState() == Qt.Checked:
+                targets.append(item.data(Qt.UserRole))
+                
+        self.canvas_tab.p_target_classes = targets
+    
         if self.model.active_uid:
             self.canvas_tab.generate_pipeline()
-
+            
     def toggle_buttons(self, enabled):
         self.btn_apply_mask.setEnabled(enabled)
 
