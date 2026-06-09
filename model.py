@@ -279,16 +279,16 @@ class PlantImageModel:
             if np.sum(mask) == 0: 
                 continue
             
-            # Use SciPy Label to find true 8-connected pixel components
-            labeled_mask, num_features = label(mask, structure=np.ones((3,3)))
+            # --- FASTER OPENCV CONNECTED COMPONENTS ---
+            num_features, labeled_mask = cv2.connectedComponents(mask, connectivity=8)
+            num_features -= 1 # OpenCV counts background (0) as a feature
             
             valid_count = 0
             if num_features > 0:
                 sizes = np.bincount(labeled_mask.ravel())
-                sizes[0] = 0 # Ignore the background (label 0)
+                sizes[0] = 0 # Ignore background
                 
                 for i in range(1, num_features + 1):
-                    # Discard spurious noise strictly by pixel count, not polygon area
                     if sizes[i] < 5:
                         mask[labeled_mask == i] = 0
                         self.dirty = True
@@ -296,16 +296,11 @@ class PlantImageModel:
                     else:
                         valid_count += 1
                         
-            # After cleaning, check if we still have multiple disconnected parts
             if valid_count > 1:
                 return False, uid
                 
         if needs_metadata_update:
-            # Re-generate bounding boxes for any masks that had noise erased
-            for uid in self.masks.keys():
-                coords = cv2.findNonZero(self.masks[uid])
-                if coords is not None:
-                    self.bboxes[uid] = cv2.boundingRect(coords)
+            self.regenerate_metadata() # Run exact calculation only when cleaning finishes
                     
         return True, None
     
@@ -748,14 +743,15 @@ class PlantImageModel:
         
         full_mask = self.masks[target_id]
         
-        # Optimize by working only within the bounding box
         x, y, w, h = self.bboxes[target_id]
         pad = 2
         x1, y1 = max(0, x-pad), max(0, y-pad)
         x2, y2 = min(full_mask.shape[1], x+w+pad), min(full_mask.shape[0], y+h+pad)
         roi = full_mask[y1:y2, x1:x2]
         
-        sub_labels, num_features = label(roi, structure=np.ones((3,3)))
+        # --- FASTER OPENCV CONNECTED COMPONENTS ---
+        num_features, sub_labels = cv2.connectedComponents(roi, connectivity=8)
+        num_features -= 1 # Ignore background
         
         valid_components = []
         if num_features > 1:
@@ -805,17 +801,14 @@ class PlantImageModel:
     def apply_stroke(self, uid, points, brush_size, is_erase=False, record_undo=True):
         if not points or uid not in self.masks: return
         
-        # 1. Capture targeted state BEFORE modifying pixels
         if record_undo:
             self.save_state(target_uids=uid)
-            
-        if uid in self.class_patches: 
-            del self.class_patches[uid]
             
         mask = self.masks[uid]
         color = 0 if is_erase else 1
         circle_radius = max(0, (brush_size - 1) // 2)
         
+        # 1. Draw the stroke
         if len(points) > 1:
             pts = np.array([[int(p[0]), int(p[1])] for p in points], np.int32).reshape((-1, 1, 2))
             cv2.polylines(mask, [pts], isClosed=False, color=color, thickness=brush_size)
@@ -831,9 +824,48 @@ class PlantImageModel:
             else:
                 cv2.circle(mask, (x, y), circle_radius, color, -1)
 
-        self.update_metadata_for_uid(uid)
-        self.dirty = True
+        # 2. FAST METADATA UPDATE (No full-image scanning)
+        xs = [int(p[0]) for p in points]
+        ys = [int(p[1]) for p in points]
+        
+        # Calculate the bounding box of the stroke itself
+        sx = max(0, min(xs) - brush_size)
+        sy = max(0, min(ys) - brush_size)
+        ex = min(mask.shape[1], max(xs) + brush_size)
+        ey = min(mask.shape[0], max(ys) + brush_size)
+        
+        if uid in self.bboxes:
+            ox, oy, ow, oh = self.bboxes[uid]
+            # If painting (adding pixels), expand the box. 
+            # If erasing, we leave the box as-is for speed (it will recalculate perfectly on save).
+            if not is_erase:
+                new_x = min(ox, sx)
+                new_y = min(oy, sy)
+                new_w = max(ox + ow, ex) - new_x
+                new_h = max(oy + oh, ey) - new_y
+                self.bboxes[uid] = (new_x, new_y, new_w, new_h)
+        else:
+            self.bboxes[uid] = (sx, sy, ex - sx, ey - sy)
+            
+        # 3. FAST PATCH INJECTION (Prevents slow distance transforms on redraw)
+        if uid in self.class_patches:
+            patch, px, py = self.class_patches[uid]
+            ph, pw = patch.shape
+            
+            local_pts = []
+            for p in points:
+                lx, ly = int(p[0]) - px, int(p[1]) - py
+                if 0 <= lx < pw and 0 <= ly < ph:
+                    local_pts.append([lx, ly])
+                    
+            if len(local_pts) > 1:
+                pts_arr = np.array(local_pts, np.int32).reshape((-1, 1, 2))
+                cv2.polylines(patch, [pts_arr], isClosed=False, color=color, thickness=brush_size)
+            self.class_patches[uid] = (patch, px, py)
 
+        self.dirty = True
+        self._notify_data_changed()
+        
     def apply_class_stroke(self, uid, points, brush_size, class_id):
         if not points or class_id == 0 or uid not in self.masks: return 
         
