@@ -82,6 +82,7 @@ class PaintCanvas(BaseCanvas):
     on_stroke_finished = pyqtSignal(list, bool)
     on_click = pyqtSignal(int, int, bool)
     on_split_finish = pyqtSignal(list)
+    distance_measured = pyqtSignal(float)  
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -196,6 +197,8 @@ class PaintCanvas(BaseCanvas):
                 self.poly_lines.append(self.ruler_text)
 
     def mouseReleaseEvent(self, event):
+        sp = self.mapToScene(event.pos())
+        
         if (self.is_painting and event.button() == Qt.LeftButton) or \
            (self.is_erasing and event.button() == Qt.RightButton):
             
@@ -204,14 +207,16 @@ class PaintCanvas(BaseCanvas):
                 self.temp_item = None
                 
             self.on_stroke_finished.emit(self.points_buffer, self.is_erasing)
-            
-            # Reset state
             self.is_painting = False
             self.is_erasing = False
             self.points_buffer = []
             
-        # --- NEW: Ruler End ---
+        # Calculate and emit the raw pixel length when the ruler drag finishes
         elif self.mode == "RULER" and event.button() == Qt.LeftButton:
+            if self.poly_points:
+                start_p = self.poly_points[0]
+                dist_px = math.hypot(sp.x() - start_p.x(), sp.y() - start_p.y())
+                self.distance_measured.emit(dist_px)
             self.poly_points.clear() 
             
         super().mouseReleaseEvent(event)
@@ -253,14 +258,21 @@ class PaintCanvas(BaseCanvas):
             pen.setCosmetic(True)
             self.rubber_band = self.scene.addLine(last_p.x(), last_p.y(), sp.x(), sp.y(), pen)
             
-        # --- NEW: Ruler Live Update ---
         if self.mode == "RULER" and self.poly_points and self.ruler_line and self.ruler_text:
             start_p = self.poly_points[0]
             self.ruler_line.setLine(start_p.x(), start_p.y(), sp.x(), sp.y())
+            
+            # Calculate absolute distance in pixels
             dist_px = math.hypot(sp.x() - start_p.x(), sp.y() - start_p.y())
-            dist_cm = dist_px * self.cm_per_px
+            
+            # Context-Aware Display: Show CM if calibrated, otherwise show Pixels
+            if self.cm_per_px is not None and self.cm_per_px > 0:
+                dist_cm = dist_px * self.cm_per_px
+                self.ruler_text.setPlainText(f"{dist_cm:.2f} cm")
+            else:
+                self.ruler_text.setPlainText(f"{dist_px:.1f} px")
+                
             self.ruler_text.setPos(sp.x() + 10, sp.y() - 10)
-            self.ruler_text.setPlainText(f"{dist_cm:.2f} cm")
             
         super().mouseMoveEvent(event)
 
@@ -279,6 +291,8 @@ class PaintCanvas(BaseCanvas):
 
 
 class ReviewCanvasTab(QWidget):
+    distance_measured = pyqtSignal(float)  
+    
     """
     Handles ONLY the visual canvas, overlay rendering, and stroke translation.
     Listens to the shared PlantImageModel for state changes.
@@ -314,6 +328,10 @@ class ReviewCanvasTab(QWidget):
         self.canvas.on_stroke_finished.connect(self.handle_stroke)
         self.canvas.on_click.connect(self.handle_canvas_click)
         self.canvas.on_split_finish.connect(self.handle_split)
+        
+        # Connect internal canvas canvas signal to the outer tab signal
+        self.canvas.distance_measured.connect(self.distance_measured.emit)
+        
         rl.addWidget(self.canvas)
         
         # 3. Bottom Navigation Instructions
@@ -351,39 +369,35 @@ class ReviewCanvasTab(QWidget):
     def set_active_class(self, class_id):
         self.active_class_id = class_id
 
-    # --- NEW: Scene Ruler Overlay ---
     def update_scene_ruler(self, cm_per_px):
-        """Draws a vertical ruler safely outside the image boundaries on a black background."""
+        """Draws a vertical ruler safely outside the image boundaries."""
         self.canvas.cm_per_px = cm_per_px
         
-        # Clean up old ruler if it exists
         if hasattr(self, 'scene_ruler_items'):
             for item in self.scene_ruler_items:
                 self.canvas.scene.removeItem(item)
         self.scene_ruler_items = []
         
-        if not cm_per_px or not hasattr(self, '_cached_base_pixmap'): return
-        
+        # --- MINIMAL CHANGE: Fail gracefully if cm_per_px is invalid ---
+        if cm_per_px is None or cm_per_px <= 0 or not hasattr(self, '_cached_base_pixmap'): 
+            return
+            
         img_w = self._cached_base_pixmap.width()
         img_h = self._cached_base_pixmap.height()
         pixels_per_cm = int(1.0 / cm_per_px)
         
+        # Avoid infinite loops or division by zero if scaling is extreme
         if pixels_per_cm < 10: return
         
         pad_w = 80
-        
-        # Lock scene boundaries safely backwards so we don't shift the image coordinates
         self.canvas.scene.setSceneRect(-pad_w, 0, img_w + pad_w, img_h)
         
-        # Black Background
         bg = self.canvas.scene.addRect(-pad_w, 0, pad_w, img_h, QPen(Qt.NoPen), QBrush(Qt.black))
         self.scene_ruler_items.append(bg)
         
-        # Vertical Line
         line = self.canvas.scene.addLine(-15, 0, -15, img_h, QPen(Qt.white, 2))
         self.scene_ruler_items.append(line)
         
-        # Ticks and Text
         for cm_val in range(0, int(img_h / pixels_per_cm)):
             y = int(cm_val * pixels_per_cm)
             tick = self.canvas.scene.addLine(-25, y, -15, y, QPen(Qt.white, 2))

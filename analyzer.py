@@ -9,14 +9,16 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QPushButton, QFormLayout, QTableWidget, 
                              QTableWidgetItem, QHeaderView, QMessageBox, 
                              QFileDialog, QTabWidget, QListWidget, QListWidgetItem,
-                             QStyle, QProgressDialog, QComboBox)
-from PyQt5.QtCore import Qt, QThread, pyqtSignal
+                             QStyle, QProgressDialog, QComboBox, QInputDialog)
+from PyQt5.QtGui import QRegularExpressionValidator
+from PyQt5.QtCore import Qt, QThread, pyqtSignal, QRegularExpression
 
 # --- MODULAR CORE IMPORTS ---
 from core.model import PlantImageModel
 from core.analyzer_engine import extract_plate_metrics, export_rsml_and_json
 from tabs.review_tab import ReviewCanvasTab
 from tabs.inspector_tab import PhenomicsInspectorTab 
+from tabs.report_tab import ComparisonReportTab
 
 APP_NAME = "chronorootAnalyzer"
 GLOBAL_CONFIG_DIR = os.path.expanduser(f"~/.config/{APP_NAME}")
@@ -30,6 +32,9 @@ if not os.path.exists(GLOBAL_CONFIG_FILE):
 else:
     with open(GLOBAL_CONFIG_FILE, 'r') as f: GLOBAL_CONFIG = json.load(f)
 
+# ==========================================
+# MAIN APPLICATION WINDOW
+# ==========================================
 class AnalyzerFileStatsWidget(QWidget):
     def __init__(self, name, annotator_status, analyzer_status, plant_count):
         super().__init__()
@@ -46,7 +51,7 @@ class AnalyzerFileStatsWidget(QWidget):
         top_row.addWidget(icon_label); top_row.addWidget(QLabel(name)); top_row.addStretch()
         layout.addLayout(top_row)
         
-        lbl_stats = QLabel(f"Status: {analyzer_status} | Nº Plants: {plant_count}")
+        lbl_stats = QLabel(f"Status: {analyzer_status} | Num Plants: {plant_count}")
         if analyzer_status == "Analyzed": lbl_stats.setStyleSheet("color: #28a745; font-size: 10px; font-weight: bold;")
         elif analyzer_status == "Ready": lbl_stats.setStyleSheet("color: #007bff; font-size: 10px; font-weight: bold;")
         else: lbl_stats.setStyleSheet("color: #dc3545; font-size: 10px;")
@@ -95,7 +100,7 @@ class AnalyzerWindow(QMainWindow):
         lp_layout.addLayout(out_layout)
         
         nav_layout = QHBoxLayout()
-        self.btn_up = QPushButton("⬆ Up Level"); self.btn_up.clicked.connect(self.navigate_up)
+        self.btn_up = QPushButton("Up Level"); self.btn_up.clicked.connect(self.navigate_up)
         self.btn_refresh = QPushButton("Refresh"); self.btn_refresh.clicked.connect(self.populate_browser)
         nav_layout.addWidget(self.btn_up); nav_layout.addWidget(self.btn_refresh)
         lp_layout.addLayout(nav_layout)
@@ -118,25 +123,46 @@ class AnalyzerWindow(QMainWindow):
         
         # Calibration Dropdown
         self.cb_calibration = QComboBox()
-        self.cb_calibration.addItems(["Scanner DPI", "Known Image Height (cm)", "Known Image Width (cm)"])
+        self.cb_calibration.addItems(["Scanner DPI", "Known Image Height (cm)", "Known Image Width (cm)", "Custom Ratio (px/cm)"])
         self.cb_calibration.setCurrentText(GLOBAL_CONFIG.get("calib_mode", "Scanner DPI"))
         self.in_calib_val = QLineEdit(GLOBAL_CONFIG.get("calib_val", "600"))
         
         self.cb_calibration.currentIndexChanged.connect(self.update_canvas_ruler)
-        self.in_calib_val.textChanged.connect(self.update_canvas_ruler)
+        
+        # --- MINIMAL CHANGE: Dedicated Calibration Trigger Button ---
+        calib_layout = QHBoxLayout()
+        calib_layout.addWidget(self.in_calib_val)
+        
+        self.btn_set_calib = QPushButton("Set via Measurement")
+        self.btn_set_calib.clicked.connect(self.start_calibration_flow)
+        calib_layout.addWidget(self.btn_set_calib)
         
         form.addRow("Plate ID:", self.in_plate_id)
         form.addRow("Condition:", self.in_condition)
         form.addRow("Timepoint (Stage):", self.in_timepoint)
         form.addRow("Calibration Method:", self.cb_calibration)
-        form.addRow("Calibration Value:", self.in_calib_val)
+        form.addRow("Calibration Value:", calib_layout) # Replaced QLineEdit with Layout
         mp_layout.addLayout(form)
         
-        self.btn_measure_tool = QPushButton("📏 Test Distance Tool")
+        self.btn_measure_tool = QPushButton("Test Distance Tool")
         self.btn_measure_tool.setCheckable(True)
         self.btn_measure_tool.setStyleSheet("background-color: #ffc107; color: black; font-weight: bold;")
         self.btn_measure_tool.clicked.connect(self.toggle_ruler_mode)
         mp_layout.addWidget(self.btn_measure_tool)
+        
+        # Flag to track if the ruler is currently hijacking the calibration
+        self.is_calibrating = False
+        
+        # Explicitly allow digits with either a dot OR a comma at the hardware level
+        reg_ex = QRegularExpression(r"^[0-9]+[.,]?[0-9]*$")
+        num_validator = QRegularExpressionValidator(reg_ex, self)
+        self.in_calib_val.setValidator(num_validator)
+        
+        # Keep your metadata connections the same
+        self.in_plate_id.editingFinished.connect(lambda: self.sanitize_line_edit(self.in_plate_id, "Plate ID"))
+        self.in_condition.editingFinished.connect(lambda: self.sanitize_line_edit(self.in_condition, "Condition"))
+        self.in_timepoint.editingFinished.connect(lambda: self.sanitize_line_edit(self.in_timepoint, "Timepoint"))
+        self.in_calib_val.editingFinished.connect(self.validate_and_update_ruler)
         
         mp_layout.addSpacing(10)
         mp_layout.addWidget(QLabel("<b>Plant Identification:</b>"))
@@ -146,14 +172,16 @@ class AnalyzerWindow(QMainWindow):
         self.table_plants.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.table_plants.setSelectionBehavior(QTableWidget.SelectRows)
         self.table_plants.itemSelectionChanged.connect(self.on_table_selection)
+        self.table_plants.itemChanged.connect(self.on_table_item_changed)
         mp_layout.addWidget(self.table_plants)
         
+        
         btn_layout = QHBoxLayout()
-        self.btn_measure = QPushButton("1. Measure & Inspect")
+        self.btn_measure = QPushButton("1. Measure")
         self.btn_measure.setStyleSheet("background-color: #007bff; color: white; font-weight: bold; padding: 10px;")
         self.btn_measure.clicked.connect(self.run_measurements)
         
-        self.btn_export = QPushButton("2. Export JSON & RSML")
+        self.btn_export = QPushButton("2. Export")
         self.btn_export.setStyleSheet("background-color: #28a745; color: white; font-weight: bold; padding: 10px;")
         self.btn_export.setEnabled(False)
         self.btn_export.clicked.connect(self.run_export)
@@ -169,11 +197,23 @@ class AnalyzerWindow(QMainWindow):
         self.tabs = QTabWidget()
         self.canvas_review = ReviewCanvasTab(self.model)
         self.canvas_review.set_mode("SELECT")
+        
+        # --- NEW: Connect the distance tool signal from canvas ---
+        # Assuming your ReviewCanvasTab emits a `distance_measured(float)` signal containing the pixel length
+        if hasattr(self.canvas_review, 'distance_measured'):
+            self.canvas_review.distance_measured.connect(self.on_distance_measured)
+            
         self.tabs.addTab(self.canvas_review, "Plate Overview")
         
-        # Instantiate Isolated Inspector Tab
         self.inspector_tab = PhenomicsInspectorTab()
         self.tabs.addTab(self.inspector_tab, "Phenomics Inspector")
+        
+        # Add the new Report tab
+        self.report_tab = ComparisonReportTab(self)
+        self.tabs.addTab(self.report_tab, "Report & Plots")
+        
+        # Trigger refresh of reports when tab is clicked
+        self.tabs.currentChanged.connect(self.on_tab_changed)
         
         rp_layout.addWidget(self.tabs)
         
@@ -184,6 +224,12 @@ class AnalyzerWindow(QMainWindow):
         self.model.register_selection_callback(self.sync_canvas_to_table)
         self.populate_browser()
 
+    def on_tab_changed(self, index):
+        # Refresh the report list if the user navigates to the Report tab (Index 2)
+        if index == 2:
+            self.report_tab.refresh_file_list()
+
+    # --- CALIBRATION LOGIC ---
     def get_cm_per_px(self):
         calib_mode = self.cb_calibration.currentText()
         try:
@@ -194,6 +240,8 @@ class AnalyzerWindow(QMainWindow):
             
         if "DPI" in calib_mode:
             return 2.54 / val
+        elif "Custom Ratio" in calib_mode:
+            return 1.0 / val
         else:
             if self.model.raw_image is None: return None
             h_px, w_px = self.model.raw_image.shape[:2]
@@ -201,20 +249,117 @@ class AnalyzerWindow(QMainWindow):
             elif "Width" in calib_mode: return val / w_px
         return None
 
+    def start_calibration_flow(self):
+        """Forces the canvas into Ruler mode specifically for calibration."""
+        self.is_calibrating = True
+        self.btn_measure_tool.setChecked(True)
+        self.canvas_review.set_mode("RULER")
+        self.btn_measure_tool.setText("Stop Measuring")
+        self.tabs.setCurrentIndex(0)
+        QMessageBox.information(self, "Calibration Mode", "Click and drag across a known distance (e.g., a ruler in the photo).")
+
     def toggle_ruler_mode(self):
+        """Standard toggle for visual inspection only."""
         if self.btn_measure_tool.isChecked():
+            self.is_calibrating = False # Normal visual inspection, no prompt
             self.canvas_review.set_mode("RULER")
             self.btn_measure_tool.setText("Stop Measuring")
             self.tabs.setCurrentIndex(0)
         else:
+            self.is_calibrating = False
             self.canvas_review.set_mode("SELECT")
             self.btn_measure_tool.setText("Test Distance Tool")
 
+    def validate_and_update_ruler(self):
+        """Validates the main calibration entry field on focus out / enter press."""
+        text_val = self.in_calib_val.text().strip()
+        
+        if not text_val:
+            self.in_calib_val.setText("1.0")
+            text_val = "1.0"
+        
+        # 1. Convert commas to dots first
+        if "," in text_val:
+            text_val = text_val.replace(",", ".")
+            
+        # 2. Strict Check: If there's more than 1 dot, keep only the first one
+        if text_val.count('.') > 1:
+            parts = text_val.split('.')
+            # Stitch back together: first_part . everything_else_joined
+            text_val = parts[0] + '.' + ''.join(parts[1:])
+            
+            QMessageBox.warning(
+                self, "Invalid Format", 
+                "Multiple decimal points detected. The value has been truncated to a valid number."
+            )
+            
+        # Update the UI field with the final sanitized string safely
+        self.in_calib_val.blockSignals(True)
+        self.in_calib_val.setText(text_val)
+        self.in_calib_val.blockSignals(False)
+            
+        self.update_canvas_ruler()
+        
+    def on_distance_measured(self, pixel_distance):
+        """Validates numerical entries generated through the test distance routine."""
+        if not self.is_calibrating:
+            return 
+            
+        self.btn_measure_tool.setChecked(False)
+        self.canvas_review.set_mode("SELECT")
+        self.btn_measure_tool.setText("Test Distance Tool")
+        
+        text_val, ok = QInputDialog.getText(
+            self, "Calibration Setup", 
+            f"Line measured as {pixel_distance:.2f} pixels.\nWhat is this distance in real life (cm)?",
+            text="1.0"
+        )
+        
+        if ok and text_val.strip():
+            raw_text = text_val.strip().replace(" ", "_").replace(",", ".")
+            
+            # Strict Check: Fix multiple dots in the popup window
+            if raw_text.count('.') > 1:
+                parts = raw_text.split('.')
+                raw_text = parts[0] + '.' + ''.join(parts[1:])
+                QMessageBox.warning(
+                    self, "Format Correction",
+                    "Multiple decimal points detected. The value has been automatically corrected."
+                )
+            
+            try:
+                real_cm = float(raw_text)
+                if real_cm > 0:
+                    px_per_cm = pixel_distance / real_cm
+                    self.cb_calibration.setCurrentText("Custom Ratio (px/cm)")
+                    self.in_calib_val.setText(f"{px_per_cm:.2f}")
+                    self.update_canvas_ruler()
+                else:
+                    raise ValueError
+            except ValueError:
+                QMessageBox.critical(self, "Processing Failure", "Failed to resolve value. Enter a positive number.")
+            
+        self.is_calibrating = False
+
     def update_canvas_ruler(self):
+        text_val = self.in_calib_val.text()
+        
+        # --- MINIMAL CHANGE: Validate and auto-correct comma to dot ---
+        if "," in text_val:
+            # Block signals temporarily to prevent infinite event loops while fixing text
+            self.in_calib_val.blockSignals(True)
+            corrected_text = text_val.replace(",", ".")
+            self.in_calib_val.setText(corrected_text)
+            self.in_calib_val.blockSignals(False)
+            
+            QMessageBox.warning(
+                self, "Invalid Format", 
+                "ChronoRoot requires dots (.) instead of commas (,) for decimal numbers.\n\n"
+                "The value has been automatically corrected for you."
+            )
+            
         cm_per_px = self.get_cm_per_px()
-        if cm_per_px:
-            self.current_cm_per_px = cm_per_px
-            self.canvas_review.update_scene_ruler(cm_per_px)
+        self.canvas_review.update_scene_ruler(cm_per_px)
             
     # --- FILE BROWSER LOGIC ---
     def change_input_dir(self):
@@ -236,8 +381,15 @@ class AnalyzerWindow(QMainWindow):
             if item["type"] == "file":
                 if item["status"] != "Completed": item["analyzer_status"] = "Not Annotated"
                 else:
-                    metrics_path = os.path.join(out_directory, f"{item['name']}_Metrics.json")
-                    item["analyzer_status"] = "Analyzed" if os.path.exists(metrics_path) else "Ready"
+                    # Dynamically look for any Metrics.json related to this base image
+                    # Since renaming, we check if ANY file starts with PlateID and contains the base name
+                    metrics_found = False
+                    if os.path.exists(out_directory):
+                        for f in os.listdir(out_directory):
+                            if item['name'] in f and f.endswith("_Metrics.json"):
+                                metrics_found = True
+                                break
+                    item["analyzer_status"] = "Analyzed" if metrics_found else "Ready"
         return contents
 
     def populate_browser(self):
@@ -259,7 +411,9 @@ class AnalyzerWindow(QMainWindow):
             
         for item in contents:
             if item["type"] == "dir":
-                list_item = QListWidgetItem(f"📁 {item['name']}")
+                # Fetch the native standard directory icon from the OS theme
+                icon = QApplication.style().standardIcon(QStyle.SP_DirIcon)
+                list_item = QListWidgetItem(icon, item['name'])
                 list_item.setData(Qt.UserRole, {"type": "dir", "path": item["path"]})
                 self.task_list.addItem(list_item)
             elif item["type"] == "file":
@@ -343,6 +497,40 @@ class AnalyzerWindow(QMainWindow):
         self.canvas_review.refresh_canvas()
         self.canvas_review.zoom_to_plant(uid)
         self.update_inspector_view()
+        
+    def sanitize_line_edit(self, line_edit, field_name):
+        """Replaces illegal spacing with underscores in plate metadata text entries."""
+        raw_text = line_edit.text()
+        if " " in raw_text:
+            line_edit.blockSignals(True)
+            sanitized = raw_text.replace(" ", "_")
+            line_edit.setText(sanitized)
+            line_edit.blockSignals(False)
+            
+            QMessageBox.warning(
+                self, "Naming Convention Warning", 
+                f"Spaces are not allowed in the '{field_name}' field to prevent "
+                "downstream file parsing and directory path breaks.\n\n"
+                "Spaces have been automatically replaced with underscores (_)."
+            )
+
+    def on_table_item_changed(self, item):
+        """Sanitizes manual user string edits inside Genotype or Plant Number table cells."""
+        if item.column() == 0: 
+            return # Ignore read-only automatic UID column
+            
+        raw_text = item.text()
+        if " " in raw_text:
+            self.table_plants.blockSignals(True)
+            sanitized = raw_text.replace(" ", "_")
+            item.setText(sanitized)
+            self.table_plants.blockSignals(False)
+            
+            QMessageBox.warning(
+                self, "Naming Convention Warning", 
+                "Spaces are not permitted in Genotype or Plant Number identifiers to maintain clean metrics maps.\n\n"
+                "Spaces have been automatically converted to underscores (_)."
+            )
 
     def sync_canvas_to_table(self):
         uid = self.model.active_uid
@@ -358,6 +546,10 @@ class AnalyzerWindow(QMainWindow):
     # --- EXTRACTION ENGINE ---
     def run_measurements(self):
         if not self.model.masks: return
+        
+        if not self.table_plants.selectedItems() and self.table_plants.rowCount() > 0:
+            self.table_plants.selectRow(0)
+            
         cm_per_px = self.get_cm_per_px()
         if cm_per_px is None:
             QMessageBox.warning(self, "Error", "Invalid Calibration Value.")
@@ -406,18 +598,32 @@ class AnalyzerWindow(QMainWindow):
         os.makedirs(self.out_dir, exist_ok=True)
         cm_per_px = self.get_cm_per_px()
         if cm_per_px is None: return
+        
+        # 1. Grab UI inputs
+        plate_id = self.in_plate_id.text().strip()
+        condition = self.in_condition.text().strip()
+        timepoint = self.in_timepoint.text().strip()
+        
+        # 2. Build the export filename standard
+        export_base_name = f"{plate_id}_{condition}_{timepoint}"
+        
+        # 3. Store reference to the actual image
+        original_img_name = os.path.basename(self.model.image_path) if self.model.image_path else "unknown"
             
         plate_meta = {
-            "plate_id": self.in_plate_id.text(),
-            "condition": self.in_condition.text(),
-            "timepoint": self.in_timepoint.text(),
+            "original_image": original_img_name,
+            "plate_id": plate_id,
+            "condition": condition,
+            "timepoint": timepoint,
             "calibration_mode": self.cb_calibration.currentText(),
             "calibration_val": self.in_calib_val.text(),
             "scale_cm_px": cm_per_px,
         }
         
         self.show_loading("Exporting JSON and RSML...")
-        worker = ModelWorker(export_rsml_and_json, self.out_dir, self.current_base_name, plate_meta, self.measurements_cache)
+        
+        # Pass the dynamic export_base_name instead of self.current_base_name
+        worker = ModelWorker(export_rsml_and_json, self.out_dir, export_base_name, plate_meta, self.measurements_cache)
         self.active_workers.add(worker)
         worker.finished.connect(self._on_export_finished)
         worker.error.connect(self._on_thread_error)
@@ -431,6 +637,7 @@ class AnalyzerWindow(QMainWindow):
             worker.deleteLater()
             
         self.populate_browser()
+        self.report_tab.refresh_file_list()
         QMessageBox.information(self, "Export Complete", f"Successfully exported to:\n{self.out_dir}")
 
     def show_loading(self, message):
