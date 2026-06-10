@@ -11,7 +11,7 @@ from PyQt5.QtGui import QImage, QPixmap, QColor, QPainter
 from PyQt5.QtCore import Qt, pyqtSignal
 
 # Import the isolated builder
-from core.root_graph_builder import extract_skeleton, createGraph
+from core.root_graph_builder import extract_skeleton, createGraph, graphInit
 
 class AspectRatioLabel(QWidget):
     def __init__(self):
@@ -304,48 +304,25 @@ class GraphCanvasTab(QWidget):
     def update_graph_visuals(self):
         if not self.current_graph: return
         
-        # Get class 1 nodes for auto start/end logic
-        c1_nodes = []
-        for node in self.current_graph.nodes:
-            x, y = node
-            for dy in [-1, 0, 1]:
-                for dx in [-1, 0, 1]:
-                    if dy == 0 and dx == 0: continue
-                    pos_x, pos_y = x + dx, y + dy
-                    if 0 <= pos_y < self.mc_skel_bin.shape[0] and 0 <= pos_x < self.mc_skel_bin.shape[1]:
-                        if self.mc_skel_bin[pos_y, pos_x] == 1:
-                            c1_nodes.append(node)
-                            break
-                else:
-                    continue
-                break
-            
+        # =================================================================
+        # 1. FETCH BASE MATHEMATICAL STATE
+        # Let the core logic determine the true biological start/end and 
+        # apply the junction forgiveness traversal costs.
+        # =================================================================
+        self.current_graph = graphInit(self.current_graph)
+        
         auto_start, auto_end = None, None
         
-        if c1_nodes:
-            c1_endpoints = [n for n in c1_nodes if self.current_graph.degree(n) == 1]
-            
-            if c1_endpoints:
-                auto_end = max(c1_endpoints, key=lambda n: n[1])
-            else:
-                auto_end = max(c1_nodes, key=lambda n: n[1])
-                
-            remaining_endpoints = [n for n in c1_endpoints if n != auto_end]
-            remaining_deg2 = [n for n in c1_nodes if self.current_graph.degree(n) == 2 and n != auto_end]
-            remaining_nodes = [n for n in c1_nodes if n != auto_end]
-            
-            if remaining_endpoints:
-                auto_start = min(remaining_endpoints, key=lambda n: n[1])
-            elif remaining_deg2:
-                auto_start = min(remaining_deg2, key=lambda n: n[1])
-            elif remaining_nodes:
-                auto_start = min(remaining_nodes, key=lambda n: n[1])
-            else:
-                auto_start = auto_end
-        else:
-            auto_start = tuple(self.actual_base) if self.actual_base else None
-            auto_end = max(self.current_graph.nodes, key=lambda n: n[1]) if self.current_graph.nodes else None
+        # Extract the calculated seed and tip from the node attributes
+        for node, data in self.current_graph.nodes(data=True):
+            if data.get('type') == 'Ini':
+                auto_start = node
+            elif data.get('type') == 'FTip':
+                auto_end = node
 
+        # =================================================================
+        # 2. APPLY USER UI OVERRIDES
+        # =================================================================
         if self.user_start_node and self.user_start_node not in self.current_graph:
             self.user_start_node = None
         if self.user_end_node and self.user_end_node not in self.current_graph:
@@ -356,16 +333,10 @@ class GraphCanvasTab(QWidget):
         start_node = self.user_start_node if self.user_start_node else auto_start
         end_node = self.user_end_node if self.user_end_node else auto_end
 
-        for u, v, data in self.current_graph.edges(data=True):
-            phys_len = data.get('weight', 1.0)
-            # --- FIXED: Reference the preserved type so pathfinding doesn't get trapped ---
-            orig_type = data.get('orig_root_type', 2)
-            if orig_type == 1:
-                data['traversal_cost'] = phys_len
-            else:
-                data['traversal_cost'] = phys_len * 100.0 
-            # ------------------------------------------------------------------------------
-                
+        # =================================================================
+        # 3. INTERACTIVE PATHFINDING 
+        # Uses the traversal_cost already set by graphInit_static!
+        # =================================================================
         sorted_wps = sorted(self.user_waypoints, key=lambda n: n[1]) 
         targets = []
         if start_node: targets.append(start_node)
@@ -376,19 +347,28 @@ class GraphCanvasTab(QWidget):
         if len(targets) >= 2:
             for i in range(len(targets) - 1):
                 try:
-                    sub_path = nx.shortest_path(self.current_graph, source=targets[i], target=targets[i+1], weight='traversal_cost')
+                    sub_path = nx.shortest_path(
+                        self.current_graph, 
+                        source=targets[i], 
+                        target=targets[i+1], 
+                        weight='traversal_cost'
+                    )
                     sub_edges = set(zip(sub_path[:-1], sub_path[1:]))
                     path_edges.update(sub_edges)
                 except nx.NetworkXNoPath:
                     pass 
                     
+        # Visually lock the path edges as Main Root (1), others as Lateral (2)
         for u, v, data in self.current_graph.edges(data=True):
             if (u, v) in path_edges or (v, u) in path_edges:
                 self.current_graph.edges[u, v]['root_type'] = 1
             else:
                 self.current_graph.edges[u, v]['root_type'] = 2
                 
-        graph_vis = self.base_rgb.copy() # <--- CHANGED
+        # =================================================================
+        # 4. RENDER GRAPH TO CANVAS
+        # =================================================================
+        graph_vis = self.base_rgb.copy()
         
         for u, v, data in self.current_graph.edges(data=True):
             r_type = data.get('root_type', 0)
@@ -411,7 +391,9 @@ class GraphCanvasTab(QWidget):
                 
         self.lbl_graph.setPixmap(self.numpy_to_qpixmap(graph_vis))
         
-        # --- NEW: Alpha Blended Preview Overlay ---
+        # =================================================================
+        # 5. RENDER SEMANTIC PREVIEW
+        # =================================================================
         preview_vis = self.base_rgb.copy() 
         overlay_prev = np.zeros_like(self.base_rgb)
         active_mask_prev = np.zeros(self.base_rgb.shape[:2], dtype=bool)
@@ -420,17 +402,19 @@ class GraphCanvasTab(QWidget):
         
         for cid, color in self.model.class_colors.items():
             if cid == 0: 
-                continue # Skip the background
+                continue 
                 
             mask = recolored_semantic == cid
             if np.any(mask):
-                # Paint using the global class colors (taking only the RGB channels)
                 overlay_prev[mask] = color[:3] 
                 active_mask_prev[mask] = True
             
-        alpha = 0.5 # 50% transparency
+        alpha = 0.5 
         for c in range(3):
-            preview_vis[active_mask_prev, c] = (self.base_rgb[active_mask_prev, c] * (1 - alpha) + overlay_prev[active_mask_prev, c] * alpha).astype(np.uint8)
+            preview_vis[active_mask_prev, c] = (
+                self.base_rgb[active_mask_prev, c] * (1 - alpha) + 
+                overlay_prev[active_mask_prev, c] * alpha
+            ).astype(np.uint8)
             
         self.lbl_preview.setPixmap(self.numpy_to_qpixmap(preview_vis))
 
@@ -445,8 +429,13 @@ class GraphCanvasTab(QWidget):
         kernel = np.ones((3, 3), np.uint8)
         dilated_canvas = np.zeros_like(final_mc_skel)
 
-        # Re-dilate the newly assigned classes
-        for cls in self.p_target_classes:
+        # Define what gets drawn last (highest priority at the end of the list)
+        draw_order = [6, 5, 4, 3, 2, 1] 
+            
+        # Sort the target classes based on your custom order
+        ordered_targets = sorted(self.p_target_classes, key=lambda c: draw_order.index(c) if c in draw_order else -1)
+
+        for cls in ordered_targets:
             cls_skel = (final_mc_skel == cls).astype(np.uint8)
             if np.sum(cls_skel) == 0: continue
             dilated = cv2.dilate(cls_skel, kernel, iterations=self.p_thick)

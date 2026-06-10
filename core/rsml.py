@@ -22,16 +22,96 @@ import getpass
 import re
 import numpy as np
 import os
+from core.root_graph_builder import skeleton_nodes
 
 # Global counter for RSML points
 n_points = 0
+
+def createTree(conf, frame_idx, images, graph, skeleton, skeleton_overlay):
+    """
+    Main entry point to generate the RSML tree from the graph/skeleton.
+    """
+    global n_points
+    n_points = 0
+    
+    # 1. Create RSML Header
+    tree = createHeader(conf, frame_idx, images)
+    root = tree.getroot()
+    
+    # 2. Extract endpoints for checking termination
+    _, end_points = skeleton_nodes(skeleton)
+    end_points = np.array(end_points)
+    
+    # 3. Find the Seed (Start) Node
+    seed_nodes = [node for node in graph.nodes() if graph.nodes[node]['type'] == "Ini"]
+    
+    if len(seed_nodes) == 0:
+        # Fallback: Find node with degree 1 that is highest (lowest Y)
+        possible_seeds = [n for n in graph.nodes() if graph.degree(n) == 1]
+        if not possible_seeds: 
+             # If no endpoints, just pick top-most node
+             all_nodes = list(graph.nodes())
+             if not all_nodes: raise Exception("Graph is empty")
+             seed_node = sorted(all_nodes, key=lambda p: p[1])[0]
+        else:
+            seed_node = sorted(possible_seeds, key=lambda p: p[1])[0]
+    else:
+        seed_node = seed_nodes[0]
+
+    seed_position = np.array(graph.nodes[seed_node]['pos'], dtype='int')
+    
+    # Snap seed to nearest skeleton endpoint (in case of trimming offset)
+    if len(end_points) > 0:
+        distances = np.linalg.norm(end_points - seed_position, axis=1)
+        if np.min(distances) < 10.0:
+            nearest_idx = np.argmin(distances)
+            seed_position = end_points[nearest_idx]
+    
+    # 4. Identify Main Root colors from the graph
+    # (These are the edge colors assigned during createGraph traversal)
+    main_root_colors = []
+    for u, v, data in graph.edges(data=True):
+        if data.get('root_type') == 10:
+            main_root_colors.append(data.get('color', 0))
+    
+    # 5. Build the RSML
+    # We pass a COPY of the skeleton overlay because we will erase pixels as we visit them
+    _, number_lateral_roots = completeRSML(
+        skeleton_overlay.copy(), 
+        seed_position, 
+        root, 
+        main_root_colors
+    )
+    
+    plant = tree.find(".//plant")
+    main_root = plant.find("./root[@label='mainRoot']")
+    
+    # 1. Get all direct children of the main root
+    direct_children = main_root.findall("./root")
+    
+    # 2. Filter them to ensure they are explicitly labeled as Order 1
+    # This ignores any potential malformed tags that don't match your naming convention
+    xml_o1_count = 0
+    for child in direct_children:
+        label = child.get('label', '')
+        if label.startswith('lat_o1'):
+            xml_o1_count += 1
+
+    if number_lateral_roots != xml_o1_count:
+        print(f"Warning: Calculated {number_lateral_roots} laterals, but XML contains {xml_o1_count} 'lat_o1' tags.")
+    
+    # 6. Safety check
+    total_skeleton_points = np.sum(skeleton > 0)
+    if total_skeleton_points > 0 and n_points < total_skeleton_points * 0.7:
+        raise Exception("RSML generation incomplete: less than 70% skeleton points captured.")
+    
+    return tree, number_lateral_roots
 
 def completeRSML(ske2, seed, rsml, mainRoot):
     """
     Main traversal logic. Uses a queue and explicit marking to avoid loops.
     """
     global n_points
-    n_points = 0
 
     plant = rsml.find(".//plant")
     if plant is None: plant = rsml.find('scene').find('plant')
@@ -265,7 +345,7 @@ def add_point(polyline, point):
     ET.SubElement(polyline, 'point', {'x': str(point[0]), 'y': str(point[1])}).tail = '\n\t\t\t\t'
 
 def createHeader(conf, i, images):
-    rsml_file = "analysis/default.rsml"
+    rsml_file = "core/default.rsml"
     tree = ET.parse(rsml_file)
     root = tree.getroot()
     metadata = root[0]
@@ -309,8 +389,3 @@ def createHeader(conf, i, images):
     scene.append(plant)
 
     return tree
-
-def saveRSML(rsmlTree, conf, image_name):
-    path = os.path.join(conf['folders']['rsml'], image_name.replace('.png','.rsml'))
-    rsmlTree.write(open(path, 'w'), encoding='unicode')
-    return

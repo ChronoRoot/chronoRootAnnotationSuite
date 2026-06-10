@@ -15,11 +15,11 @@ class SortableTreeItem(QTreeWidgetItem):
         return self.data(col, Qt.UserRole) < other.data(col, Qt.UserRole)
     
 from core.model import PlantImageModel
-from annotator_tabs.review_tab import ReviewCanvasTab, ReviewToolPanel
-from annotator_tabs.guidelines_tab import GuidelinesTab
-from annotator_tabs.about_tab import AboutTab
-from annotator_tabs.frangi_tab import FrangiCanvasTab, FrangiToolPanel
-from annotator_tabs.graph_tab import GraphCanvasTab, GraphToolPanel
+from tabs.review_tab import ReviewCanvasTab, ReviewToolPanel
+from tabs.guidelines_tab import GuidelinesTab
+from tabs.about_tab import AboutTab
+from tabs.frangi_tab import FrangiCanvasTab, FrangiToolPanel
+from tabs.graph_tab import GraphCanvasTab, GraphToolPanel
 
 # ==========================================
 # CONFIGURATION

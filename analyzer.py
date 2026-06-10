@@ -15,8 +15,8 @@ from PyQt5.QtCore import Qt, QThread, pyqtSignal
 # --- MODULAR CORE IMPORTS ---
 from core.model import PlantImageModel
 from core.analyzer_engine import extract_plate_metrics, export_rsml_and_json
-from annotator_tabs.review_tab import ReviewCanvasTab
-from annotator_tabs.inspector_tab import PhenomicsInspectorTab # <--- NEW ISOLATED TAB
+from tabs.review_tab import ReviewCanvasTab
+from tabs.inspector_tab import PhenomicsInspectorTab 
 
 APP_NAME = "chronorootAnalyzer"
 GLOBAL_CONFIG_DIR = os.path.expanduser(f"~/.config/{APP_NAME}")
