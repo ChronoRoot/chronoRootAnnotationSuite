@@ -106,6 +106,7 @@ class PaintCanvas(BaseCanvas):
         self.cm_per_px = 1.0 
         self.ruler_line = None
         self.ruler_text = None
+        self.is_calibrating = False # Defaults to simple image-space measurement inspection
         
         self.update_cursor_visual()
 
@@ -265,8 +266,8 @@ class PaintCanvas(BaseCanvas):
             # Calculate absolute distance in pixels
             dist_px = math.hypot(sp.x() - start_p.x(), sp.y() - start_p.y())
             
-            # Context-Aware Display: Show CM if calibrated, otherwise show Pixels
-            if self.cm_per_px is not None and self.cm_per_px > 0:
+            # Context-Aware Display: Show CM if calibrated AND not creating a new scale calibration mapping
+            if not self.is_calibrating and self.cm_per_px is not None and self.cm_per_px > 0:
                 dist_cm = dist_px * self.cm_per_px
                 self.ruler_text.setPlainText(f"{dist_cm:.2f} cm")
             else:
@@ -345,6 +346,10 @@ class ReviewCanvasTab(QWidget):
     # ==========================================
     # CANVAS STATE & RENDERING
     # ==========================================
+    def set_calibrating(self, state):
+        """Passes the active calibration setup state down to the paint scene canvas views."""
+        self.canvas.is_calibrating = state
+
     def set_mode(self, mode):
         if self.current_mode in ["SELECT", "GLOBAL"] and mode not in ["SELECT", "GLOBAL"]:
             self.previous_view_mode = self.current_mode

@@ -150,6 +150,10 @@ class AnalyzerWindow(QMainWindow):
         self.btn_measure_tool.clicked.connect(self.toggle_ruler_mode)
         mp_layout.addWidget(self.btn_measure_tool)
         
+        # Disable interaction until an image is loaded safely
+        self.btn_measure_tool.setEnabled(False)
+        self.btn_set_calib.setEnabled(False)
+        
         # Flag to track if the ruler is currently hijacking the calibration
         self.is_calibrating = False
         
@@ -180,6 +184,7 @@ class AnalyzerWindow(QMainWindow):
         self.btn_measure = QPushButton("1. Measure")
         self.btn_measure.setStyleSheet("background-color: #007bff; color: white; font-weight: bold; padding: 10px;")
         self.btn_measure.clicked.connect(self.run_measurements)
+        self.btn_measure.setEnabled(False)
         
         self.btn_export = QPushButton("2. Export")
         self.btn_export.setStyleSheet("background-color: #28a745; color: white; font-weight: bold; padding: 10px;")
@@ -253,6 +258,7 @@ class AnalyzerWindow(QMainWindow):
         """Forces the canvas into Ruler mode specifically for calibration."""
         self.is_calibrating = True
         self.btn_measure_tool.setChecked(True)
+        self.canvas_review.set_calibrating(True) # Force pixel rendering mode
         self.canvas_review.set_mode("RULER")
         self.btn_measure_tool.setText("Stop Measuring")
         self.tabs.setCurrentIndex(0)
@@ -261,12 +267,14 @@ class AnalyzerWindow(QMainWindow):
     def toggle_ruler_mode(self):
         """Standard toggle for visual inspection only."""
         if self.btn_measure_tool.isChecked():
-            self.is_calibrating = False # Normal visual inspection, no prompt
+            self.is_calibrating = False 
+            self.canvas_review.set_calibrating(False)
             self.canvas_review.set_mode("RULER")
             self.btn_measure_tool.setText("Stop Measuring")
             self.tabs.setCurrentIndex(0)
         else:
             self.is_calibrating = False
+            self.canvas_review.set_calibrating(False)
             self.canvas_review.set_mode("SELECT")
             self.btn_measure_tool.setText("Test Distance Tool")
 
@@ -306,6 +314,7 @@ class AnalyzerWindow(QMainWindow):
             return 
             
         self.btn_measure_tool.setChecked(False)
+        self.canvas_review.set_calibrating(False)
         self.canvas_review.set_mode("SELECT")
         self.btn_measure_tool.setText("Test Distance Tool")
         
@@ -463,6 +472,11 @@ class AnalyzerWindow(QMainWindow):
         self.model._notify_data_changed()
         self.canvas_review.refresh_canvas()
         self.update_canvas_ruler()
+        
+        # Image loaded successfully -> enable calibration and extraction tools
+        self.btn_measure_tool.setEnabled(True)
+        self.btn_set_calib.setEnabled(True)
+        self.btn_measure.setEnabled(True)
 
     def populate_plant_table(self):
         self.table_plants.blockSignals(True)
