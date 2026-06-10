@@ -9,13 +9,14 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QPushButton, QFormLayout, QTableWidget, 
                              QTableWidgetItem, QHeaderView, QMessageBox, 
                              QFileDialog, QTabWidget, QListWidget, QListWidgetItem,
-                             QStyle, QProgressDialog, QTextEdit, QCheckBox, QSizePolicy, QComboBox)
+                             QStyle, QProgressDialog, QComboBox)
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
-from PyQt5.QtGui import QColor, QImage, QPixmap, QPainter
 
+# --- MODULAR CORE IMPORTS ---
 from core.model import PlantImageModel
-from core.analyzer_engine import extract_plate_metrics, export_rsml_and_json, tipAngle, emergenceAngle
+from core.analyzer_engine import extract_plate_metrics, export_rsml_and_json
 from annotator_tabs.review_tab import ReviewCanvasTab
+from annotator_tabs.inspector_tab import PhenomicsInspectorTab # <--- NEW ISOLATED TAB
 
 APP_NAME = "chronorootAnalyzer"
 GLOBAL_CONFIG_DIR = os.path.expanduser(f"~/.config/{APP_NAME}")
@@ -28,32 +29,6 @@ if not os.path.exists(GLOBAL_CONFIG_FILE):
     GLOBAL_CONFIG = default_config
 else:
     with open(GLOBAL_CONFIG_FILE, 'r') as f: GLOBAL_CONFIG = json.load(f)
-
-
-class AspectRatioLabel(QWidget):
-    """Prevents PyQt from locking the layout to massive image sizes."""
-    def __init__(self):
-        super().__init__()
-        self.setMinimumSize(100, 100) 
-        self._pixmap = None
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-
-    def setPixmap(self, pixmap):
-        self._pixmap = pixmap
-        self.update()
-
-    def clear(self):
-        self._pixmap = None
-        self.update()
-
-    def paintEvent(self, event):
-        if self._pixmap and not self._pixmap.isNull():
-            p = QPainter(self)
-            rect = self.contentsRect()
-            scaled_pixmap = self._pixmap.scaled(rect.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            x = int((rect.width() - scaled_pixmap.width()) / 2)
-            y = int((rect.height() - scaled_pixmap.height()) / 2)
-            p.drawPixmap(x, y, scaled_pixmap)
 
 class AnalyzerFileStatsWidget(QWidget):
     def __init__(self, name, annotator_status, analyzer_status, plant_count):
@@ -86,7 +61,7 @@ class AnalyzerWindow(QMainWindow):
         self.model = PlantImageModel()
         self.active_workers = set()
         self.measurements_cache = {} 
-        self.current_cm_per_px = 1.0 # Stored globally for UI redrawing
+        self.current_cm_per_px = 1.0 
         
         self.in_dir = GLOBAL_CONFIG.get("input_root", ".")
         self.out_dir = GLOBAL_CONFIG.get("output_root", ".")
@@ -141,12 +116,14 @@ class AnalyzerWindow(QMainWindow):
         self.in_condition = QLineEdit("Control")
         self.in_timepoint = QLineEdit("Day_07")
         
-        # --- NEW: Robust Calibration Inputs ---
+        # Calibration Dropdown
         self.cb_calibration = QComboBox()
         self.cb_calibration.addItems(["Scanner DPI", "Known Image Height (cm)", "Known Image Width (cm)"])
         self.cb_calibration.setCurrentText(GLOBAL_CONFIG.get("calib_mode", "Scanner DPI"))
-        
         self.in_calib_val = QLineEdit(GLOBAL_CONFIG.get("calib_val", "600"))
+        
+        self.cb_calibration.currentIndexChanged.connect(self.update_canvas_ruler)
+        self.in_calib_val.textChanged.connect(self.update_canvas_ruler)
         
         form.addRow("Plate ID:", self.in_plate_id)
         form.addRow("Condition:", self.in_condition)
@@ -154,6 +131,12 @@ class AnalyzerWindow(QMainWindow):
         form.addRow("Calibration Method:", self.cb_calibration)
         form.addRow("Calibration Value:", self.in_calib_val)
         mp_layout.addLayout(form)
+        
+        self.btn_measure_tool = QPushButton("📏 Test Distance Tool")
+        self.btn_measure_tool.setCheckable(True)
+        self.btn_measure_tool.setStyleSheet("background-color: #ffc107; color: black; font-weight: bold;")
+        self.btn_measure_tool.clicked.connect(self.toggle_ruler_mode)
+        mp_layout.addWidget(self.btn_measure_tool)
         
         mp_layout.addSpacing(10)
         mp_layout.addWidget(QLabel("<b>Plant Identification:</b>"))
@@ -188,30 +171,10 @@ class AnalyzerWindow(QMainWindow):
         self.canvas_review.set_mode("SELECT")
         self.tabs.addTab(self.canvas_review, "Plate Overview")
         
-        self.inspector_widget = QWidget()
-        insp_layout = QHBoxLayout(self.inspector_widget)
+        # Instantiate Isolated Inspector Tab
+        self.inspector_tab = PhenomicsInspectorTab()
+        self.tabs.addTab(self.inspector_tab, "Phenomics Inspector")
         
-        # --- NEW: Checkbox controls for the Inspector ---
-        controls_layout = QVBoxLayout()
-        self.chk_show_graph = QCheckBox("Show Roots (MR=Red, LR=Green)"); self.chk_show_graph.setChecked(True)
-        self.chk_show_initiation = QCheckBox("Highlight LR Initiation Points"); self.chk_show_initiation.setChecked(True)
-        self.chk_show_em_angles = QCheckBox("Draw Emergence Angles"); self.chk_show_em_angles.setChecked(True)
-        self.chk_show_tip_angles = QCheckBox("Draw Tip Angles")
-        
-        for chk in [self.chk_show_graph, self.chk_show_initiation, self.chk_show_em_angles, self.chk_show_tip_angles]:
-            chk.stateChanged.connect(self.update_inspector_view)
-            controls_layout.addWidget(chk)
-            
-        self.lbl_inspector_img = AspectRatioLabel()
-        controls_layout.addWidget(self.lbl_inspector_img, stretch=1)
-        insp_layout.addLayout(controls_layout, stretch=2)
-        
-        self.txt_metrics = QTextEdit()
-        self.txt_metrics.setReadOnly(True)
-        self.txt_metrics.setStyleSheet("font-family: monospace; font-size: 14px;")
-        insp_layout.addWidget(self.txt_metrics, stretch=1)
-        
-        self.tabs.addTab(self.inspector_widget, "Phenomics Inspector")
         rp_layout.addWidget(self.tabs)
         
         splitter.addWidget(rp)
@@ -221,6 +184,38 @@ class AnalyzerWindow(QMainWindow):
         self.model.register_selection_callback(self.sync_canvas_to_table)
         self.populate_browser()
 
+    def get_cm_per_px(self):
+        calib_mode = self.cb_calibration.currentText()
+        try:
+            val = float(self.in_calib_val.text())
+            if val <= 0: raise ValueError
+        except ValueError:
+            return None
+            
+        if "DPI" in calib_mode:
+            return 2.54 / val
+        else:
+            if self.model.raw_image is None: return None
+            h_px, w_px = self.model.raw_image.shape[:2]
+            if "Height" in calib_mode: return val / h_px
+            elif "Width" in calib_mode: return val / w_px
+        return None
+
+    def toggle_ruler_mode(self):
+        if self.btn_measure_tool.isChecked():
+            self.canvas_review.set_mode("RULER")
+            self.btn_measure_tool.setText("Stop Measuring")
+            self.tabs.setCurrentIndex(0)
+        else:
+            self.canvas_review.set_mode("SELECT")
+            self.btn_measure_tool.setText("Test Distance Tool")
+
+    def update_canvas_ruler(self):
+        cm_per_px = self.get_cm_per_px()
+        if cm_per_px:
+            self.current_cm_per_px = cm_per_px
+            self.canvas_review.update_scene_ruler(cm_per_px)
+            
     # --- FILE BROWSER LOGIC ---
     def change_input_dir(self):
         d = QFileDialog.getExistingDirectory(self, "Select Input Folder", self.in_dir)
@@ -313,14 +308,14 @@ class AnalyzerWindow(QMainWindow):
         self.model.callbacks_muted = False
         self.model._notify_data_changed()
         self.canvas_review.refresh_canvas()
+        self.update_canvas_ruler()
 
     def populate_plant_table(self):
         self.table_plants.blockSignals(True)
         self.table_plants.setRowCount(0)
         self.measurements_cache.clear()
         self.btn_export.setEnabled(False)
-        self.txt_metrics.clear()
-        self.lbl_inspector_img.clear()
+        self.inspector_tab.update_view(None, None, None, None, None)
         
         for uid in sorted(self.model.masks.keys()):
             row = self.table_plants.rowCount()
@@ -361,32 +356,12 @@ class AnalyzerWindow(QMainWindow):
         self.update_inspector_view()
 
     # --- EXTRACTION ENGINE ---
-    def get_cm_per_px(self):
-        calib_mode = self.cb_calibration.currentText()
-        try:
-            val = float(self.in_calib_val.text())
-            if val <= 0: raise ValueError
-        except ValueError:
-            return None
-            
-        if "DPI" in calib_mode:
-            return 2.54 / val
-        else:
-            if self.model.raw_image is None: return None
-            h_px, w_px = self.model.raw_image.shape[:2]
-            if "Height" in calib_mode: return val / h_px
-            elif "Width" in calib_mode: return val / w_px
-        return None
-
     def run_measurements(self):
         if not self.model.masks: return
-        
         cm_per_px = self.get_cm_per_px()
         if cm_per_px is None:
-            QMessageBox.warning(self, "Calibration Error", "Invalid Calibration Value.")
+            QMessageBox.warning(self, "Error", "Invalid Calibration Value.")
             return
-            
-        self.current_cm_per_px = cm_per_px
 
         plants_meta = []
         for row in range(self.table_plants.rowCount()):
@@ -419,87 +394,16 @@ class AnalyzerWindow(QMainWindow):
     def update_inspector_view(self):
         uid = self.model.active_uid
         if not uid or uid not in self.measurements_cache:
-            if uid: self.lbl_inspector_img.setText("Press 'Measure & Inspect' to view data.")
+            self.inspector_tab.update_view(None, None, None, None, None)
             return
             
         data = self.measurements_cache[uid]
-        cm_per_px = self.current_cm_per_px
-        
-        # 1. Update Text Readout
-        report = f"--- AUTOMATIC ID: {uid} ---\n\n"
-        report += f"Genotype: {data['genotype']}\n"
-        report += f"Plant #: {data['plant_num']}\n\n"
-        report += f"Main Root: {data['mr_length_cm']:.2f} cm\n"
-        report += f"Lateral Roots: {data['lr_length_cm']:.2f} cm\n"
-        report += f"LR Count: {data['lr_count']}\n\n"
-        report += f"Mean Tip Angle: {data['tip_angle_deg']:.1f}°\n"
-        report += f"Mean Emerg. Angle: {data['emergence_angle_deg']:.1f}°\n\n"
-        report += f"Hull Area: {data['hull_area_cm2']:.2f} cm²\n"
-        report += f"Width: {data['width_cm']:.2f} cm\n"
-        report += f"Height: {data['height_cm']:.2f} cm\n"
-        self.txt_metrics.setText(report)
-        
-        # 2. Draw Visuals
-        x, y, w, h = self.model.bboxes.get(uid, (0,0,0,0))
-        if w > 0:
-            pad = 40
-            x1, y1 = max(0, x-pad), max(0, y-pad)
-            x2, y2 = min(self.model.raw_image.shape[1], x+w+pad), min(self.model.raw_image.shape[0], y+h+pad)
-            
-            crop_rgb = self.model.raw_image[y1:y2, x1:x2].copy()
-            h_img, w_img, _ = crop_rgb.shape
-            
-            # Draw Dynamic Ruler (1cm ticks)
-            cm_in_px = int(1.0 / cm_per_px)
-            if cm_in_px > 10: # Safety to prevent drawing thousands of lines if scaling is broken
-                cv2.line(crop_rgb, (10, 10), (10, h_img - 10), (255, 255, 255), 2)
-                for tick_y in range(10, h_img - 10, cm_in_px):
-                    cv2.line(crop_rgb, (5, tick_y), (15, tick_y), (255, 255, 255), 2)
-                    cv2.putText(crop_rgb, f"{(tick_y-10)//cm_in_px}cm", (20, tick_y + 5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
-
-            # Draw Graph Overlay
-            if self.chk_show_graph.isChecked():
-                # Main Root (RED)
-                pts_main = data["main_pts"]
-                if len(pts_main) > 1:
-                    pts_arr = np.array([[int(p[0]) - x1, int(p[1]) - y1] for p in pts_main], np.int32).reshape((-1, 1, 2))
-                    cv2.polylines(crop_rgb, [pts_arr], False, (255, 0, 0), 2)
-                
-                # Lateral Roots (GREEN)
-                for lat_pts in data["lateral_pts_list"]:
-                    if len(lat_pts) < 2: continue
-                    pts_arr = np.array([[int(p[0]) - x1, int(p[1]) - y1] for p in lat_pts], np.int32).reshape((-1, 1, 2))
-                    cv2.polylines(crop_rgb, [pts_arr], False, (0, 255, 0), 2)
-
-            for lat_pts in data["lateral_pts_list"]:
-                if len(lat_pts) < 2: continue
-                start = (int(lat_pts[0][0]) - x1, int(lat_pts[0][1]) - y1)
-                
-                # Initiation Points (YELLOW)
-                if self.chk_show_initiation.isChecked():
-                    cv2.circle(crop_rgb, start, 4, (0, 255, 255), -1)
-                    
-                # Emergence Angle Vector (WHITE)
-                if self.chk_show_em_angles.isChecked():
-                    cv2.line(crop_rgb, start, (start[0], start[1] + 30), (200, 200, 200), 1) # Vertical Ref
-                    em_end = lat_pts[min(cm_in_px, len(lat_pts)) - 1]
-                    em_pt = (int(em_end[0]) - x1, int(em_end[1]) - y1)
-                    cv2.line(crop_rgb, start, em_pt, (255, 255, 255), 2)
-                    
-                # Tip Angle Vector (CYAN)
-                if self.chk_show_tip_angles.isChecked():
-                    if not self.chk_show_em_angles.isChecked():
-                        cv2.line(crop_rgb, start, (start[0], start[1] + 30), (200, 200, 200), 1) # Vertical Ref
-                    tip_pt = (int(lat_pts[-1][0]) - x1, int(lat_pts[-1][1]) - y1)
-                    cv2.line(crop_rgb, start, tip_pt, (0, 255, 255), 2)
-
-            qimg = QImage(crop_rgb.data, w_img, h_img, 3 * w_img, QImage.Format_RGB888)
-            self.lbl_inspector_img.setPixmap(QPixmap.fromImage(qimg))
+        bbox = self.model.bboxes.get(uid, (0,0,0,0))
+        self.inspector_tab.update_view(uid, data, self.model.raw_image, bbox, self.current_cm_per_px)
 
     def run_export(self):
         if not self.measurements_cache: return
         os.makedirs(self.out_dir, exist_ok=True)
-        
         cm_per_px = self.get_cm_per_px()
         if cm_per_px is None: return
             

@@ -1,3 +1,4 @@
+import math
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QListWidget, 
                              QListWidgetItem, QPushButton, QLabel, QGraphicsView, 
                              QGraphicsScene, QGraphicsPixmapItem, QGraphicsRectItem, 
@@ -99,11 +100,17 @@ class PaintCanvas(BaseCanvas):
         
         self.bbox_group = self.scene.createItemGroup([])
         self.bbox_group.setZValue(2) 
+        
+        # --- NEW: Ruler Variables ---
+        self.cm_per_px = 1.0 
+        self.ruler_line = None
+        self.ruler_text = None
+        
         self.update_cursor_visual()
 
     def set_mode(self, mode):
         self.mode = mode
-        if mode != "SPLIT": self.clear_poly_visuals()
+        if mode not in ["SPLIT", "RULER"]: self.clear_poly_visuals()
             
         if mode in ["SELECT", "GLOBAL"]:
             self.setCursor(Qt.ArrowCursor)
@@ -114,6 +121,9 @@ class PaintCanvas(BaseCanvas):
             if self.brush_cursor: self.brush_cursor.setVisible(True)
         elif mode == "SPLIT":
             self.setCursor(Qt.PointingHandCursor)
+            if self.brush_cursor: self.brush_cursor.setVisible(False)
+        elif mode == "RULER":
+            self.setCursor(Qt.CrossCursor)
             if self.brush_cursor: self.brush_cursor.setVisible(False)
             
     def update_cursor_visual(self):
@@ -165,6 +175,25 @@ class PaintCanvas(BaseCanvas):
                     last_p = self.poly_points[-2]
                     line = self.scene.addLine(last_p.x(), last_p.y(), sp.x(), sp.y(), QPen(Qt.red, 4))
                     self.poly_lines.append(line)
+                    
+        # --- NEW: Ruler Drag Start ---
+        elif self.mode == "RULER":
+            if event.button() == Qt.LeftButton:
+                self.clear_poly_visuals() 
+                self.poly_points = [sp]
+                
+                pen = QPen(Qt.yellow, 3, Qt.DashLine)
+                pen.setCosmetic(True)
+                self.ruler_line = self.scene.addLine(sp.x(), sp.y(), sp.x(), sp.y(), pen)
+                self.ruler_line.setZValue(100)
+                
+                self.ruler_text = self.scene.addText("0.00 cm")
+                self.ruler_text.setDefaultTextColor(Qt.yellow)
+                self.ruler_text.setPos(sp.x(), sp.y() - 20)
+                self.ruler_text.setZValue(100)
+                
+                self.poly_lines.append(self.ruler_line)
+                self.poly_lines.append(self.ruler_text)
 
     def mouseReleaseEvent(self, event):
         if (self.is_painting and event.button() == Qt.LeftButton) or \
@@ -180,6 +209,10 @@ class PaintCanvas(BaseCanvas):
             self.is_painting = False
             self.is_erasing = False
             self.points_buffer = []
+            
+        # --- NEW: Ruler End ---
+        elif self.mode == "RULER" and event.button() == Qt.LeftButton:
+            self.poly_points.clear() 
             
         super().mouseReleaseEvent(event)
     
@@ -219,6 +252,15 @@ class PaintCanvas(BaseCanvas):
             pen = QPen(Qt.red, 4, Qt.DashLine)
             pen.setCosmetic(True)
             self.rubber_band = self.scene.addLine(last_p.x(), last_p.y(), sp.x(), sp.y(), pen)
+            
+        # --- NEW: Ruler Live Update ---
+        if self.mode == "RULER" and self.poly_points and self.ruler_line and self.ruler_text:
+            start_p = self.poly_points[0]
+            self.ruler_line.setLine(start_p.x(), start_p.y(), sp.x(), sp.y())
+            dist_px = math.hypot(sp.x() - start_p.x(), sp.y() - start_p.y())
+            dist_cm = dist_px * self.cm_per_px
+            self.ruler_text.setPos(sp.x() + 10, sp.y() - 10)
+            self.ruler_text.setPlainText(f"{dist_cm:.2f} cm")
             
         super().mouseMoveEvent(event)
 
@@ -309,25 +351,66 @@ class ReviewCanvasTab(QWidget):
     def set_active_class(self, class_id):
         self.active_class_id = class_id
 
+    # --- NEW: Scene Ruler Overlay ---
+    def update_scene_ruler(self, cm_per_px):
+        """Draws a vertical ruler safely outside the image boundaries on a black background."""
+        self.canvas.cm_per_px = cm_per_px
+        
+        # Clean up old ruler if it exists
+        if hasattr(self, 'scene_ruler_items'):
+            for item in self.scene_ruler_items:
+                self.canvas.scene.removeItem(item)
+        self.scene_ruler_items = []
+        
+        if not cm_per_px or not hasattr(self, '_cached_base_pixmap'): return
+        
+        img_w = self._cached_base_pixmap.width()
+        img_h = self._cached_base_pixmap.height()
+        pixels_per_cm = int(1.0 / cm_per_px)
+        
+        if pixels_per_cm < 10: return
+        
+        pad_w = 80
+        
+        # Lock scene boundaries safely backwards so we don't shift the image coordinates
+        self.canvas.scene.setSceneRect(-pad_w, 0, img_w + pad_w, img_h)
+        
+        # Black Background
+        bg = self.canvas.scene.addRect(-pad_w, 0, pad_w, img_h, QPen(Qt.NoPen), QBrush(Qt.black))
+        self.scene_ruler_items.append(bg)
+        
+        # Vertical Line
+        line = self.canvas.scene.addLine(-15, 0, -15, img_h, QPen(Qt.white, 2))
+        self.scene_ruler_items.append(line)
+        
+        # Ticks and Text
+        for cm_val in range(0, int(img_h / pixels_per_cm)):
+            y = int(cm_val * pixels_per_cm)
+            tick = self.canvas.scene.addLine(-25, y, -15, y, QPen(Qt.white, 2))
+            self.scene_ruler_items.append(tick)
+            
+            text = self.canvas.scene.addText(f"{cm_val}cm")
+            text.setDefaultTextColor(Qt.white)
+            text.setPos(-pad_w + 5, y - 10)
+            self.scene_ruler_items.append(text)
+
     def refresh_canvas(self):
-        # 1. OPTIMIZATION: Cache the massive Base Image so we don't reconstruct it every stroke
         if not hasattr(self, '_cached_base_pixmap') or getattr(self, '_last_image_path', None) != self.model.image_path:
             raw_data = self.model.get_raw_image_data()
             if not raw_data: return
             self._cached_base_pixmap = _bytes_to_pixmap(raw_data, is_rgba=False)
             self._last_image_path = self.model.image_path
             
-        # Pull from the instant cache
         base_pixmap = self._cached_base_pixmap
         
-        # 2. GLOBAL MULTI-CLASS VIEW
+        # 1. GLOBAL MULTI-CLASS VIEW
         if self.current_mode == "GLOBAL":
             overlay_data = self.model.get_full_class_overlay_data(selected_ids=list(self.model.selected_uids), opacity=self.opacity)
             overlay_pixmap = _bytes_to_pixmap(overlay_data, is_rgba=True)
             self.canvas.update_view(base_pixmap, overlay_pixmap)
             self.canvas.update_bboxes(self.model.bboxes, self.model.color_map, self.show_bboxes)
 
-        # 3. SELECT MODE
+        # 2. SELECT MODE
         elif self.current_mode == "SELECT":
             valid_selection = [uid for uid in self.model.selected_uids if uid in self.model.masks]
             overlay_data = self.model.get_overlay_data(selected_ids=valid_selection, opacity=self.opacity)
@@ -336,9 +419,8 @@ class ReviewCanvasTab(QWidget):
             self.canvas.update_view(base_pixmap, overlay_pixmap)
             self.canvas.update_bboxes(self.model.bboxes, self.model.color_map, self.show_bboxes)
             
-        # 4. INDIVIDUAL MULTI-CLASS EDITING
+        # 3. INDIVIDUAL MULTI-CLASS EDITING
         elif self.current_mode == "SEMANTIC" and self.model.active_uid in self.model.masks:
-            # OPTIMIZATION: Paint onto a transparent overlay, NOT the base image!
             overlay_pixmap = QPixmap(base_pixmap.size())
             overlay_pixmap.fill(Qt.transparent)
             painter = QPainter(overlay_pixmap)
@@ -355,7 +437,7 @@ class ReviewCanvasTab(QWidget):
             self.canvas.update_view(base_pixmap, overlay_pixmap) 
             self.canvas.update_bboxes({}, {}, False)
             
-        # 5. ISOLATION MODE (Paint/Split/New Plant)
+        # 4. ISOLATION MODE (Paint/Split/New Plant)
         else: 
             if self.model.active_uid and self.model.active_uid in self.model.masks:
                 overlay_data = self.model.get_overlay_data(isolate_uids=[self.model.active_uid], opacity=self.opacity)
@@ -387,6 +469,8 @@ class ReviewCanvasTab(QWidget):
             self.lbl_info.setText(f"MULTI-CLASS [Plant ID {active}]: Paint specific biology classes.")
         elif mode == "SPLIT":
             self.lbl_info.setText(f"SPLIT MODE [Plant ID {active}]: Draw a red line across the plant to cut it.")
+        elif mode == "RULER":
+            self.lbl_info.setText("RULER MODE: Click and drag to measure distance. Set calibration on the left to convert to cm.")
 
     def zoom_to_plant(self, uid):
         if uid in self.model.bboxes:

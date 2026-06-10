@@ -8,7 +8,7 @@ from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QPushButton,
                              QListWidget, QListWidgetItem,
                              QScrollArea, QFrame)
 from PyQt5.QtGui import QImage, QPixmap, QColor, QPainter
-from PyQt5.QtCore import Qt, pyqtSignal, QTimer
+from PyQt5.QtCore import Qt, pyqtSignal
 
 # Import the isolated builder
 from core.root_graph_builder import extract_skeleton, createGraph
@@ -543,10 +543,6 @@ class GraphToolPanel(QWidget):
         self.model = shared_model
         self.canvas_tab = canvas_tab
         
-        self.debounce_timer = QTimer()
-        self.debounce_timer.setSingleShot(True)
-        self.debounce_timer.timeout.connect(self.execute_push_params)
-        
         self.init_ui()
         self.model.register_selection_callback(self.on_selection_changed)
 
@@ -639,11 +635,6 @@ class GraphToolPanel(QWidget):
         else: self.canvas_tab.interaction_mode = "WAYPOINT"
 
     def push_params(self):
-        """Intercepts the UI signal and restarts the countdown timer."""
-        self.debounce_timer.start(300)
-
-    def execute_push_params(self):
-        """Executes the heavy graph pipeline generation."""
         self.canvas_tab.p_prune = self.sp_prune.value()
         self.canvas_tab.p_thick = self.sp_thick.value()
         
