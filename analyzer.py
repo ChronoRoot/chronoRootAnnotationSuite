@@ -1,15 +1,15 @@
 import sys
 import os
 import json
-import cv2
-import numpy as np
+import re 
 
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                              QHBoxLayout, QSplitter, QLabel, QLineEdit, 
-                             QPushButton, QFormLayout, QTableWidget, 
+                             QPushButton, QFormLayout, QTableWidget, QRadioButton,
                              QTableWidgetItem, QHeaderView, QMessageBox, 
                              QFileDialog, QTabWidget, QListWidget, QListWidgetItem,
-                             QStyle, QProgressDialog, QComboBox, QInputDialog)
+                             QStyle, QProgressDialog, QComboBox, QInputDialog,
+                             QDialog, QAbstractItemView, QGroupBox, QCheckBox)
 from PyQt5.QtGui import QRegularExpressionValidator
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QRegularExpression
 
@@ -26,11 +26,20 @@ GLOBAL_CONFIG_FILE = os.path.join(GLOBAL_CONFIG_DIR, "analyzerConfig.json")
 os.makedirs(GLOBAL_CONFIG_DIR, exist_ok=True)
 
 if not os.path.exists(GLOBAL_CONFIG_FILE):
-    default_config = {"input_root": ".", "output_root": ".", "calib_mode": "Scanner DPI", "calib_val": "600"}
+    default_config = {
+        "input_root": ".", 
+        "output_root": ".", 
+        "calib_mode": "Scanner DPI", 
+        "calib_val": "600",
+        "saved_genotypes": ["Col-0", "Ler", "Cvi-0"] # <-- Add this
+    }
     with open(GLOBAL_CONFIG_FILE, 'w') as f: json.dump(default_config, f, indent=4)
     GLOBAL_CONFIG = default_config
 else:
     with open(GLOBAL_CONFIG_FILE, 'r') as f: GLOBAL_CONFIG = json.load(f)
+    # Ensure backwards compatibility if the user already has a config file
+    if "saved_genotypes" not in GLOBAL_CONFIG:
+        GLOBAL_CONFIG["saved_genotypes"] = ["Col-0", "Ler", "Cvi-0"]
 
 # ==========================================
 # MAIN APPLICATION WINDOW
@@ -57,6 +66,78 @@ class AnalyzerFileStatsWidget(QWidget):
         else: lbl_stats.setStyleSheet("color: #dc3545; font-size: 10px;")
         layout.addWidget(lbl_stats)
 
+# ==========================================
+# GENOTYPE MANAGER DIALOG
+# ==========================================
+class GenotypeManagerDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Manage Saved Genotypes")
+        self.resize(350, 400)
+        layout = QVBoxLayout(self)
+        
+        self.table = QTableWidget(0, 2)
+        self.table.setHorizontalHeaderLabels(["ID", "Genotype Name"])
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.populate_table()
+        layout.addWidget(self.table)
+        
+        btn_layout = QHBoxLayout()
+        btn_add = QPushButton("+ Add Row")
+        btn_add.clicked.connect(self.add_row)
+        btn_remove = QPushButton("- Remove Selected")
+        btn_remove.clicked.connect(self.remove_row)
+        
+        btn_layout.addWidget(btn_add)
+        btn_layout.addWidget(btn_remove)
+        layout.addLayout(btn_layout)
+        
+        btn_save = QPushButton("Save & Close")
+        btn_save.setStyleSheet("background-color: #28a745; color: white; font-weight: bold;")
+        btn_save.clicked.connect(self.accept)
+        layout.addWidget(btn_save)
+        
+    def populate_table(self):
+        self.table.setRowCount(0)
+        for i, geno in enumerate(GLOBAL_CONFIG.get("saved_genotypes", [])):
+            self.table.insertRow(i)
+            id_item = QTableWidgetItem(str(i + 1))
+            id_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled) # Read-only ID
+            self.table.setItem(i, 0, id_item)
+            self.table.setItem(i, 1, QTableWidgetItem(geno))
+            
+    def add_row(self):
+        row = self.table.rowCount()
+        self.table.insertRow(row)
+        id_item = QTableWidgetItem(str(row + 1))
+        id_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+        self.table.setItem(row, 0, id_item)
+        self.table.setItem(row, 1, QTableWidgetItem("New_Genotype"))
+        self.table.editItem(self.table.item(row, 1)) # Instantly prompt editing
+        
+    def remove_row(self):
+        rows = sorted(set(item.row() for item in self.table.selectedItems()), reverse=True)
+        for row in rows:
+            self.table.removeRow(row)
+        # Re-number IDs
+        for i in range(self.table.rowCount()):
+            self.table.item(i, 0).setText(str(i + 1))
+            
+    def accept(self):
+        # Extract clean names from the 2nd column
+        genos = []
+        for i in range(self.table.rowCount()):
+            item = self.table.item(i, 1)
+            if item and item.text().strip():
+                genos.append(item.text().strip().replace(" ", "_"))
+                
+        GLOBAL_CONFIG["saved_genotypes"] = genos
+        with open(GLOBAL_CONFIG_FILE, 'w') as f:
+            json.dump(GLOBAL_CONFIG, f, indent=4)
+        super().accept()
+
 class AnalyzerWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -80,7 +161,9 @@ class AnalyzerWindow(QMainWindow):
         splitter = QSplitter(Qt.Horizontal)
         layout.addWidget(splitter)
         
-        # 1. LEFT PANE
+        # ==========================================
+        # 1. LEFT PANE (File Browser)
+        # ==========================================
         lp = QWidget()
         lp_layout = QVBoxLayout(lp)
         lp_layout.addWidget(QLabel("<b>Input Directory:</b>"))
@@ -109,9 +192,24 @@ class AnalyzerWindow(QMainWindow):
         self.task_list.itemDoubleClicked.connect(self.on_item_double_clicked)
         self.task_list.itemClicked.connect(self.on_item_clicked)
         lp_layout.addWidget(self.task_list)
+        
+        # Add Left Pane to Main Splitter
         splitter.addWidget(lp)
         
-        # 2. MIDDLE PANE
+        # ==========================================
+        # TOP-LEVEL WORKSPACE TABS
+        # ==========================================
+        self.workspace_tabs = QTabWidget()
+        self.workspace_tabs.currentChanged.connect(self.on_workspace_tab_changed)
+        
+        # --- WORKSPACE 1: EXTRACTION & ANALYSIS ---
+        self.analysis_widget = QWidget()
+        analysis_layout = QHBoxLayout(self.analysis_widget)
+        analysis_layout.setContentsMargins(0, 0, 0, 0)
+        
+        self.analysis_splitter = QSplitter(Qt.Horizontal)
+        
+        # [ MIDDLE PANE (mp) ]
         mp = QWidget()
         mp_layout = QVBoxLayout(mp)
         
@@ -129,7 +227,7 @@ class AnalyzerWindow(QMainWindow):
         
         self.cb_calibration.currentIndexChanged.connect(self.update_canvas_ruler)
         
-        # --- MINIMAL CHANGE: Dedicated Calibration Trigger Button ---
+        # Dedicated Calibration Trigger Button
         calib_layout = QHBoxLayout()
         calib_layout.addWidget(self.in_calib_val)
         
@@ -141,7 +239,7 @@ class AnalyzerWindow(QMainWindow):
         form.addRow("Condition:", self.in_condition)
         form.addRow("Timepoint (Stage):", self.in_timepoint)
         form.addRow("Calibration Method:", self.cb_calibration)
-        form.addRow("Calibration Value:", calib_layout) # Replaced QLineEdit with Layout
+        form.addRow("Calibration Value:", calib_layout)
         mp_layout.addLayout(form)
         
         self.btn_measure_tool = QPushButton("Test Distance Tool")
@@ -154,31 +252,75 @@ class AnalyzerWindow(QMainWindow):
         self.btn_measure_tool.setEnabled(False)
         self.btn_set_calib.setEnabled(False)
         
-        # Flag to track if the ruler is currently hijacking the calibration
         self.is_calibrating = False
         
-        # Explicitly allow digits with either a dot OR a comma at the hardware level
         reg_ex = QRegularExpression(r"^[0-9]+[.,]?[0-9]*$")
         num_validator = QRegularExpressionValidator(reg_ex, self)
         self.in_calib_val.setValidator(num_validator)
         
-        # Keep your metadata connections the same
         self.in_plate_id.editingFinished.connect(lambda: self.sanitize_line_edit(self.in_plate_id, "Plate ID"))
         self.in_condition.editingFinished.connect(lambda: self.sanitize_line_edit(self.in_condition, "Condition"))
         self.in_timepoint.editingFinished.connect(lambda: self.sanitize_line_edit(self.in_timepoint, "Timepoint"))
         self.in_calib_val.editingFinished.connect(self.validate_and_update_ruler)
         
         mp_layout.addSpacing(10)
-        mp_layout.addWidget(QLabel("<b>Plant Identification:</b>"))
+
+        # --- SMART BULK GENOTYPE EDITOR ---
+        bulk_layout = QHBoxLayout()
+        bulk_layout.addWidget(QLabel("<b>Plant Identification:</b>"))
+        bulk_layout.addStretch()
+        
+        self.cb_bulk_genotype = QComboBox()
+        self.cb_bulk_genotype.setEditable(True)
+        self.cb_bulk_genotype.setFixedWidth(120)
+        self.cb_bulk_genotype.lineEdit().editingFinished.connect(lambda: self._check_and_add_genotype(self.cb_bulk_genotype))
+        
+        self.btn_manage_genos = QPushButton("Genotype List")
+        self.btn_manage_genos.clicked.connect(self.open_genotype_manager)
+        
+        bulk_layout.addWidget(self.cb_bulk_genotype)
+        bulk_layout.addWidget(self.btn_manage_genos)
+        mp_layout.addLayout(bulk_layout)
         
         self.table_plants = QTableWidget(0, 3)
-        self.table_plants.setHorizontalHeaderLabels(["Automatic ID", "Genotype", "Plant #"])
+        self.table_plants.setHorizontalHeaderLabels(["ID", "Genotype", "Plant #"])
         self.table_plants.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.table_plants.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
         self.table_plants.setSelectionBehavior(QTableWidget.SelectRows)
         self.table_plants.itemSelectionChanged.connect(self.on_table_selection)
-        self.table_plants.itemChanged.connect(self.on_table_item_changed)
+        
+        # NOTE: itemChanged is connected later to avoid firing during population
         mp_layout.addWidget(self.table_plants)
         
+        disp_group = QGroupBox("Canvas Label Settings")
+        disp_layout = QHBoxLayout()
+        
+        self.chk_show_num = QCheckBox("Plant #")
+        self.chk_show_num.setChecked(True)
+        self.chk_show_num.toggled.connect(self._on_label_pref_changed)
+        
+        self.chk_show_geno = QCheckBox("Genotype")
+        self.chk_show_geno.setChecked(True)
+        self.chk_show_geno.toggled.connect(self._on_label_pref_changed)
+        
+        self.rad_fmt_text = QRadioButton("Text")
+        self.rad_fmt_num = QRadioButton("Index")
+        self.rad_fmt_text.setChecked(True)
+        
+        self.rad_fmt_text.toggled.connect(self._on_label_pref_changed)
+        self.rad_fmt_num.toggled.connect(self._on_label_pref_changed)
+        
+        disp_layout.addWidget(QLabel("Show:"))
+        disp_layout.addWidget(self.chk_show_num)
+        disp_layout.addWidget(self.chk_show_geno)
+        disp_layout.addSpacing(15)
+        disp_layout.addWidget(QLabel("Format:"))
+        disp_layout.addWidget(self.rad_fmt_text)
+        disp_layout.addWidget(self.rad_fmt_num)
+        disp_layout.addStretch()
+        
+        disp_group.setLayout(disp_layout)
+        mp_layout.addWidget(disp_group)
         
         btn_layout = QHBoxLayout()
         self.btn_measure = QPushButton("1. Measure")
@@ -193,18 +335,17 @@ class AnalyzerWindow(QMainWindow):
         
         btn_layout.addWidget(self.btn_measure); btn_layout.addWidget(self.btn_export)
         mp_layout.addLayout(btn_layout)
-        splitter.addWidget(mp)
         
-        # 3. RIGHT PANE
+        # [ FIX #1: Add to Analysis Splitter, not Main Splitter ]
+        self.analysis_splitter.addWidget(mp)
+        
+        # [ RIGHT PANE (rp) ]
         rp = QWidget()
         rp_layout = QVBoxLayout(rp)
         
         self.tabs = QTabWidget()
         self.canvas_review = ReviewCanvasTab(self.model)
         self.canvas_review.set_mode("SELECT")
-        
-        # --- NEW: Connect the distance tool signal from canvas ---
-        # Assuming your ReviewCanvasTab emits a `distance_measured(float)` signal containing the pixel length
         if hasattr(self.canvas_review, 'distance_measured'):
             self.canvas_review.distance_measured.connect(self.on_distance_measured)
             
@@ -213,27 +354,37 @@ class AnalyzerWindow(QMainWindow):
         self.inspector_tab = PhenomicsInspectorTab()
         self.tabs.addTab(self.inspector_tab, "Phenomics Inspector")
         
-        # Add the new Report tab
-        self.report_tab = ComparisonReportTab(self)
-        self.tabs.addTab(self.report_tab, "Report & Plots")
-        
-        # Trigger refresh of reports when tab is clicked
-        self.tabs.currentChanged.connect(self.on_tab_changed)
-        
         rp_layout.addWidget(self.tabs)
         
-        splitter.addWidget(rp)
-        splitter.setSizes([300, 400, 900])
+        self.analysis_splitter.addWidget(rp)
+        self.analysis_splitter.setSizes([400, 900])
+        
+        analysis_layout.addWidget(self.analysis_splitter)
+        self.workspace_tabs.addTab(self.analysis_widget, "1. Extraction & Analysis")
+        
+        # --- WORKSPACE 2: COMPARISON REPORTS ---
+        self.report_tab = ComparisonReportTab(self)
+        self.workspace_tabs.addTab(self.report_tab, "2. Comparison Reports")
+        
+        # [ FIX #2: Add Workspaces to Main Splitter. Removed duplicate 'lp' addition here ]
+        splitter.addWidget(self.workspace_tabs)
+        splitter.setSizes([300, 1300])
 
         self.model.register_data_callback(self.populate_plant_table)
         self.model.register_selection_callback(self.sync_canvas_to_table)
         self.populate_browser()
+        self._on_label_pref_changed()
 
     def on_tab_changed(self, index):
         # Refresh the report list if the user navigates to the Report tab (Index 2)
         if index == 2:
             self.report_tab.refresh_file_list()
 
+    def on_workspace_tab_changed(self, index):
+        # Refresh the report list if the user navigates to the Report workspace (Index 1)
+        if index == 1:
+            self.report_tab.refresh_file_list()
+            
     # --- CALIBRATION LOGIC ---
     def get_cm_per_px(self):
         calib_mode = self.cb_calibration.currentText()
@@ -434,6 +585,21 @@ class AnalyzerWindow(QMainWindow):
                 self.task_list.addItem(list_item)
                 self.task_list.setItemWidget(list_item, widget)
 
+    def _on_label_pref_changed(self):
+        """Pushes display toggle states from the Analyzer to the shared canvas."""
+        show_num = self.chk_show_num.isChecked()
+        show_geno = self.chk_show_geno.isChecked()
+        
+        # Disable formatting options if genotype is hidden
+        self.rad_fmt_text.setEnabled(show_geno)
+        self.rad_fmt_num.setEnabled(show_geno)
+        
+        fmt = "TEXT" if self.rad_fmt_text.isChecked() else "NUMBER"
+        
+        # Safely push preferences if the canvas has loaded
+        if hasattr(self, 'canvas_review'):
+            self.canvas_review.set_label_preferences(show_num, show_geno, fmt)
+            
     def on_item_double_clicked(self, item):
         data = item.data(Qt.UserRole)
         if data["type"] == "dir":
@@ -474,10 +640,13 @@ class AnalyzerWindow(QMainWindow):
         self.canvas_review.refresh_canvas()
         self.update_canvas_ruler()
         
-        # Image loaded successfully -> enable calibration and extraction tools
         self.btn_measure_tool.setEnabled(True)
         self.btn_set_calib.setEnabled(True)
         self.btn_measure.setEnabled(True)
+        
+        # --- NEW: Auto-switch to the main view ---
+        self.workspace_tabs.setCurrentIndex(0) # Force jump to Analysis Workspace
+        self.tabs.setCurrentIndex(0)           # Force jump to Plate Overview canvas
 
     def populate_plant_table(self):
         self.table_plants.blockSignals(True)
@@ -486,6 +655,13 @@ class AnalyzerWindow(QMainWindow):
         self.btn_export.setEnabled(False)
         self.inspector_tab.update_view(None, None, None, None, None)
         
+        # Pre-load the numbered list
+        numbered_list = [f"{i+1}. {g}" for i, g in enumerate(GLOBAL_CONFIG.get("saved_genotypes", []))]
+        self.cb_bulk_genotype.blockSignals(True)
+        self.cb_bulk_genotype.clear()
+        self.cb_bulk_genotype.addItems(numbered_list)
+        self.cb_bulk_genotype.blockSignals(False)
+        
         for uid in sorted(self.model.masks.keys()):
             row = self.table_plants.rowCount()
             self.table_plants.insertRow(row)
@@ -493,13 +669,67 @@ class AnalyzerWindow(QMainWindow):
             item_uid = QTableWidgetItem(f"{uid}")
             item_uid.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
             item_uid.setData(Qt.UserRole, uid)
-            
             self.table_plants.setItem(row, 0, item_uid)
-            self.table_plants.setItem(row, 1, QTableWidgetItem("Col-0"))
+            
+            # --- Smart Genotype Combobox ---
+            combo_geno = QComboBox()
+            combo_geno.setEditable(True)
+            # Add pure strings, no prefixes!
+            combo_geno.addItems(GLOBAL_CONFIG.get("saved_genotypes", [])) 
+            combo_geno.lineEdit().editingFinished.connect(lambda c=combo_geno: self._check_and_add_genotype(c))
+            combo_geno.currentIndexChanged.connect(self.trigger_canvas_text_update)
+            self.table_plants.setCellWidget(row, 1, combo_geno)
+            
             self.table_plants.setItem(row, 2, QTableWidgetItem(str(row + 1)))
             
         self.table_plants.blockSignals(False)
+        self.trigger_canvas_text_update()
+                
+    def trigger_canvas_text_update(self):
+        label_data = {}
+        genotypes = GLOBAL_CONFIG.get("saved_genotypes", [])
+        
+        for row in range(self.table_plants.rowCount()):
+            uid = self.table_plants.item(row, 0).data(Qt.UserRole)
+            combo = self.table_plants.cellWidget(row, 1)
+            
+            genotype = combo.currentText().strip() if combo else "N/A"
+            plant_num = self.table_plants.item(row, 2).text()
+            
+            # Find the internal number of the genotype (1-indexed)
+            geno_num = str(genotypes.index(genotype) + 1) if genotype in genotypes else "?"
+            
+            # Pass a structured dictionary to the canvas
+            label_data[uid] = {
+                'plant_num': plant_num,
+                'geno_text': genotype,
+                'geno_num': geno_num
+            }
+            
+        if hasattr(self.canvas_review, 'set_overlay_labels'):
+            self.canvas_review.set_overlay_labels(label_data)
 
+    def on_table_item_changed(self, item):
+        """Sanitizes manual user string edits inside Genotype or Plant Number table cells."""
+        if item.column() == 0: 
+            return # Ignore read-only automatic UID column
+            
+        raw_text = item.text()
+        if " " in raw_text:
+            self.table_plants.blockSignals(True)
+            sanitized = raw_text.replace(" ", "_")
+            item.setText(sanitized)
+            self.table_plants.blockSignals(False)
+            
+            QMessageBox.warning(
+                self, "Naming Convention Warning", 
+                "Spaces are not permitted in Genotype or Plant Number identifiers to maintain clean metrics maps.\n\n"
+                "Spaces have been automatically converted to underscores (_)."
+            )
+            
+        # --- NEW: Instantly update canvas labels when the Plant Number is typed! ---
+        self.trigger_canvas_text_update()
+        
     def on_table_selection(self):
         selected_items = self.table_plants.selectedItems()
         if not selected_items: return
@@ -529,24 +759,6 @@ class AnalyzerWindow(QMainWindow):
                 "Spaces have been automatically replaced with underscores (_)."
             )
 
-    def on_table_item_changed(self, item):
-        """Sanitizes manual user string edits inside Genotype or Plant Number table cells."""
-        if item.column() == 0: 
-            return # Ignore read-only automatic UID column
-            
-        raw_text = item.text()
-        if " " in raw_text:
-            self.table_plants.blockSignals(True)
-            sanitized = raw_text.replace(" ", "_")
-            item.setText(sanitized)
-            self.table_plants.blockSignals(False)
-            
-            QMessageBox.warning(
-                self, "Naming Convention Warning", 
-                "Spaces are not permitted in Genotype or Plant Number identifiers to maintain clean metrics maps.\n\n"
-                "Spaces have been automatically converted to underscores (_)."
-            )
-
     def sync_canvas_to_table(self):
         uid = self.model.active_uid
         if not uid: return
@@ -569,14 +781,15 @@ class AnalyzerWindow(QMainWindow):
         if cm_per_px is None:
             QMessageBox.warning(self, "Error", "Invalid Calibration Value.")
             return
-        else:        
-            self.current_cm_per_px = cm_per_px
 
         plants_meta = []
         for row in range(self.table_plants.rowCount()):
+            combo = self.table_plants.cellWidget(row, 1)
+            clean_geno = combo.currentText().strip() if combo else "Unknown"
+            
             plants_meta.append({
                 "uid": self.table_plants.item(row, 0).data(Qt.UserRole),
-                "genotype": self.table_plants.item(row, 1).text(),
+                "genotype": clean_geno,
                 "plant_num": self.table_plants.item(row, 2).text()
             })
 
@@ -621,11 +834,8 @@ class AnalyzerWindow(QMainWindow):
         if not self.measurements_cache: return
         os.makedirs(self.out_dir, exist_ok=True)
         cm_per_px = self.get_cm_per_px()
-        if cm_per_px is None: 
-            return
-        else:
-            self.current_cm_per_px = cm_per_px
-            
+        if cm_per_px is None: return
+        
         # 1. Grab UI inputs
         plate_id = self.in_plate_id.text().strip()
         condition = self.in_condition.text().strip()
@@ -634,6 +844,23 @@ class AnalyzerWindow(QMainWindow):
         # 2. Build the export filename standard
         export_base_name = f"{plate_id}_{condition}_{timepoint}"
         
+        # --- NEW: Overwrite Protection Check ---
+        json_check_path = os.path.join(self.out_dir, f"{export_base_name}_Metrics.json")
+        rsml_check_path = os.path.join(self.out_dir, f"{export_base_name}_Topology.rsml")
+        
+        if os.path.exists(json_check_path) or os.path.exists(rsml_check_path):
+            reply = QMessageBox.question(
+                self, 'Confirm Export Overwrite',
+                f"Warning: Files for '{export_base_name}' already exist in the output folder.\n\n"
+                "Did you forget to update the Plate ID, Condition, or Timepoint parameters?\n\n"
+                "Do you want to permanently overwrite the existing files?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+            )
+            # If the user clicks No (or escapes), abort the export.
+            if reply == QMessageBox.No:
+                return 
+        # ---------------------------------------
+
         # 3. Store reference to the actual image
         original_img_name = os.path.basename(self.model.image_path) if self.model.image_path else "unknown"
             
@@ -649,7 +876,6 @@ class AnalyzerWindow(QMainWindow):
         
         self.show_loading("Exporting JSON and RSML...")
         
-        # Pass the dynamic export_base_name instead of self.current_base_name
         worker = ModelWorker(export_rsml_and_json, self.out_dir, export_base_name, plate_meta, self.measurements_cache)
         self.active_workers.add(worker)
         worker.finished.connect(self._on_export_finished)
@@ -695,6 +921,62 @@ class AnalyzerWindow(QMainWindow):
         GLOBAL_CONFIG["calib_val"] = self.in_calib_val.text()
         with open(GLOBAL_CONFIG_FILE, 'w') as f: json.dump(GLOBAL_CONFIG, f, indent=4)
         event.accept()
+
+    def open_genotype_manager(self):
+        dialog = GenotypeManagerDialog(self)
+        if dialog.exec_():
+            self.refresh_genotype_lists()
+
+    def _check_and_add_genotype(self, combo):
+        """Allows user to type a number to auto-fill the genotype, or type a new one to save it."""
+        raw_text = combo.currentText().strip()
+        if not raw_text: return
+        
+        genotypes = GLOBAL_CONFIG.get("saved_genotypes", [])
+        
+        # --- SMART HOTKEY: If the user just typed a number, convert it to the Genotype String ---
+        if raw_text.isdigit():
+            idx = int(raw_text) - 1
+            if 0 <= idx < len(genotypes):
+                combo.setCurrentText(genotypes[idx])
+                self.trigger_canvas_text_update()
+                return
+
+        # It's raw text. Clean it and check if it's new
+        clean_name = raw_text.replace(" ", "_")
+        
+        if clean_name not in genotypes:
+            GLOBAL_CONFIG["saved_genotypes"].append(clean_name)
+            with open(GLOBAL_CONFIG_FILE, 'w') as f: json.dump(GLOBAL_CONFIG, f, indent=4)
+            self.refresh_genotype_lists() 
+            
+        combo.setCurrentText(clean_name)
+        self.trigger_canvas_text_update()
+
+    def refresh_genotype_lists(self):
+        """Refreshes all comboboxes with pure string names."""
+        genotypes = GLOBAL_CONFIG.get("saved_genotypes", [])
+        
+        # 1. Update Bulk Combo
+        curr_bulk = self.cb_bulk_genotype.currentText()
+        self.cb_bulk_genotype.blockSignals(True)
+        self.cb_bulk_genotype.clear()
+        self.cb_bulk_genotype.addItems(genotypes)
+        if curr_bulk in genotypes:
+            self.cb_bulk_genotype.setCurrentText(curr_bulk)
+        self.cb_bulk_genotype.blockSignals(False)
+
+        # 2. Update Table Combos
+        for row in range(self.table_plants.rowCount()):
+            combo = self.table_plants.cellWidget(row, 1)
+            if combo:
+                curr_val = combo.currentText()
+                combo.blockSignals(True)
+                combo.clear()
+                combo.addItems(genotypes)
+                if curr_val in genotypes:
+                    combo.setCurrentText(curr_val)
+                combo.blockSignals(False)
 
 class ModelWorker(QThread):
     finished = pyqtSignal(object); error = pyqtSignal(str)

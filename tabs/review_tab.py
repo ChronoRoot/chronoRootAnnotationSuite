@@ -2,11 +2,11 @@ import math
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QListWidget, 
                              QListWidgetItem, QPushButton, QLabel, QGraphicsView, 
                              QGraphicsScene, QGraphicsPixmapItem, QGraphicsRectItem, 
-                             QMessageBox, QSlider, QTreeWidgetItem)
+                             QMessageBox, QSlider, QGraphicsSimpleTextItem)
 
 from PyQt5.QtCore import Qt, pyqtSignal, QRectF
 from PyQt5.QtGui import (QImage, QPixmap, QPainter, QPainterPath, QPen, QColor, 
-                         QBrush, QIcon)
+                         QBrush, QIcon, QFont)
 
 # ==========================================
 # HELPER: DATA TO GUI TRANSLATION
@@ -22,7 +22,6 @@ def _bytes_to_pixmap(data_tuple, is_rgba=True):
     b_data, w, h, bpl = data_tuple
     fmt = QImage.Format_RGBA8888 if is_rgba else QImage.Format_RGB888
     
-    # .copy() is critical here to prevent memory corruption
     qimg = QImage(b_data, w, h, bpl, fmt).copy()
     return QPixmap.fromImage(qimg)
 
@@ -53,7 +52,6 @@ class BaseCanvas(QGraphicsView):
         self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
 
     def update_view(self, base_pmap, overlay_pmap):
-        """Now strictly accepts pre-rendered QPixmaps."""
         self.base_pixmap.setPixmap(base_pmap)
         self.overlay_pixmap.setPixmap(overlay_pmap)
         if not base_pmap.isNull():
@@ -81,6 +79,7 @@ class BaseCanvas(QGraphicsView):
 class PaintCanvas(BaseCanvas):
     on_stroke_finished = pyqtSignal(list, bool)
     on_click = pyqtSignal(int, int, bool)
+    on_marquee_select = pyqtSignal(QRectF, bool) # --- NEW: Drag & Select Signal ---
     on_split_finish = pyqtSignal(list)
     distance_measured = pyqtSignal(float)  
     
@@ -95,6 +94,10 @@ class PaintCanvas(BaseCanvas):
         self.temp_item = None
         self.points_buffer = []
         
+        # Marquee State
+        self.marquee_start = None
+        self.marquee_rect_item = None
+        
         self.poly_points = []
         self.poly_lines = []
         self.rubber_band = None
@@ -102,11 +105,10 @@ class PaintCanvas(BaseCanvas):
         self.bbox_group = self.scene.createItemGroup([])
         self.bbox_group.setZValue(2) 
         
-        # --- NEW: Ruler Variables ---
         self.cm_per_px = 1.0 
         self.ruler_line = None
         self.ruler_text = None
-        self.is_calibrating = False # Defaults to simple image-space measurement inspection
+        self.is_calibrating = False 
         
         self.update_cursor_visual()
 
@@ -117,7 +119,6 @@ class PaintCanvas(BaseCanvas):
         if mode in ["SELECT", "GLOBAL"]:
             self.setCursor(Qt.ArrowCursor)
             if self.brush_cursor: self.brush_cursor.setVisible(False)
-        
         elif mode in ["PAINT", "SEMANTIC"]:
             self.setCursor(Qt.CrossCursor)
             if self.brush_cursor: self.brush_cursor.setVisible(True)
@@ -131,8 +132,7 @@ class PaintCanvas(BaseCanvas):
     def update_cursor_visual(self):
         if self.brush_cursor: self.scene.removeItem(self.brush_cursor)
         s = self.brush_size
-        self.brush_cursor = self.scene.addEllipse(0, 0, s, s, 
-                                                QPen(Qt.white, 1), QBrush(QColor(255, 255, 255, 30)))
+        self.brush_cursor = self.scene.addEllipse(0, 0, s, s, QPen(Qt.white, 1), QBrush(QColor(255, 255, 255, 30)))
         self.brush_cursor.setZValue(100)
         self.brush_cursor.setVisible(self.mode in ["PAINT", "SEMANTIC"])
 
@@ -154,15 +154,17 @@ class PaintCanvas(BaseCanvas):
         if self.is_panning: return
         sp = self.mapToScene(event.pos())
         
+        # --- NEW: Marquee Origin Setup ---
         if self.mode in ["SELECT", "GLOBAL"]:
             if event.button() == Qt.LeftButton:
-                shift = (event.modifiers() & Qt.ShiftModifier)
-                self.on_click.emit(int(sp.x()), int(sp.y()), shift)
+                self.marquee_start = sp
+                pen = QPen(Qt.white, 1, Qt.DashLine)
+                pen.setCosmetic(True)
+                self.marquee_rect_item = self.scene.addRect(QRectF(sp, sp), pen, QBrush(QColor(255, 255, 255, 50)))
+                self.marquee_rect_item.setZValue(100)
         
         elif self.mode in ["PAINT", "SEMANTIC"]:
-            if self.is_painting or self.is_erasing:
-                return
-                
+            if self.is_painting or self.is_erasing: return
             if event.button() == Qt.LeftButton:
                 self.is_painting = True
                 self.start_stroke(event.pos(), is_erase=False)
@@ -178,7 +180,6 @@ class PaintCanvas(BaseCanvas):
                     line = self.scene.addLine(last_p.x(), last_p.y(), sp.x(), sp.y(), QPen(Qt.red, 4))
                     self.poly_lines.append(line)
                     
-        # --- NEW: Ruler Drag Start ---
         elif self.mode == "RULER":
             if event.button() == Qt.LeftButton:
                 self.clear_poly_visuals() 
@@ -200,8 +201,24 @@ class PaintCanvas(BaseCanvas):
     def mouseReleaseEvent(self, event):
         sp = self.mapToScene(event.pos())
         
-        if (self.is_painting and event.button() == Qt.LeftButton) or \
-           (self.is_erasing and event.button() == Qt.RightButton):
+        # --- NEW: Marquee Release Calculation ---
+        if self.mode in ["SELECT", "GLOBAL"] and self.marquee_start:
+            rect = QRectF(self.marquee_start, sp).normalized()
+            shift = (event.modifiers() & Qt.ShiftModifier)
+            
+            # If the user just clicked without dragging, treat it as a standard click
+            if rect.width() < 5 and rect.height() < 5:
+                self.on_click.emit(int(sp.x()), int(sp.y()), shift)
+            else:
+                self.on_marquee_select.emit(rect, shift)
+                
+            if self.marquee_rect_item:
+                self.scene.removeItem(self.marquee_rect_item)
+                self.marquee_rect_item = None
+            self.marquee_start = None
+            
+        elif (self.is_painting and event.button() == Qt.LeftButton) or \
+             (self.is_erasing and event.button() == Qt.RightButton):
             
             if self.temp_item:
                 self.scene.removeItem(self.temp_item)
@@ -212,7 +229,6 @@ class PaintCanvas(BaseCanvas):
             self.is_erasing = False
             self.points_buffer = []
             
-        # Calculate and emit the raw pixel length when the ruler drag finishes
         elif self.mode == "RULER" and event.button() == Qt.LeftButton:
             if self.poly_points:
                 start_p = self.poly_points[0]
@@ -242,10 +258,14 @@ class PaintCanvas(BaseCanvas):
     def mouseMoveEvent(self, event):
         sp = self.mapToScene(event.pos())
         
-        if self.mode in ["PAINT", "SEMANTIC"] and self.brush_cursor:
+        # --- NEW: Marquee Drag Animation ---
+        if self.mode in ["SELECT", "GLOBAL"] and self.marquee_start and self.marquee_rect_item:
+            rect = QRectF(self.marquee_start, sp).normalized()
+            self.marquee_rect_item.setRect(rect)
+        
+        elif self.mode in ["PAINT", "SEMANTIC"] and self.brush_cursor:
             offset = self.brush_size / 2.0
-            self.brush_cursor.setRect(sp.x() - offset, sp.y() - offset, 
-                                    self.brush_size, self.brush_size)
+            self.brush_cursor.setRect(sp.x() - offset, sp.y() - offset, self.brush_size, self.brush_size)
 
         if (self.is_painting or self.is_erasing) and self.temp_item:
             self.points_buffer.append(sp)
@@ -263,10 +283,7 @@ class PaintCanvas(BaseCanvas):
             start_p = self.poly_points[0]
             self.ruler_line.setLine(start_p.x(), start_p.y(), sp.x(), sp.y())
             
-            # Calculate absolute distance in pixels
             dist_px = math.hypot(sp.x() - start_p.x(), sp.y() - start_p.y())
-            
-            # Context-Aware Display: Show CM if calibrated AND not creating a new scale calibration mapping
             if not self.is_calibrating and self.cm_per_px is not None and self.cm_per_px > 0:
                 dist_cm = dist_px * self.cm_per_px
                 self.ruler_text.setPlainText(f"{dist_cm:.2f} cm")
@@ -277,66 +294,120 @@ class PaintCanvas(BaseCanvas):
             
         super().mouseMoveEvent(event)
 
-    def update_bboxes(self, bboxes, color_map, visible):
+    def update_overlays(self, bboxes, color_map, labels_dict, show_bboxes, show_labels, show_num=False, show_geno=False, geno_fmt="TEXT"):
+        """Draws boundaries and dynamically constructs labels based on toggled preferences."""
         for item in self.bbox_group.childItems(): 
             self.scene.removeItem(item)
-        if visible:
-            for uid, (x, y, w, h) in bboxes.items():
-                if uid in color_map:
-                    c = color_map[uid]
-                    pen = QPen(QColor(c[0], c[1], c[2]), 2)
-                    pen.setCosmetic(True) 
-                    rect = QGraphicsRectItem(x, y, w, h)
-                    rect.setPen(pen)
-                    self.bbox_group.addToGroup(rect)
+            
+        if not show_bboxes and not show_labels:
+            return
+            
+        if self.cm_per_px and self.cm_per_px > 0:
+            font_px = max(12, int(0.2 / self.cm_per_px))
+        else:
+            font_px = 12
+            
+        font = QFont("Sans Serif")
+        font.setPixelSize(font_px)
+        font.setBold(True)
+
+        for uid, (x, y, w, h) in bboxes.items():
+            c = color_map.get(uid, (255, 255, 255))
+            
+            if show_bboxes:
+                pen = QPen(QColor(c[0], c[1], c[2]), 2)
+                pen.setCosmetic(True) 
+                rect = QGraphicsRectItem(x, y, w, h)
+                rect.setPen(pen)
+                self.bbox_group.addToGroup(rect)
+                
+            if show_labels and uid in labels_dict:
+                data = labels_dict[uid]
+                text_str = ""
+                
+                # --- BACKWARD COMPATIBILITY: Annotation App sends a raw string ---
+                if isinstance(data, str):
+                    text_str = data
+                    
+                # --- NEW BEHAVIOR: Analyzer App sends a structured dictionary ---
+                elif isinstance(data, dict):
+                    lines = []
+                    if show_num and data.get('plant_num'):
+                        lines.append(f"Nº {data['plant_num']}")
+                        
+                    if show_geno:
+                        if geno_fmt == "TEXT":
+                            lines.append(data.get('geno_text', ''))
+                        else:
+                            lines.append(f"G: {data.get('geno_num', '?')}")
+                            
+                    text_str = "\n".join(lines).strip()
+                
+                # Only render if there is actual text to display
+                if text_str:
+                    text_item = QGraphicsSimpleTextItem(text_str)
+                    text_item.setFont(font)
+                    text_item.setBrush(QBrush(Qt.white))
+                    
+                    bg_rect = QGraphicsRectItem(text_item.boundingRect())
+                    bg_rect.setBrush(QBrush(QColor(0, 0, 0, 160)))
+                    bg_rect.setPen(QPen(Qt.NoPen))
+                    
+                    y_pos = y - bg_rect.boundingRect().height() - 2
+                    bg_rect.setPos(x, y_pos)
+                    text_item.setPos(x, y_pos)
+                    
+                    self.bbox_group.addToGroup(bg_rect)
+                    self.bbox_group.addToGroup(text_item)
 
 
 class ReviewCanvasTab(QWidget):
     distance_measured = pyqtSignal(float)  
     
-    """
-    Handles ONLY the visual canvas, overlay rendering, and stroke translation.
-    Listens to the shared PlantImageModel for state changes.
-    """
     def __init__(self, shared_model):
         super().__init__()
         self.model = shared_model
         
-        # Canvas State
         self.current_mode = "SELECT" 
         self.previous_view_mode = "SELECT" 
+        
         self.show_bboxes = True
+        
+        # --- DEFAULT OFF FOR ANNOTATION APP COMPATIBILITY ---
+        self.show_labels = False 
+        self.label_show_num = False
+        self.label_show_geno = False
+        self.label_geno_format = "TEXT"
+        
+        self.overlay_labels = {}
+        
         self.opacity = 0.40
         self.brush_size = 5
         self.active_class_id = 1
         
         self.init_ui()
         
-        # Connect to the pure python backend callbacks
         self.model.register_data_callback(self.on_data_changed)
         self.model.register_selection_callback(self.on_selection_changed)
 
     def init_ui(self):
         rl = QVBoxLayout(self)
         
-        # 1. Top Info Bar
         self.lbl_info = QLabel()
         self.lbl_info.setStyleSheet("background-color: #eee; padding: 5px; font-weight: bold;")
         rl.addWidget(self.lbl_info)
         
-        # 2. Main Canvas
         self.canvas = PaintCanvas()
         self.canvas.on_stroke_finished.connect(self.handle_stroke)
         self.canvas.on_click.connect(self.handle_canvas_click)
         self.canvas.on_split_finish.connect(self.handle_split)
+        self.canvas.on_marquee_select.connect(self.handle_marquee_select) # Hooked up Drag
         
-        # Connect internal canvas canvas signal to the outer tab signal
         self.canvas.distance_measured.connect(self.distance_measured.emit)
         
         rl.addWidget(self.canvas)
         
-        # 3. Bottom Navigation Instructions
-        self.lbl_navigation = QLabel("Control click and drag for pan, use wheel to zoom")
+        self.lbl_navigation = QLabel("Control click and drag for pan, use wheel to zoom | Drag to marquee select in Select mode")
         self.lbl_navigation.setStyleSheet("color: #666; font-style: italic; padding: 2px;")
         self.lbl_navigation.setAlignment(Qt.AlignCenter)
         rl.addWidget(self.lbl_navigation)
@@ -346,8 +417,16 @@ class ReviewCanvasTab(QWidget):
     # ==========================================
     # CANVAS STATE & RENDERING
     # ==========================================
+    def set_overlay_labels(self, label_dict):
+        """Ingests the IDs and Genotypes from the Main Window."""
+        self.overlay_labels = label_dict
+        self.refresh_canvas()
+
+    def set_show_labels(self, show):
+        self.show_labels = show
+        self.refresh_canvas()
+
     def set_calibrating(self, state):
-        """Passes the active calibration setup state down to the paint scene canvas views."""
         self.canvas.is_calibrating = state
 
     def set_mode(self, mode):
@@ -357,6 +436,15 @@ class ReviewCanvasTab(QWidget):
         self.current_mode = mode
         self.canvas.set_mode(mode)
         self.update_info_label()
+        self.refresh_canvas()
+
+    def set_label_preferences(self, show_num, show_geno, geno_format):
+        """Receives display preferences from the Analyzer UI and updates the canvas."""
+        # Auto-enable the master label toggle if either specific option is checked
+        self.show_labels = show_num or show_geno 
+        self.label_show_num = show_num
+        self.label_show_geno = show_geno
+        self.label_geno_format = geno_format
         self.refresh_canvas()
 
     def set_opacity(self, val):
@@ -375,7 +463,6 @@ class ReviewCanvasTab(QWidget):
         self.active_class_id = class_id
 
     def update_scene_ruler(self, cm_per_px):
-        """Draws a vertical ruler safely outside the image boundaries."""
         self.canvas.cm_per_px = cm_per_px
         
         if hasattr(self, 'scene_ruler_items'):
@@ -383,7 +470,6 @@ class ReviewCanvasTab(QWidget):
                 self.canvas.scene.removeItem(item)
         self.scene_ruler_items = []
         
-        # --- MINIMAL CHANGE: Fail gracefully if cm_per_px is invalid ---
         if cm_per_px is None or cm_per_px <= 0 or not hasattr(self, '_cached_base_pixmap'): 
             return
             
@@ -391,7 +477,6 @@ class ReviewCanvasTab(QWidget):
         img_h = self._cached_base_pixmap.height()
         pixels_per_cm = int(1.0 / cm_per_px)
         
-        # Avoid infinite loops or division by zero if scaling is extreme
         if pixels_per_cm < 10: return
         
         pad_w = 80
@@ -413,6 +498,8 @@ class ReviewCanvasTab(QWidget):
             text.setPos(-pad_w + 5, y - 10)
             self.scene_ruler_items.append(text)
 
+        self.refresh_canvas() # Force text scaling to update with new calibration
+
     def refresh_canvas(self):
         if not hasattr(self, '_cached_base_pixmap') or getattr(self, '_last_image_path', None) != self.model.image_path:
             raw_data = self.model.get_raw_image_data()
@@ -422,21 +509,27 @@ class ReviewCanvasTab(QWidget):
             
         base_pixmap = self._cached_base_pixmap
         
+        # Safely fetch the label preferences (Fallbacks ensure the Annotation App doesn't crash)
+        s_num = getattr(self, 'label_show_num', False)
+        s_geno = getattr(self, 'label_show_geno', False)
+        g_fmt = getattr(self, 'label_geno_format', "TEXT")
+        
         # 1. GLOBAL MULTI-CLASS VIEW
         if self.current_mode == "GLOBAL":
             overlay_data = self.model.get_full_class_overlay_data(selected_ids=list(self.model.selected_uids), opacity=self.opacity)
             overlay_pixmap = _bytes_to_pixmap(overlay_data, is_rgba=True)
             self.canvas.update_view(base_pixmap, overlay_pixmap)
-            self.canvas.update_bboxes(self.model.bboxes, self.model.color_map, self.show_bboxes)
+            self.canvas.update_overlays(self.model.bboxes, self.model.color_map, self.overlay_labels, 
+                                        self.show_bboxes, self.show_labels, s_num, s_geno, g_fmt)
 
         # 2. SELECT MODE
         elif self.current_mode == "SELECT":
             valid_selection = [uid for uid in self.model.selected_uids if uid in self.model.masks]
             overlay_data = self.model.get_overlay_data(selected_ids=valid_selection, opacity=self.opacity)
             overlay_pixmap = _bytes_to_pixmap(overlay_data, is_rgba=True)
-            
             self.canvas.update_view(base_pixmap, overlay_pixmap)
-            self.canvas.update_bboxes(self.model.bboxes, self.model.color_map, self.show_bboxes)
+            self.canvas.update_overlays(self.model.bboxes, self.model.color_map, self.overlay_labels, 
+                                        self.show_bboxes, self.show_labels, s_num, s_geno, g_fmt)
             
         # 3. INDIVIDUAL MULTI-CLASS EDITING
         elif self.current_mode == "SEMANTIC" and self.model.active_uid in self.model.masks:
@@ -454,9 +547,9 @@ class ReviewCanvasTab(QWidget):
                 
             painter.end()
             self.canvas.update_view(base_pixmap, overlay_pixmap) 
-            self.canvas.update_bboxes({}, {}, False)
+            self.canvas.update_overlays({}, {}, {}, False, False, True, True, "TEXT")
             
-        # 4. ISOLATION MODE (Paint/Split/New Plant)
+        # 4. ISOLATION MODE
         else: 
             if self.model.active_uid and self.model.active_uid in self.model.masks:
                 overlay_data = self.model.get_overlay_data(isolate_uids=[self.model.active_uid], opacity=self.opacity)
@@ -464,10 +557,9 @@ class ReviewCanvasTab(QWidget):
                 self.canvas.update_view(base_pixmap, overlay_pixmap)
             else:
                 self.canvas.update_view(base_pixmap, QPixmap())
-            self.canvas.update_bboxes({}, {}, False)
+            self.canvas.update_overlays({}, {}, {}, False, False, True, True, "TEXT")
 
     def update_info_label(self):
-        """Dynamically updates the top info bar based on current mode and selection."""
         mode = self.current_mode
         active = self.model.active_uid
         selected = self.model.selected_uids
@@ -514,7 +606,28 @@ class ReviewCanvasTab(QWidget):
         else:
             current_sel = {uid}
 
-        # Updating the model automatically triggers on_selection_changed
+        self.model.set_selection(list(current_sel))
+
+    def handle_marquee_select(self, rect, shift):
+        """Translates geometric bounds into UIDs based on bounding box intersections."""
+        selected_uids = []
+        for uid, bbox in self.model.bboxes.items():
+            bx, by, bw, bh = bbox
+            if rect.intersects(QRectF(bx, by, bw, bh)):
+                selected_uids.append(uid)
+                
+        if not selected_uids:
+            if not shift: self.model.set_selection([])
+            return
+            
+        current_sel = set(self.model.selected_uids)
+        if shift:
+            for u in selected_uids:
+                if u in current_sel: current_sel.remove(u)
+                else: current_sel.add(u)
+        else:
+            current_sel = set(selected_uids)
+            
         self.model.set_selection(list(current_sel))
 
     def handle_stroke(self, points, is_erase):
@@ -550,21 +663,14 @@ class ReviewCanvasTab(QWidget):
     # MODEL CALLBACKS
     # ==========================================
     def on_data_changed(self):
-        """Fires when masks are edited."""
         self.refresh_canvas()
         
     def on_selection_changed(self):
-        """Fires when the global selection state changes."""            
-
         self.update_info_label()
         self.refresh_canvas()
 
 
 class ReviewToolPanel(QWidget):
-    """
-    Handles ONLY the UI controls for the Annotation canvas.
-    Requires a reference to ReviewCanvasTab to push mode/slider changes directly.
-    """
     def __init__(self, shared_model, canvas_tab: ReviewCanvasTab):
         super().__init__()
         self.model = shared_model
@@ -581,13 +687,20 @@ class ReviewToolPanel(QWidget):
         self.btn_unselect = QPushButton("Clear Selection")
         self.btn_unselect.clicked.connect(lambda: self.model.set_selection([]))
         
-        self.btn_bbox = QPushButton("Show Bounding Boxes")
+        self.btn_bbox = QPushButton("Bounding Boxes")
         self.btn_bbox.setCheckable(True)
         self.btn_bbox.setChecked(True)
         self.btn_bbox.clicked.connect(lambda: self.canvas_tab.set_show_bboxes(self.btn_bbox.isChecked()))
         
+        # --- NEW: Checkbox toggle for Metadata Labels ---
+        self.btn_labels = QPushButton("Plant Labels")
+        self.btn_labels.setCheckable(True)
+        self.btn_labels.setChecked(True)
+        self.btn_labels.clicked.connect(lambda: self.canvas_tab.set_show_labels(self.btn_labels.isChecked()))
+        
         row_actions.addWidget(self.btn_unselect)
         row_actions.addWidget(self.btn_bbox)
+        row_actions.addWidget(self.btn_labels)
         sl.addLayout(row_actions)
         
         self.btn_global = QPushButton("Global Multi-Class View")
@@ -652,9 +765,6 @@ class ReviewToolPanel(QWidget):
 
         sl.addStretch()
 
-    # ==========================================
-    # TOOL LOGIC
-    # ==========================================
     def toggle_mode(self, target_mode):
         current = self.canvas_tab.current_mode
         if current == target_mode:
@@ -674,7 +784,6 @@ class ReviewToolPanel(QWidget):
         self.force_mode(target_mode)
 
     def force_mode(self, mode):
-        """Forces the UI buttons and canvas into a specific mode. Used by MainWindow when creating a new plant."""
         self.btn_paint.setChecked(mode == "PAINT")
         self.btn_semantic.setChecked(mode == "SEMANTIC")
         self.btn_split.setChecked(mode == "SPLIT")
@@ -693,12 +802,10 @@ class ReviewToolPanel(QWidget):
             self.canvas_tab.set_active_class(item.data(Qt.UserRole))
 
     def on_selection_changed(self):
-        """Updates the enable/disable state of tools based on global selection."""
         has_active = self.model.active_uid is not None
         self.btn_semantic.setEnabled(has_active)
         self.btn_split_parts.setEnabled(has_active) 
         
-        # If selection was cleared and we were in a targeted mode, fallback
         if not has_active and self.canvas_tab.current_mode in ["PAINT", "SPLIT", "SEMANTIC"]:
             self.force_mode(self.canvas_tab.previous_view_mode)
 
@@ -722,7 +829,6 @@ class ReviewToolPanel(QWidget):
             
         success = self.model.split_disconnected_components(uid)
         if success:
-            # Clear selection to un-target the destroyed ID and show the new ones
             self.model.set_selection([])
             self.force_mode("SELECT")
             self.canvas_tab.lbl_info.setText("Separated parts split successfully.")

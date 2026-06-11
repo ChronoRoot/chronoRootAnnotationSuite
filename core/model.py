@@ -270,6 +270,7 @@ class PlantImageModel:
 
         self.max_id = max(self.masks.keys()) if self.masks else 0
         self.regenerate_metadata() 
+        self.sort_instances_spatially(row_tolerance=250) 
         
         # 3. Warm up class patches for faster GUI response
         for uid in self.masks.keys():
@@ -342,6 +343,64 @@ class PlantImageModel:
         
         return mapping
 
+    def sort_instances_spatially(self, row_tolerance=250):
+        """
+        Sorts instances Left-to-Right, grouped by horizontal rows.
+        row_tolerance defines how many vertical pixels of 'wobble' are allowed in a single row.
+        """
+        if not self.masks: return
+        
+        # 1. Gather all centroids
+        centroids = []
+        for uid, bbox in self.bboxes.items():
+            x, y, w, h = bbox
+            cx, cy = x + (w / 2), y + (h / 2)
+            centroids.append((uid, cx, cy))
+            
+        # 2. Sort primarily by Y (Top to Bottom)
+        centroids.sort(key=lambda item: item[2])
+        
+        # 3. Cluster into rows based on the tolerance
+        rows = []
+        current_row = [centroids[0]]
+        
+        for item in centroids[1:]:
+            _, _, cy = item
+            last_cy = current_row[-1][2]
+            
+            if abs(cy - last_cy) <= row_tolerance:
+                current_row.append(item)
+            else:
+                rows.append(current_row)
+                current_row = [item]
+        if current_row:
+            rows.append(current_row)
+            
+        # 4. Sort each row by X (Left to Right)
+        sorted_uids = []
+        for row in rows:
+            row.sort(key=lambda item: item[1])
+            sorted_uids.extend([item[0] for item in row])
+            
+        # 5. Apply the new continuous re-indexing
+        new_masks, new_bboxes, new_areas, new_color_map, new_class_patches = {}, {}, {}, {}, {}
+        
+        for new_uid, old_uid in enumerate(sorted_uids, start=1):
+            new_masks[new_uid] = self.masks[old_uid]
+            new_bboxes[new_uid] = self.bboxes[old_uid]
+            new_areas[new_uid] = self.areas[old_uid]
+            new_color_map[new_uid] = HIGH_CONTRAST_COLORS[new_uid % len(HIGH_CONTRAST_COLORS)]
+            if old_uid in self.class_patches:
+                new_class_patches[new_uid] = self.class_patches[old_uid]
+                
+        self.masks = new_masks
+        self.bboxes = new_bboxes
+        self.areas = new_areas
+        self.color_map = new_color_map
+        self.class_patches = new_class_patches
+        self.max_id = len(sorted_uids)
+        self.history.clear()
+        
     def save_current_task(self, task_path, base_name, mark_finished=False):
         """Writes current mask data to disk. Completely insulates GUI from JSON/NIfTI."""
         if not self.masks: return False

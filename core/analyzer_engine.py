@@ -92,6 +92,15 @@ def extract_plate_metrics(model, plants_meta, cm_per_px):
         
         # Cleanup the internal dict
         del metrics["_hull_pts_local"]
+        
+        # --- NEW: Extract Initial and Final Topologies ---
+        ini_pos = None
+        ftip_pos = None
+        for n, d in graph.nodes(data=True):
+            if d.get('type') == 'Ini': 
+                ini_pos = list(n)
+            elif d.get('type') == 'FTip': 
+                ftip_pos = list(n)
 
         # ==========================================
         # 4. PACKAGE RESULTS
@@ -105,7 +114,9 @@ def extract_plate_metrics(model, plants_meta, cm_per_px):
             "uid": int(uid),
             "genotype": str(genotype),
             "plant_num": str(plant_num),
-            **metrics,  # Unpacks all manuscript metrics directly into the dictionary
+            "ini_pos": ini_pos,         
+            "ftip_pos": ftip_pos,           
+            **metrics,  
             
             "rsml_xml": plant_xml,
             "metadata_xml": metadata_xml, 
