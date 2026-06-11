@@ -368,6 +368,7 @@ class AnalyzerWindow(QMainWindow):
             )
             
         cm_per_px = self.get_cm_per_px()
+        self.current_cm_per_px = cm_per_px
         self.canvas_review.update_scene_ruler(cm_per_px)
             
     # --- FILE BROWSER LOGIC ---
@@ -568,6 +569,8 @@ class AnalyzerWindow(QMainWindow):
         if cm_per_px is None:
             QMessageBox.warning(self, "Error", "Invalid Calibration Value.")
             return
+        else:        
+            self.current_cm_per_px = cm_per_px
 
         plants_meta = []
         for row in range(self.table_plants.rowCount()):
@@ -605,14 +608,24 @@ class AnalyzerWindow(QMainWindow):
             
         data = self.measurements_cache[uid]
         bbox = self.model.bboxes.get(uid, (0,0,0,0))
-        self.inspector_tab.update_view(uid, data, self.model.raw_image, bbox, self.current_cm_per_px)
+        
+        live_cm_per_px = self.get_cm_per_px()
+        if live_cm_per_px is None:
+            live_cm_per_px = 1.0 # Safe fallback
+        else:        
+            self.current_cm_per_px = live_cm_per_px
+            
+        self.inspector_tab.update_view(uid, data, self.model.raw_image, bbox, live_cm_per_px)
 
     def run_export(self):
         if not self.measurements_cache: return
         os.makedirs(self.out_dir, exist_ok=True)
         cm_per_px = self.get_cm_per_px()
-        if cm_per_px is None: return
-        
+        if cm_per_px is None: 
+            return
+        else:
+            self.current_cm_per_px = cm_per_px
+            
         # 1. Grab UI inputs
         plate_id = self.in_plate_id.text().strip()
         condition = self.in_condition.text().strip()

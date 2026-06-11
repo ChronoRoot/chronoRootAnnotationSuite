@@ -120,6 +120,19 @@ def extract_plate_metrics(model, plants_meta, cm_per_px):
 
     return results
 
+
+class NumpyEncoder(json.JSONEncoder):
+    """Special json encoder for numpy types"""
+    def default(self, obj):
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        if isinstance(obj, (np.int_, np.intc, np.intp, np.int8, np.int16, np.int32, 
+                            np.int64, np.uint8, np.uint16, np.uint32, np.uint64)):
+            return int(obj)
+        if isinstance(obj, (np.float_, np.float16, np.float32, np.float64)):
+            return float(obj)
+        return super(NumpyEncoder, self).default(obj)
+
 def export_rsml_and_json(out_dir, base_name, plate_meta, measurements_dict):
     # 1. Initialize the Master XML Tree
     master_rsml = ET.Element('rsml')
@@ -130,7 +143,6 @@ def export_rsml_and_json(out_dir, base_name, plate_meta, measurements_dict):
     if first_uid and "metadata_xml" in measurements_dict[first_uid]:
         master_rsml.append(measurements_dict[first_uid]["metadata_xml"])
     else:
-        # Fallback basic header if measurements_dict is completely empty
         metadata = ET.SubElement(master_rsml, 'metadata')
         ET.SubElement(metadata, 'version').text = '1.0'
         
@@ -152,18 +164,15 @@ def export_rsml_and_json(out_dir, base_name, plate_meta, measurements_dict):
         if "rsml_xml" in data and data["rsml_xml"] is not None:
             scene.append(data["rsml_xml"]) 
 
-    # 4. Save JSON
+    # 4. Save JSON (Using the Custom Encoder)
     json_path = os.path.join(out_dir, f"{base_name}_Metrics.json")
     with open(json_path, 'w') as f: 
-        json.dump(export_data, f, indent=4)
+        json.dump(export_data, f, indent=4, cls=NumpyEncoder)
     
-    # 5. Save RSML (Fixed the crash)
+    # 5. Save RSML
     rsml_path = os.path.join(out_dir, f"{base_name}_Topology.rsml")
-    
-    # Elements cannot be written directly. They must be wrapped in ElementTree.
     tree = ET.ElementTree(master_rsml)
     
-    # Optional: Indent the XML nicely so it's readable in text editors (Python 3.9+)
     if hasattr(ET, 'indent'):
         ET.indent(tree, space="\t", level=0)
         

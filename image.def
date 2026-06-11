@@ -19,7 +19,9 @@ From: condaforge/miniforge3
         xorg-libxext \
         xorg-libxrender \
         xorg-libxi \
-        scikit-image
+        scikit-image \
+        pandas \
+        seaborn
 
     # 2. Clean up to reduce image size
     conda clean -afy

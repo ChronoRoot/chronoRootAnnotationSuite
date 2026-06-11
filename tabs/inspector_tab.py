@@ -39,7 +39,7 @@ class PhenomicsInspectorTab(QWidget):
         self.current_data = None
         self.current_raw = None
         self.current_bbox = None
-        self.current_cm_px = 1.0
+        self.current_cm_px = None
         self.init_ui()
 
     def init_ui(self):
@@ -273,14 +273,19 @@ class PhenomicsInspectorTab(QWidget):
 
         # --- ANGLES (With Text Geometry) ---
         if not self.rad_ang_none.isChecked():
-            dist_px_2mm = int(0.2 / self.current_cm_px)
+            # Enforce a minimum of 1 pixel to prevent negative index wrapping
+            dist_px_2mm = max(1, int(0.2 / self.current_cm_px))
+            
             for lat_pts in data["lateral_pts_list"]:
                 if len(lat_pts) < 2: continue
                 start = self._get_shifted_coord(lat_pts[0], x1, y1, pad_ruler)
                 
                 cv2.circle(padded_rgb, start, max(3, line_w), (0, 255, 255), -1)
                 
-                target_pt = lat_pts[min(dist_px_2mm, len(lat_pts)) - 1] if self.rad_ang_emergence.isChecked() else lat_pts[-1]
+                # Safely bound the index to the length of the list minus 1
+                target_idx = min(dist_px_2mm, len(lat_pts) - 1)
+                target_pt = lat_pts[target_idx] if self.rad_ang_emergence.isChecked() else lat_pts[-1]
+                
                 end_pt = self._get_shifted_coord(target_pt, x1, y1, pad_ruler)
                 
                 # Draw Line
@@ -346,7 +351,9 @@ class PhenomicsInspectorTab(QWidget):
                 painter.drawLine(p1[0], p1[1], p2[0], p2[1])
 
         if not self.rad_ang_none.isChecked():
-            dist_px_2mm = int(0.2 / self.current_cm_px)
+            # Enforce a minimum of 1 pixel
+            dist_px_2mm = max(1, int(0.2 / self.current_cm_px))
+            
             for lat_pts in data["lateral_pts_list"]:
                 if len(lat_pts) < 2: continue
                 start = self._get_shifted_coord(lat_pts[0], x1, y1, pad_ruler)
@@ -355,7 +362,9 @@ class PhenomicsInspectorTab(QWidget):
                 painter.setBrush(QColor(0, 255, 255))
                 painter.drawEllipse(start[0] - max(3, line_w), start[1] - max(3, line_w), max(3, line_w)*2, max(3, line_w)*2)
                 
-                target_pt = lat_pts[min(dist_px_2mm, len(lat_pts)) - 1] if self.rad_ang_emergence.isChecked() else lat_pts[-1]
+                # Safely bound the index
+                target_idx = min(dist_px_2mm, len(lat_pts) - 1)
+                target_pt = lat_pts[target_idx] if self.rad_ang_emergence.isChecked() else lat_pts[-1]
                 end_pt = self._get_shifted_coord(target_pt, x1, y1, pad_ruler)
                 
                 color = QColor(255, 255, 255) if self.rad_ang_emergence.isChecked() else QColor(0, 255, 255)
