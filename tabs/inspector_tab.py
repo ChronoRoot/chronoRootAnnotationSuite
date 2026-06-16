@@ -1,11 +1,12 @@
 import cv2
 import numpy as np
 import xml.etree.ElementTree as ET
-from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QCheckBox, 
-                             QLabel, QTextEdit, QSizePolicy, QPushButton, 
-                             QGroupBox, QRadioButton, QButtonGroup, QFileDialog, QMessageBox, QSpinBox, QFormLayout)
+from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QCheckBox,
+                             QLabel, QTextEdit, QSizePolicy, QPushButton,
+                             QGroupBox, QRadioButton, QButtonGroup, QFileDialog, QMessageBox,
+                             QSpinBox, QFormLayout, QStackedWidget)
 from PyQt5.QtGui import QImage, QPixmap, QPainter, QColor, QPen
-from PyQt5.QtCore import Qt, QSize, QRect
+from PyQt5.QtCore import Qt, QSize, QRect, pyqtSignal
 from PyQt5.QtSvg import QSvgGenerator
 
 class AspectRatioLabel(QWidget):
@@ -33,6 +34,8 @@ class AspectRatioLabel(QWidget):
             p.drawPixmap(x, y, scaled_pixmap)
 
 class PhenomicsInspectorTab(QWidget):
+    run_analysis_requested = pyqtSignal()
+
     def __init__(self):
         super().__init__()
         self.current_uid = None
@@ -40,11 +43,38 @@ class PhenomicsInspectorTab(QWidget):
         self.current_raw = None
         self.current_bbox = None
         self.current_cm_px = None
-        self.loaded_rsml_roots = [] # Store parsed live RSML data
+        self.loaded_rsml_roots = []
         self.init_ui()
 
     def init_ui(self):
-        insp_layout = QHBoxLayout(self)
+        root_layout = QVBoxLayout(self)
+        root_layout.setContentsMargins(0, 0, 0, 0)
+
+        self.stack = QStackedWidget()
+
+        self.empty_page = QWidget()
+        empty_layout = QVBoxLayout(self.empty_page)
+        empty_layout.addStretch()
+        self.lbl_empty = QLabel(
+            "<b>No plant analysis available yet.</b><br><br>"
+            "Assign genotypes in Plant Metadata, verify plants on the Review canvas, "
+            "then run analysis to inspect morphometrics here."
+        )
+        self.lbl_empty.setWordWrap(True)
+        self.lbl_empty.setAlignment(Qt.AlignCenter)
+        self.lbl_empty.setStyleSheet("color: #555; font-size: 14px; padding: 24px;")
+        empty_layout.addWidget(self.lbl_empty)
+
+        self.btn_run_analysis = QPushButton("Run Analysis")
+        self.btn_run_analysis.setStyleSheet(
+            "background-color: #007bff; color: white; font-weight: bold; padding: 12px;"
+        )
+        self.btn_run_analysis.clicked.connect(self.run_analysis_requested.emit)
+        empty_layout.addWidget(self.btn_run_analysis, alignment=Qt.AlignCenter)
+        empty_layout.addStretch()
+
+        self.content_page = QWidget()
+        insp_layout = QHBoxLayout(self.content_page)
         
         # ==========================================
         # LEFT PANEL: Canvas
@@ -126,6 +156,22 @@ class PhenomicsInspectorTab(QWidget):
 
         insp_layout.addLayout(right_layout, stretch=1)
 
+        self.stack.addWidget(self.empty_page)
+        self.stack.addWidget(self.content_page)
+        root_layout.addWidget(self.stack)
+        self.stack.setCurrentIndex(0)
+
+    def show_no_measurements_state(self):
+        self.stack.setCurrentIndex(0)
+        self.lbl_inspector_img.clear()
+        self.txt_metrics.clear()
+        self.loaded_rsml_roots = []
+        self.current_uid = None
+        self.current_data = None
+
+    def show_content_state(self):
+        self.stack.setCurrentIndex(1)
+
     def _trigger_redraw(self):
         # Prevent unnecessary parsing, just trigger the paint event
         self._render_current_state()
@@ -138,10 +184,13 @@ class PhenomicsInspectorTab(QWidget):
         self.current_bbox, self.current_cm_px = bbox, cm_per_px
         
         if not uid or not data:
+            self.show_content_state()
             self.lbl_inspector_img.clear()
             self.txt_metrics.clear()
             self.loaded_rsml_roots = []
             return
+
+        self.show_content_state()
             
         # ==========================================
         # 1. LIVE RSML PARSING (In-Memory)

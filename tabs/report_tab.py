@@ -105,11 +105,11 @@ class ComparisonReportTab(QWidget):
         self.cb_y_metric.currentIndexChanged.connect(self.update_plot)
         
         self.cb_x_axis = QComboBox()
-        self.cb_x_axis.addItems(["timepoint", "condition", "genotype"])
+        self.cb_x_axis.addItems(["timepoint", "condition", "genotype", "relative_folder", "day_folder"])
         self.cb_x_axis.currentIndexChanged.connect(self.update_plot)
         
         self.cb_hue = QComboBox()
-        self.cb_hue.addItems(["None", "genotype", "condition", "timepoint"])
+        self.cb_hue.addItems(["None", "genotype", "condition", "timepoint", "relative_folder", "day_folder"])
         self.cb_hue.setCurrentText("genotype")
         self.cb_hue.currentIndexChanged.connect(self.update_plot)
         
@@ -161,17 +161,82 @@ class ComparisonReportTab(QWidget):
         layout.addWidget(splitter)
         
         sns.set_theme(style="whitegrid", palette="muted")
-        
+
+    def _get_output_dir(self):
+        """Resolves output dir across legacy and unified main window implementations."""
+        if hasattr(self.main_window, "browser") and hasattr(self.main_window.browser, "out_dir"):
+            browser = self.main_window.browser
+            if getattr(browser, "output_mode", "task_folder") == "fixed":
+                return browser.out_dir
+            return getattr(browser, "root_dir", browser.out_dir)
+        return getattr(self.main_window, "out_dir", ".")
+
+    def _get_search_roots(self):
+        """Collect unique directories to search for Metrics JSON files."""
+        roots = []
+        if hasattr(self.main_window, "browser"):
+            browser = self.main_window.browser
+            for candidate in (
+                getattr(browser, "root_dir", None),
+                getattr(browser, "in_dir", None),
+                getattr(browser, "current_dir", None),
+            ):
+                if candidate and os.path.isdir(candidate):
+                    abs_path = os.path.abspath(candidate)
+                    if abs_path not in roots:
+                        roots.append(abs_path)
+
+        if not roots:
+            out_dir = self._get_output_dir()
+            if os.path.isdir(out_dir):
+                roots.append(os.path.abspath(out_dir))
+
+        return roots
+
+    def _discover_metrics_files(self):
+        """Recursively find _Metrics.json files under project/search roots."""
+        discovered = {}
+        for root in self._get_search_roots():
+            for dirpath, _, filenames in os.walk(root):
+                for filename in filenames:
+                    if not filename.endswith("_Metrics.json"):
+                        continue
+                    full_path = os.path.join(dirpath, filename)
+                    if full_path in discovered:
+                        continue
+                    rel_folder = os.path.relpath(dirpath, root)
+                    if rel_folder == ".":
+                        display = filename
+                    else:
+                        display = f"{rel_folder}/{filename}"
+                    discovered[full_path] = {
+                        "display": display,
+                        "relative_folder": rel_folder if rel_folder != "." else "",
+                        "search_root": root,
+                    }
+        return discovered
+
+    @staticmethod
+    def _infer_day_folder(relative_folder):
+        if not relative_folder:
+            return ""
+        for part in relative_folder.replace("\\", "/").split("/"):
+            if re.match(r"(?i)^day[\s_-]?\d+", part) or re.match(r"(?i)^d\d+", part):
+                return part
+        return ""
+
     def refresh_file_list(self):
         self.file_list.clear()
-        out_dir = self.main_window.out_dir
-        if not os.path.exists(out_dir): return
-        
-        for f in sorted(os.listdir(out_dir)):
-            if f.endswith("_Metrics.json"):
-                item = QListWidgetItem(f)
-                item.setData(Qt.UserRole, os.path.join(out_dir, f))
-                self.file_list.addItem(item)
+        metrics_files = self._discover_metrics_files()
+        if not metrics_files:
+            return
+
+        for full_path in sorted(metrics_files.keys(), key=lambda p: natural_sort_key(metrics_files[p]["display"])):
+            meta = metrics_files[full_path]
+            item = QListWidgetItem(meta["display"])
+            item.setData(Qt.UserRole, full_path)
+            item.setToolTip(full_path)
+            self.file_list.addItem(item)
                 
     def on_plot_type_changed(self):
         plot_type = self.cb_plot_type.currentText()
@@ -196,7 +261,10 @@ class ComparisonReportTab(QWidget):
 
     def _get_clean_dataframe(self):
         """Strips system/JSON variables and returns a pure, publication-ready dataset."""
-        meta_cols = ["plate_id", "condition", "timepoint", "genotype", "plant_num"]
+        meta_cols = [
+            "plate_id", "condition", "timepoint", "genotype", "plant_num",
+            "relative_folder", "day_folder", "source_file",
+        ]
         # Only grab the nice names defined in METRIC_MAPPING
         metric_cols = list(METRIC_MAPPING.values()) 
         
@@ -213,15 +281,22 @@ class ComparisonReportTab(QWidget):
             return
             
         all_plants_data = []
+        metrics_files = self._discover_metrics_files()
         
         for item in selected_items:
             file_path = item.data(Qt.UserRole)
             try:
-                with open(file_path, 'r') as f: data = json.load(f)
+                with open(file_path, 'r') as f:
+                    data = json.load(f)
+                file_meta = metrics_files.get(file_path, {})
+                relative_folder = file_meta.get("relative_folder", "")
                 plate_meta = {
                     "plate_id": data.get("plate_id", "Unknown"),
                     "condition": data.get("condition", "Unknown"),
                     "timepoint": data.get("timepoint", "Unknown"),
+                    "relative_folder": relative_folder or "root",
+                    "day_folder": self._infer_day_folder(relative_folder) or "Unknown",
+                    "source_file": os.path.basename(file_path),
                 }
                 for plant in data.get("plants", []):
                     all_plants_data.append({**plate_meta, **plant})
@@ -244,7 +319,7 @@ class ComparisonReportTab(QWidget):
                 numeric_metrics.append(col)
                 
         # 2. APPLY NATURAL SORTING TO CATEGORIES
-        for col in ['timepoint', 'condition', 'genotype']:
+        for col in ['timepoint', 'condition', 'genotype', 'relative_folder', 'day_folder']:
             if col in self.df.columns:
                 unique_vals = self.df[col].dropna().unique().tolist()
                 unique_vals.sort(key=natural_sort_key)
@@ -328,14 +403,14 @@ class ComparisonReportTab(QWidget):
         plot_type = self.cb_plot_type.currentText().split(" ")[0]
         
         default_name = f"{plot_type}_{y_var}_vs_{x_var}.svg"
-        out_path, _ = QFileDialog.getSaveFileName(self, "Save Vector Graphic", os.path.join(self.main_window.out_dir, default_name), "SVG Files (*.svg)")
+        out_path, _ = QFileDialog.getSaveFileName(self, "Save Vector Graphic", os.path.join(self._get_output_dir(), default_name), "SVG Files (*.svg)")
         if out_path:
             self.figure.savefig(out_path, format='svg', bbox_inches='tight')
             QMessageBox.information(self, "Export Complete", "Plot exported successfully.")
 
     def export_data_csv(self):
         if self.df.empty: return
-        out_path, _ = QFileDialog.getSaveFileName(self, "Save Dataset", os.path.join(self.main_window.out_dir, "Aggregated_Phenomics_Data.csv"), "CSV Files (*.csv)")
+        out_path, _ = QFileDialog.getSaveFileName(self, "Save Dataset", os.path.join(self._get_output_dir(), "Aggregated_Phenomics_Data.csv"), "CSV Files (*.csv)")
         if out_path:
             clean_df = self._get_clean_dataframe() # <--- Use the clean version
             clean_df.to_csv(out_path, index=False)
@@ -344,7 +419,7 @@ class ComparisonReportTab(QWidget):
     def generate_full_report(self):
         if self.df.empty: return
         
-        target_dir = QFileDialog.getExistingDirectory(self, "Select Folder for Report Generation", self.main_window.out_dir)
+        target_dir = QFileDialog.getExistingDirectory(self, "Select Folder for Report Generation", self._get_output_dir())
         if not target_dir: return
         
         # 1. Save the Master CSV (Using the clean version)
