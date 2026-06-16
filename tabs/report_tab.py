@@ -14,6 +14,8 @@ from PyQt5.QtCore import Qt
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.backends.backend_qt5agg import NavigationToolbar2QT as NavigationToolbar
 
+from core import convex_hull
+
 # ==========================================
 # METRIC NAME MAPPING (For Publication-Ready Plots)
 # ==========================================
@@ -86,8 +88,12 @@ class ComparisonReportTab(QWidget):
         control_group = QGroupBox("Aesthetics")
         form = QFormLayout(control_group)
         
+        # In init_ui, add the new plot type:
         self.cb_plot_type = QComboBox()
-        self.cb_plot_type.addItems(["Box Plot", "Swarm Plot", "Violin Plot", "Violin + Swarm Plot", "Line Plot (Means)"])
+        self.cb_plot_type.addItems([
+            "Box Plot", "Swarm Plot", "Violin Plot", "Violin + Swarm Plot", 
+            "Line Plot (Means)", "Qualitative Plots"  
+        ])
         self.cb_plot_type.currentIndexChanged.connect(self.on_plot_type_changed)
         
         self.cb_error_bar = QComboBox()
@@ -168,9 +174,18 @@ class ComparisonReportTab(QWidget):
                 self.file_list.addItem(item)
                 
     def on_plot_type_changed(self):
+        plot_type = self.cb_plot_type.currentText()
+        is_line_plot = "Line Plot" in plot_type
+        is_atlas = "Qualitative" in plot_type
+        
         # Only enable Error Bar dropdown if Line Plot is selected
-        is_line_plot = "Line Plot" in self.cb_plot_type.currentText()
         self.cb_error_bar.setEnabled(is_line_plot)
+        
+        # Disable X, Y, and Hue if Atlas is selected (Atlas uses strict grouping)
+        self.cb_y_metric.setEnabled(not is_atlas)
+        self.cb_x_axis.setEnabled(not is_atlas)
+        self.cb_hue.setEnabled(not is_atlas)
+        
         self.update_plot()
 
     
@@ -251,48 +266,60 @@ class ComparisonReportTab(QWidget):
     def update_plot(self):
         if self.df.empty: return
         
-        y_var = self.cb_y_metric.currentText()
-        x_var = self.cb_x_axis.currentText()
-        hue_var = self.cb_hue.currentText()
         plot_type = self.cb_plot_type.currentText()
         
-        if not y_var: return
-        hue_var = None if hue_var == "None" else hue_var
-
-        self.ax.clear()
+        # We must clear the ENTIRE figure, not just the axis, because the 
+        # Atlas generates a completely different multi-axis grid layout.
+        self.figure.clf() 
         
         try:
-            if plot_type == "Box Plot":
-                sns.boxplot(data=self.df, x=x_var, y=y_var, hue=hue_var, ax=self.ax, width=0.5, fliersize=3)
-            elif plot_type == "Swarm Plot":
-                sns.swarmplot(data=self.df, x=x_var, y=y_var, hue=hue_var, ax=self.ax, dodge=True, size=4)
-            elif plot_type == "Violin Plot":
-                sns.violinplot(data=self.df, x=x_var, y=y_var, hue=hue_var, ax=self.ax, inner="quartile", density_norm="width")
-            elif plot_type == "Violin + Swarm Plot":
-                sns.violinplot(data=self.df, x=x_var, y=y_var, hue=hue_var, ax=self.ax, inner=None, color=".9", density_norm="width")
-                sns.swarmplot(data=self.df, x=x_var, y=y_var, hue=hue_var, ax=self.ax, dodge=True, size=4, palette="dark:black", alpha=0.6)
-            elif plot_type == "Line Plot (Means)":
-                # Handle dynamic error bars
-                err_map = {"95% Confidence Interval (CI)": ("ci", 95), "Standard Error (SE)": "se", "Standard Deviation (SD)": "sd"}
-                err_val = err_map.get(self.cb_error_bar.currentText(), "se")
-                sns.lineplot(data=self.df, x=x_var, y=y_var, hue=hue_var, ax=self.ax, marker="o", err_style="bars", errorbar=err_val)
-
-            self.ax.set_title(f"{y_var} by {x_var.capitalize()}" + (f" (Grouped by {hue_var.capitalize()})" if hue_var else ""), pad=15, fontweight='bold')
-            self.ax.set_xlabel(x_var.capitalize(), fontweight='bold')
-            self.ax.set_ylabel(y_var, fontweight='bold')
-            self.ax.tick_params(axis='x', rotation=45)
-            
-            if hue_var:
-                self.ax.legend(title=hue_var.capitalize(), bbox_to_anchor=(1.05, 1), loc='upper left')
+            if plot_type == "Qualitative Plots": 
+                canvas_dims, dest_ini = convex_hull.calculate_optimal_canvas(self.df)
+                convex_hull.draw_atlas_grid_on_figure(self.df, self.figure, canvas_dims, dest_ini)
                 
-            self.figure.tight_layout() 
+            else:
+                # Standard Seaborn Plots: We need to recreate a single axis
+                self.ax = self.figure.add_subplot(111)
+                
+                y_var = self.cb_y_metric.currentText()
+                x_var = self.cb_x_axis.currentText()
+                hue_var = self.cb_hue.currentText()
+                
+                if not y_var: return
+                hue_var = None if hue_var == "None" else hue_var
+
+                if plot_type == "Box Plot":
+                    sns.boxplot(data=self.df, x=x_var, y=y_var, hue=hue_var, ax=self.ax, width=0.5, fliersize=3)
+                elif plot_type == "Swarm Plot":
+                    sns.swarmplot(data=self.df, x=x_var, y=y_var, hue=hue_var, ax=self.ax, dodge=True, size=4)
+                elif plot_type == "Violin Plot":
+                    sns.violinplot(data=self.df, x=x_var, y=y_var, hue=hue_var, ax=self.ax, inner="quartile", density_norm="width")
+                elif plot_type == "Violin + Swarm Plot":
+                    sns.violinplot(data=self.df, x=x_var, y=y_var, hue=hue_var, ax=self.ax, inner=None, color=".9", density_norm="width")
+                    sns.swarmplot(data=self.df, x=x_var, y=y_var, hue=hue_var, ax=self.ax, dodge=True, size=4, palette="dark:black", alpha=0.6)
+                elif plot_type == "Line Plot (Means)":
+                    err_map = {"95% Confidence Interval (CI)": ("ci", 95), "Standard Error (SE)": "se", "Standard Deviation (SD)": "sd"}
+                    err_val = err_map.get(self.cb_error_bar.currentText(), "se")
+                    sns.lineplot(data=self.df, x=x_var, y=y_var, hue=hue_var, ax=self.ax, marker="o", err_style="bars", errorbar=err_val)
+
+                # Formatting
+                self.ax.set_title(f"{y_var} by {x_var.capitalize()}" + (f" (Grouped by {hue_var.capitalize()})" if hue_var else ""), pad=15, fontweight='bold')
+                self.ax.set_xlabel(x_var.capitalize(), fontweight='bold')
+                self.ax.set_ylabel(y_var, fontweight='bold')
+                self.ax.tick_params(axis='x', rotation=45)
+                
+                if hue_var:
+                    self.ax.legend(title=hue_var.capitalize(), bbox_to_anchor=(1.05, 1), loc='upper left')
+                    
+                self.figure.tight_layout() 
+                
             self.canvas.draw()
             
         except Exception as e:
-            self.ax.clear()
-            self.ax.text(0.5, 0.5, f"Plotting Error:\n{str(e)}", ha='center', va='center', color='red')
+            self.figure.clf()
+            ax = self.figure.add_subplot(111)
+            ax.text(0.5, 0.5, f"Plotting Error:\n{str(e)}", ha='center', va='center', color='red')
             self.canvas.draw()
-
     # --- EXPORTING LOGIC ---
     def export_plot_to_svg(self):
         if self.df.empty: return
@@ -324,6 +351,8 @@ class ComparisonReportTab(QWidget):
         csv_path = os.path.join(target_dir, "Master_Aggregated_Data.csv")
         clean_df = self._get_clean_dataframe() # <--- Use the clean version
         clean_df.to_csv(csv_path, index=False)
+        
+        convex_hull.generate_qualitative_grid(self.df, target_dir)
         
         # 2. Iterate and generate plots
         progress = QProgressDialog("Generating Plots...", "Cancel", 0, self.cb_y_metric.count(), self)

@@ -1,6 +1,6 @@
 import cv2
 import numpy as np
-import os
+import xml.etree.ElementTree as ET
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QCheckBox, 
                              QLabel, QTextEdit, QSizePolicy, QPushButton, 
                              QGroupBox, QRadioButton, QButtonGroup, QFileDialog, QMessageBox, QSpinBox, QFormLayout)
@@ -40,6 +40,7 @@ class PhenomicsInspectorTab(QWidget):
         self.current_raw = None
         self.current_bbox = None
         self.current_cm_px = None
+        self.loaded_rsml_roots = [] # Store parsed live RSML data
         self.init_ui()
 
     def init_ui(self):
@@ -57,18 +58,19 @@ class PhenomicsInspectorTab(QWidget):
         # ==========================================
         right_layout = QVBoxLayout()
         
-        # --- Group 1: Core Visualization (Mutually Exclusive) ---
+        # --- Group 1: Core Visualization ---
         group_view = QGroupBox("1. Root Representation")
         vbox_view = QVBoxLayout()
         
         self.rad_view_model = QRadioButton("Manual/Model Semantic Mask")
         self.rad_view_graph_mask = QRadioButton("Graph-Validated Mask (Pixels)")
         self.rad_view_hard_graph = QRadioButton("Hard Topological Graph (Lines)")
+        self.rad_view_rsml = QRadioButton("Live RSML Overlay") # Renamed
         self.rad_view_none = QRadioButton("Raw Image Only")
         self.rad_view_model.setChecked(True)
 
         self.view_group = QButtonGroup()
-        for rad in [self.rad_view_model, self.rad_view_graph_mask, self.rad_view_hard_graph, self.rad_view_none]:
+        for rad in [self.rad_view_model, self.rad_view_graph_mask, self.rad_view_hard_graph, self.rad_view_rsml, self.rad_view_none]:
             self.view_group.addButton(rad)
             rad.toggled.connect(self._trigger_redraw)
             vbox_view.addWidget(rad)
@@ -76,7 +78,7 @@ class PhenomicsInspectorTab(QWidget):
         group_view.setLayout(vbox_view)
         right_layout.addWidget(group_view)
 
-        # --- Group 2: Features & Angles (Mutually Exclusive) ---
+        # --- Group 2: Features & Angles ---
         group_angles = QGroupBox("2. Biological Features")
         vbox_ang = QVBoxLayout()
         
@@ -125,7 +127,8 @@ class PhenomicsInspectorTab(QWidget):
         insp_layout.addLayout(right_layout, stretch=1)
 
     def _trigger_redraw(self):
-        self.update_view(self.current_uid, self.current_data, self.current_raw, self.current_bbox, self.current_cm_px)
+        # Prevent unnecessary parsing, just trigger the paint event
+        self._render_current_state()
 
     def _get_shifted_coord(self, pt, x1, y1, pad_ruler):
         return (int(pt[0]) - x1 + pad_ruler, int(pt[1]) - y1)
@@ -137,10 +140,34 @@ class PhenomicsInspectorTab(QWidget):
         if not uid or not data:
             self.lbl_inspector_img.clear()
             self.txt_metrics.clear()
+            self.loaded_rsml_roots = []
             return
             
         # ==========================================
-        # MANUSCRIPT METRICS REPORT READOUT
+        # 1. LIVE RSML PARSING (In-Memory)
+        # ==========================================
+        self.loaded_rsml_roots = []
+        if data.get("rsml_xml") is not None:
+            plant_xml = data["rsml_xml"]
+            
+            def parse_root_node(elem, current_order):
+                pts = []
+                polyline = elem.find("./geometry/polyline")
+                if polyline is not None:
+                    for pt in polyline.findall("point"):
+                        pts.append((float(pt.get('x')), float(pt.get('y'))))
+                if pts:
+                    self.loaded_rsml_roots.append({'order': current_order, 'points': pts})
+                
+                # Recurse for all children roots
+                for child in elem.findall("./root"):
+                    parse_root_node(child, current_order + 1)
+
+            for main_root in plant_xml.findall("./root"):
+                parse_root_node(main_root, current_order=0)
+
+        # ==========================================
+        # 2. MANUSCRIPT METRICS REPORT READOUT
         # ==========================================
         report = f"--- CHRONOROOT ID: {uid} ---\n"
         report += f"Genotype: {data.get('genotype', 'N/A')}\n"
@@ -167,17 +194,22 @@ class PhenomicsInspectorTab(QWidget):
         
         self.txt_metrics.setText(report)
         
-        # ==========================================
-        # RENDER IMAGE VIEWER
-        # ==========================================
-        x, y, w, h = bbox
+        # Trigger the visual update
+        self._render_current_state()
+
+    def _render_current_state(self):
+        """Dedicated rendering block so UI toggles don't trigger re-parsing."""
+        if not self.current_uid or not self.current_data:
+            return
+
+        x, y, w, h = self.current_bbox
         if w == 0: return
         
         pad, pad_ruler = 40, 80
         x1, y1 = max(0, x-pad), max(0, y-pad)
-        x2, y2 = min(raw_image.shape[1], x+w+pad), min(raw_image.shape[0], y+h+pad)
+        x2, y2 = min(self.current_raw.shape[1], x+w+pad), min(self.current_raw.shape[0], y+h+pad)
         
-        padded_rgb = self._generate_raster_canvas(data, raw_image, x1, y1, x2, y2, pad_ruler)
+        padded_rgb = self._generate_raster_canvas(self.current_data, self.current_raw, x1, y1, x2, y2, pad_ruler)
         
         h_img, w_img, _ = padded_rgb.shape
         qimg = QImage(padded_rgb.data, w_img, h_img, 3 * w_img, QImage.Format_RGB888)
@@ -187,11 +219,11 @@ class PhenomicsInspectorTab(QWidget):
         crop_rgb = raw_image[y1:y2, x1:x2].copy()
         padded_rgb = cv2.copyMakeBorder(crop_rgb, 0, 0, pad_ruler, 0, cv2.BORDER_CONSTANT, value=(20, 20, 20))
         h_img, w_img, _ = padded_rgb.shape
-        cx_off, cy_off = data["crop_offset"]
+        cx_off, cy_off = data.get("crop_offset", (0,0))
         line_w = self.spin_width.value()
         
         # --- RULER ---
-        cm_in_px = int(1.0 / self.current_cm_px)
+        cm_in_px = int(1.0 / self.current_cm_px) if self.current_cm_px else 100
         if cm_in_px > 10:
             cv2.line(padded_rgb, (pad_ruler - 15, 10), (pad_ruler - 15, h_img - 10), (200, 200, 200), 2)
             for tick_y in range(10, h_img - 10, cm_in_px):
@@ -201,27 +233,16 @@ class PhenomicsInspectorTab(QWidget):
         # --- MODE 1: MANUAL/MODEL SEMANTIC MASK ---
         if self.rad_view_model.isChecked() and "semantic_patch" in data:
             orig_patch = data["semantic_patch"]
-            
-            # 1. Calculate the relative offset of the patch INSIDE the UI crop
-            # This accounts for the 40px padding you see in the viewer
-            dx = cx_off - x1
-            dy = cy_off - y1
-            
+            dx, dy = cx_off - x1, cy_off - y1
             h_patch, w_patch = orig_patch.shape
             h_crop, w_crop = crop_rgb.shape[:2]
             
-            # 2. Determine safe intersection boundaries to prevent NumPy crashes
-            start_x = max(0, dx)
-            start_y = max(0, dy)
-            patch_start_x = max(0, -dx)
-            patch_start_y = max(0, -dy)
-            
-            end_x = min(w_crop, dx + w_patch)
-            end_y = min(h_crop, dy + h_patch)
+            start_x, start_y = max(0, dx), max(0, dy)
+            patch_start_x, patch_start_y = max(0, -dx), max(0, -dy)
+            end_x, end_y = min(w_crop, dx + w_patch), min(h_crop, dy + h_patch)
             patch_end_x = patch_start_x + (end_x - start_x)
             patch_end_y = patch_start_y + (end_y - start_y)
             
-            # 3. Apply blending only to the mathematically aligned region
             if end_x > start_x and end_y > start_y:
                 patch_slice = orig_patch[patch_start_y:patch_end_y, patch_start_x:patch_end_x]
                 crop_slice = crop_rgb[start_y:end_y, start_x:end_x]
@@ -229,24 +250,15 @@ class PhenomicsInspectorTab(QWidget):
                 main_mask = (patch_slice == 1)
                 lat_mask = (patch_slice == 2)
                 
-                # Pure NumPy Alpha Blending (Original_Pixel * 0.4 + Overlay * 0.6)
                 if np.any(main_mask):
-                    crop_slice[main_mask] = (
-                        crop_slice[main_mask].astype(np.float32) * 0.4 + 
-                        np.array([255, 100, 100], dtype=np.float32) * 0.6
-                    ).astype(np.uint8)
-                    
+                    crop_slice[main_mask] = (crop_slice[main_mask].astype(np.float32) * 0.4 + np.array([255, 100, 100], dtype=np.float32) * 0.6).astype(np.uint8)
                 if np.any(lat_mask):
-                    crop_slice[lat_mask] = (
-                        crop_slice[lat_mask].astype(np.float32) * 0.4 + 
-                        np.array([100, 255, 100], dtype=np.float32) * 0.6
-                    ).astype(np.uint8)
+                    crop_slice[lat_mask] = (crop_slice[lat_mask].astype(np.float32) * 0.4 + np.array([100, 255, 100], dtype=np.float32) * 0.6).astype(np.uint8)
             
-            # 4. Put the fully modified crop back onto the padded ruler canvas
             padded_rgb[0:y2-y1, pad_ruler:pad_ruler+x2-x1] = crop_rgb
 
         # --- MODE 2: GRAPH VALIDATED MASK ---
-        elif self.rad_view_graph_mask.isChecked():
+        elif self.rad_view_graph_mask.isChecked() and "colored_skel_crop" in data:
             skel_crop = data["colored_skel_crop"]
             kernel = np.ones((line_w, line_w), np.uint8)
             main_mask = cv2.dilate((np.isin(skel_crop, data["main_root_colors"])).astype(np.uint8), kernel)
@@ -261,20 +273,41 @@ class PhenomicsInspectorTab(QWidget):
                         padded_rgb[py, px] = color
 
         # --- MODE 3: HARD TOPOLOGICAL GRAPH ---
-        elif self.rad_view_hard_graph.isChecked():
+        elif self.rad_view_hard_graph.isChecked() and "graph_edges" in data:
             for u, v, r_type in data["graph_edges"]:
                 col = (255, 0, 0) if r_type == 1 else (0, 255, 0)
                 cv2.line(padded_rgb, self._get_shifted_coord(u, x1, y1, pad_ruler), self._get_shifted_coord(v, x1, y1, pad_ruler), col, line_w)
 
+        # --- MODE 4: LIVE RSML OVERLAY ---
+        elif self.rad_view_rsml.isChecked() and self.loaded_rsml_roots:
+            # Array is pushed to QImage.Format_RGB888, so we use pure RGB tuples!
+            order_colors = {
+                0: (255, 0, 0),    # Main Root = Red
+                1: (0, 255, 0),    # 1st Order (Lateral) = Green
+                2: (0, 255, 255),  # 2nd Order (Tertiary) = Cyan
+                3: (255, 0, 255)   # 3rd Order (Quaternary) = Magenta
+            }
+            default_color = (255, 255, 0) # Anything deeper is Yellow
+            
+            for root_segment in self.loaded_rsml_roots:
+                pts = root_segment['points']
+                order = root_segment['order']
+                col = order_colors.get(order, default_color)
+                
+                shifted_pts = [self._get_shifted_coord(p, x1, y1, pad_ruler) for p in pts]
+                
+                for i in range(len(shifted_pts) - 1):
+                    p1, p2 = shifted_pts[i], shifted_pts[i+1]
+                    cv2.line(padded_rgb, p1, p2, col, line_w, cv2.LINE_AA)
+
         # --- CONVEX HULL ---
-        if self.chk_hull.isChecked() and data["hull_pts"]:
+        if self.chk_hull.isChecked() and data.get("hull_pts"):
             pts_arr = np.array([self._get_shifted_coord(p, x1, y1, pad_ruler) for p in data["hull_pts"]], np.int32).reshape((-1, 1, 2))
             cv2.polylines(padded_rgb, [pts_arr], True, (255, 0, 255), 2)
 
         # --- ANGLES (With Text Geometry) ---
-        if not self.rad_ang_none.isChecked():
-            # Enforce a minimum of 1 pixel to prevent negative index wrapping
-            dist_px_2mm = max(1, int(0.2 / self.current_cm_px))
+        if not self.rad_ang_none.isChecked() and "lateral_pts_list" in data:
+            dist_px_2mm = max(1, int(0.2 / self.current_cm_px)) if self.current_cm_px else 5
             
             for lat_pts in data["lateral_pts_list"]:
                 if len(lat_pts) < 2: continue
@@ -282,23 +315,18 @@ class PhenomicsInspectorTab(QWidget):
                 
                 cv2.circle(padded_rgb, start, max(3, line_w), (0, 255, 255), -1)
                 
-                # Safely bound the index to the length of the list minus 1
                 target_idx = min(dist_px_2mm, len(lat_pts) - 1)
                 target_pt = lat_pts[target_idx] if self.rad_ang_emergence.isChecked() else lat_pts[-1]
-                
                 end_pt = self._get_shifted_coord(target_pt, x1, y1, pad_ruler)
                 
-                # Draw Line
                 color = (255, 255, 255) if self.rad_ang_emergence.isChecked() else (0, 255, 255)
                 cv2.line(padded_rgb, start, end_pt, color, line_w)
 
-                # Calculate Angle for Label
                 dx = target_pt[0] - lat_pts[0][0]
                 dy = target_pt[1] - lat_pts[0][1]
                 hyp = np.hypot(dx, dy)
                 ang_deg = np.degrees(np.arccos(np.clip(dy / hyp, -1.0, 1.0))) if hyp > 0 else 0
                 
-                # Text Placement Logic
                 txt_x = start[0] - 45 if dx < 0 else start[0] + 15
                 txt_y = start[1] + 15
                 cv2.putText(padded_rgb, f"{ang_deg:.1f}", (txt_x, txt_y), cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1, cv2.LINE_AA)
@@ -336,23 +364,44 @@ class PhenomicsInspectorTab(QWidget):
         
         line_w = self.spin_width.value()
 
-        if self.rad_view_hard_graph.isChecked():
+        if self.rad_view_hard_graph.isChecked() and "graph_edges" in data:
             for u, v, r_type in data["graph_edges"]:
                 color = QColor(255, 0, 0) if r_type == 1 else QColor(0, 255, 0)
                 painter.setPen(QPen(color, line_w))
                 p1, p2 = self._get_shifted_coord(u, x1, y1, pad_ruler), self._get_shifted_coord(v, x1, y1, pad_ruler)
                 painter.drawLine(p1[0], p1[1], p2[0], p2[1])
 
-        if self.chk_hull.isChecked() and data["hull_pts"]:
+        # LIVE RSML SVG Export
+        elif self.rad_view_rsml.isChecked() and self.loaded_rsml_roots:
+            q_colors = {
+                0: QColor(255, 0, 0),
+                1: QColor(0, 255, 0),
+                2: QColor(0, 255, 255),
+                3: QColor(255, 0, 255)
+            }
+            default_color = QColor(255, 255, 0)
+            
+            for root_segment in self.loaded_rsml_roots:
+                pts = root_segment['points']
+                order = root_segment['order']
+                qcol = q_colors.get(order, default_color)
+                
+                painter.setPen(QPen(qcol, line_w))
+                shifted_pts = [self._get_shifted_coord(p, x1, y1, pad_ruler) for p in pts]
+                
+                for i in range(len(shifted_pts) - 1):
+                    p1, p2 = shifted_pts[i], shifted_pts[i+1]
+                    painter.drawLine(p1[0], p1[1], p2[0], p2[1])
+
+        if self.chk_hull.isChecked() and data.get("hull_pts"):
             painter.setPen(QPen(QColor(255, 0, 255), 2, Qt.DashLine))
             pts = [self._get_shifted_coord(p, x1, y1, pad_ruler) for p in data["hull_pts"]]
             for i in range(len(pts)):
                 p1, p2 = pts[i], pts[(i+1) % len(pts)]
                 painter.drawLine(p1[0], p1[1], p2[0], p2[1])
 
-        if not self.rad_ang_none.isChecked():
-            # Enforce a minimum of 1 pixel
-            dist_px_2mm = max(1, int(0.2 / self.current_cm_px))
+        if not self.rad_ang_none.isChecked() and "lateral_pts_list" in data:
+            dist_px_2mm = max(1, int(0.2 / self.current_cm_px)) if self.current_cm_px else 5
             
             for lat_pts in data["lateral_pts_list"]:
                 if len(lat_pts) < 2: continue
@@ -362,7 +411,6 @@ class PhenomicsInspectorTab(QWidget):
                 painter.setBrush(QColor(0, 255, 255))
                 painter.drawEllipse(start[0] - max(3, line_w), start[1] - max(3, line_w), max(3, line_w)*2, max(3, line_w)*2)
                 
-                # Safely bound the index
                 target_idx = min(dist_px_2mm, len(lat_pts) - 1)
                 target_pt = lat_pts[target_idx] if self.rad_ang_emergence.isChecked() else lat_pts[-1]
                 end_pt = self._get_shifted_coord(target_pt, x1, y1, pad_ruler)

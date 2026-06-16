@@ -166,9 +166,9 @@ def export_rsml_and_json(out_dir, base_name, plate_meta, measurements_dict):
     for uid, data in measurements_dict.items():
         # Strip heavy memory objects before JSON dump
         json_safe_data = {k: v for k, v in data.items() if k not in [
-            "rsml_xml", "metadata_xml", "main_pts", "lateral_pts_list", "hull_pts", 
+            "rsml_xml", "metadata_xml", "main_pts", "lateral_pts_list", 
             "colored_skel_crop", "crop_offset", "main_root_colors", "graph_edges"
-        ]}
+        ]} 
         export_data["plants"].append(json_safe_data)
         
         # Plug the individual plant into the Master Scene

@@ -1,4 +1,5 @@
 import os
+os.environ["QT_LOGGING_RULES"] = "*.debug=false;*.warning=false"
 import json
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QLabel, QPushButton, QMessageBox, QApplication,
                             QHBoxLayout, QLineEdit, QFileDialog, QListWidget, QListWidgetItem, 

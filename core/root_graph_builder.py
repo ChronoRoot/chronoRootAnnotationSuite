@@ -33,6 +33,8 @@ def extract_skeleton(binary_mask, prune_iters=3):
 
     # Apply customizable pruning pipeline
     skeleton_crop = trim(prune(skeleton_crop, prune_iters))
+    skeleton_crop = trim(prune(skeleton_crop, 1))
+    skeleton_crop = trim(prune(skeleton_crop, 1))
     
     branch_points, end_points = skeleton_nodes(skeleton_crop)
     
@@ -199,13 +201,13 @@ def find_nearest(target_pos, point_list):
 
 def graphInit(graph, main_root_class=1):
     """
-    Initializes a static plant graph using proportional bounding-box logic, 
-    designed specifically for sparse graphs (nodes only at bifurcations/tips).
+    Initializes a static plant graph by evaluating candidates (endpoints + extremities) 
+    to find the path that maximizes the physical main root length.
     """
     if len(graph.nodes) == 0:
         raise Exception("Cannot initialize empty graph")
 
-    # 1. Find all nodes connected to the main root edges
+    # 1. Identify Main Root Sub-components & Set Traversal Costs EARLY
     c1_edges = [(u, v) for u, v, data in graph.edges(data=True) 
                 if data.get('orig_root_type', data.get('root_type')) == main_root_class]
     
@@ -214,56 +216,73 @@ def graphInit(graph, main_root_class=1):
         c1_nodes_set.add(u)
         c1_nodes_set.add(v)
         
+    for u, v, data in graph.edges(data=True):
+        phys_len = data.get('weight', 1.0)
+        edge_type = data.get('orig_root_type', data.get('root_type'))
+        
+        if edge_type == main_root_class:
+            data['traversal_cost'] = phys_len
+        else:
+            if phys_len < 5.0 and (u in c1_nodes_set or v in c1_nodes_set):
+                data['traversal_cost'] = phys_len * 2.0 
+            else:
+                data['traversal_cost'] = phys_len * 100.0
+
     c1_nodes = list(c1_nodes_set)
     ini_node, ftip_node = None, None
 
+    # 2. Candidate Evaluation & Length Maximization
     if c1_nodes:
-        # 3. Find the absolute top and bottom nodes generally (any grade)
+        # Get the absolute highest and lowest nodes (captures T-junction seeds/tips)
         abs_top_node = min(c1_nodes, key=lambda n: n[1])
         abs_bottom_node = max(c1_nodes, key=lambda n: n[1])
         
-        # Calculate the total Y-distance of the main root and the 15% threshold
-        total_y_dist = abs_bottom_node[1] - abs_top_node[1]
-        threshold = 0.15 * total_y_dist
-        
-        # 2. Find isolated nodes (grade 1)
+        # Find isolated nodes (degree 1)
         c1_endpoints = [n for n in c1_nodes if graph.degree(n) == 1]
         
-        if c1_endpoints:
-            ep_top_node = min(c1_endpoints, key=lambda n: n[1])
-            ep_bottom_node = max(c1_endpoints, key=lambda n: n[1])
+        # Expand candidates: Endpoints UNION Absolute Extremities
+        candidates = list(set(c1_endpoints + [abs_top_node, abs_bottom_node]))
+        
+        if len(candidates) >= 2:
+            max_phys_length = -1
+            best_pair = (None, None)
             
-            # --- EVALUATE TOP (Ini) ---
-            # Image coords: Y increases going down. ep_top_node[1] is >= abs_top_node[1]
-            if (ep_top_node[1] - abs_top_node[1]) > threshold:
-                ini_node = abs_top_node
+            # Compare all candidates to find the longest continuous main root path
+            for i in range(len(candidates)):
+                for j in range(i + 1, len(candidates)):
+                    n1, n2 = candidates[i], candidates[j]
+                    try:
+                        path = nx.shortest_path(graph, source=n1, target=n2, weight='traversal_cost')
+                        phys_len = sum(graph.edges[path[k], path[k+1]].get('weight', 1.0) for k in range(len(path) - 1))
+                        
+                        if phys_len > max_phys_length:
+                            max_phys_length = phys_len
+                            best_pair = (n1, n2)
+                            
+                    except nx.NetworkXNoPath:
+                        continue
+                        
+            if best_pair[0] is not None:
+                # Sort the winning pair by Y-coordinate
+                if best_pair[0][1] < best_pair[1][1]:
+                    ini_node, ftip_node = best_pair[0], best_pair[1]
+                else:
+                    ini_node, ftip_node = best_pair[1], best_pair[0]
             else:
-                ini_node = ep_top_node
-                
-            # --- EVALUATE BOTTOM (FTip) ---
-            # abs_bottom_node[1] is >= ep_bottom_node[1]
-            if (abs_bottom_node[1] - ep_bottom_node[1]) > threshold:
-                ftip_node = abs_bottom_node
-            else:
-                ftip_node = ep_bottom_node
-                
+                ini_node, ftip_node = abs_top_node, abs_bottom_node
         else:
-            # Fallback if the graph is a perfect loop (no grade 1 nodes exist at all)
-            ini_node = abs_top_node
-            ftip_node = abs_bottom_node
+            ini_node, ftip_node = abs_top_node, abs_bottom_node
             
-        # Safety check: If they somehow resolved to the same node (e.g., a tiny artifact)
         if ini_node == ftip_node and len(c1_nodes) > 1:
-            ini_node = abs_top_node
-            ftip_node = abs_bottom_node
+            ini_node, ftip_node = abs_top_node, abs_bottom_node
             
     else:
-        # Fallback if no main root edges exist at all
+        # Fallback if no main root edges exist
         all_nodes = list(graph.nodes())
         ini_node = min(all_nodes, key=lambda n: n[1])
         ftip_node = max(all_nodes, key=lambda n: n[1])
 
-    # 4. Assign topological types
+    # 3. Assign topological types
     for node in graph.nodes():
         if node == ini_node:
             graph.nodes[node]['type'] = "Ini"
@@ -280,19 +299,7 @@ def graphInit(graph, main_root_class=1):
             else:
                 graph.nodes[node]['type'] = "null"
 
-    # 5. Path Extraction (Junction Forgiveness)
-    for u, v, data in graph.edges(data=True):
-        phys_len = data.get('weight', 1.0)
-        edge_type = data.get('orig_root_type', data.get('root_type'))
-        
-        if edge_type == main_root_class:
-            data['traversal_cost'] = phys_len
-        else:
-            if phys_len < 5.0 and (u in c1_nodes_set or v in c1_nodes_set):
-                data['traversal_cost'] = phys_len * 2.0 
-            else:
-                data['traversal_cost'] = phys_len * 100.0
-
+    # 4. Main Path Extraction
     if ini_node != ftip_node:
         try:
             main_path = nx.shortest_path(
