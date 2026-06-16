@@ -1,5 +1,8 @@
 import os
 import json
+import re
+from datetime import datetime, timezone
+
 import numpy as np
 import nibabel as nib
 import cv2
@@ -11,6 +14,241 @@ from scipy.ndimage import label, distance_transform_edt
 LINE_THICKNESS = 1               
 LOGICAL_THICKNESS = 2            
 MAX_HISTORY = 10
+SCHEMA_VERSION = 1
+
+ANNOTATION_STATUSES = ("missing", "in_progress", "completed")
+ANALYSIS_STATUSES = ("not_applicable", "not_analyzed", "analyzed")
+
+
+def normalize_annotation_status(raw_status):
+    """Map legacy/raw status strings to canonical annotation status."""
+    if not raw_status:
+        return "missing"
+    s = str(raw_status).lower().strip()
+    if s in ("completed", "complete", "done"):
+        return "completed"
+    if s in ("in_progress", "inprogress", "active", "progress"):
+        return "in_progress"
+    if s in ("missing", "pending", "none", ""):
+        return "missing"
+    return "in_progress"
+
+
+def annotation_status_display(status):
+    mapping = {
+        "missing": "Missing",
+        "in_progress": "In Progress",
+        "completed": "Completed",
+    }
+    return mapping.get(normalize_annotation_status(status), "In Progress")
+
+
+def analysis_status_display(status):
+    mapping = {
+        "not_applicable": "—",
+        "not_analyzed": "Not Analyzed",
+        "analyzed": "Analyzed",
+    }
+    return mapping.get(status, "—")
+
+
+def canonical_metrics_name(base_name):
+    return f"{base_name}_Metrics.json"
+
+
+def canonical_topology_name(base_name):
+    return f"{base_name}_Topology.rsml"
+
+
+def find_metrics_file(task_dir, base_name, plate_meta=None, analysis_meta=None):
+    """Resolve metrics JSON path: canonical name first, then recorded name, then legacy plate-based."""
+    if not task_dir or not base_name:
+        return None
+
+    canonical = os.path.join(task_dir, canonical_metrics_name(base_name))
+    if os.path.exists(canonical):
+        return canonical
+
+    if analysis_meta:
+        recorded = analysis_meta.get("metrics_file")
+        if recorded:
+            candidate = os.path.join(task_dir, recorded)
+            if os.path.exists(candidate):
+                return candidate
+
+    if plate_meta:
+        legacy_base = (
+            f"{plate_meta.get('plate_id', '')}_"
+            f"{plate_meta.get('condition', '')}_"
+            f"{plate_meta.get('timepoint', '')}"
+        )
+        legacy = os.path.join(task_dir, canonical_metrics_name(legacy_base))
+        if os.path.exists(legacy):
+            return legacy
+
+    for fname in os.listdir(task_dir) if os.path.isdir(task_dir) else []:
+        if fname.endswith("_Metrics.json") and base_name in fname:
+            return os.path.join(task_dir, fname)
+    return None
+
+
+def find_topology_file(task_dir, base_name, plate_meta=None, analysis_meta=None):
+    if not task_dir or not base_name:
+        return None
+
+    canonical = os.path.join(task_dir, canonical_topology_name(base_name))
+    if os.path.exists(canonical):
+        return canonical
+
+    if analysis_meta:
+        recorded = analysis_meta.get("topology_file")
+        if recorded:
+            candidate = os.path.join(task_dir, recorded)
+            if os.path.exists(candidate):
+                return candidate
+
+    if plate_meta:
+        legacy_base = (
+            f"{plate_meta.get('plate_id', '')}_"
+            f"{plate_meta.get('condition', '')}_"
+            f"{plate_meta.get('timepoint', '')}"
+        )
+        legacy = os.path.join(task_dir, canonical_topology_name(legacy_base))
+        if os.path.exists(legacy):
+            return legacy
+
+    for fname in os.listdir(task_dir) if os.path.isdir(task_dir) else []:
+        if fname.endswith("_Topology.rsml") and base_name in fname:
+            return os.path.join(task_dir, fname)
+    return None
+
+
+def infer_analysis_status(annotation_status, task_dir, base_name, plate_meta=None, analysis_meta=None):
+    ann = normalize_annotation_status(annotation_status)
+    if ann != "completed":
+        return "not_applicable"
+    if find_metrics_file(task_dir, base_name, plate_meta, analysis_meta):
+        return "analyzed"
+    return "not_analyzed"
+
+
+PEEK_BYTES = 4096
+_file_peek_cache = {}
+
+
+def _peek_cache_get(json_path):
+    if not os.path.exists(json_path):
+        return None
+    try:
+        mtime = os.path.getmtime(json_path)
+    except OSError:
+        return None
+    cached = _file_peek_cache.get(json_path)
+    if cached and cached[0] == mtime:
+        return cached[1]
+    return None
+
+
+def _peek_cache_set(json_path, summary):
+    try:
+        mtime = os.path.getmtime(json_path)
+        _file_peek_cache[json_path] = (mtime, summary)
+    except OSError:
+        pass
+
+
+def _detect_annotation_from_compact(compact):
+    if '"annotation_status":"completed"' in compact or '"status":"completed"' in compact:
+        return "completed"
+    if '"annotation_status":"in_progress"' in compact:
+        return "in_progress"
+    if '"annotation_status":"missing"' in compact:
+        return "missing"
+    if '"status":"in_progress"' in compact or '"status":"pending"' in compact:
+        return "in_progress"
+    return "in_progress"
+
+
+def _parse_plant_count_from_compact(compact):
+    match = re.search(r'"plant_count"\s*:\s*(\d+)', compact)
+    if match:
+        return int(match.group(1))
+    return compact.count('"category_id":1')
+
+
+def _fast_analysis_status(annotation_status, metrics_dir, base_name):
+    ann = normalize_annotation_status(annotation_status)
+    if ann != "completed":
+        return "not_applicable"
+    if not metrics_dir:
+        return "not_analyzed"
+    if os.path.exists(os.path.join(metrics_dir, canonical_metrics_name(base_name))):
+        return "analyzed"
+    return "not_analyzed"
+
+
+def peek_task_summary(json_path, task_dir, base_name, out_dir=None, probe_analysis=False):
+    """Fast header-only read for directory browsing. Never parses full JSON or NIfTI."""
+    result = {
+        "annotation_status": "missing",
+        "plant_count": 0,
+        "analysis_status": "not_applicable",
+    }
+    if not os.path.exists(json_path):
+        return result
+
+    cached = _peek_cache_get(json_path)
+    if cached is not None:
+        result["annotation_status"] = cached["annotation_status"]
+        result["plant_count"] = cached["plant_count"]
+    else:
+        try:
+            with open(json_path, "r", encoding="utf-8") as f:
+                chunk = f.read(PEEK_BYTES)
+            compact = chunk.replace(" ", "").replace("\n", "")
+            result["annotation_status"] = _detect_annotation_from_compact(compact)
+            result["plant_count"] = _parse_plant_count_from_compact(compact)
+            _peek_cache_set(json_path, {
+                "annotation_status": result["annotation_status"],
+                "plant_count": result["plant_count"],
+            })
+        except OSError:
+            return result
+
+    if probe_analysis:
+        metrics_dir = out_dir if out_dir is not None else task_dir
+        result["analysis_status"] = _fast_analysis_status(
+            result["annotation_status"], metrics_dir, base_name
+        )
+    return result
+
+
+def read_task_summary(json_path, task_dir, base_name):
+    """Structured read for load/restore paths (not directory browsing)."""
+    result = {
+        "annotation_status": "missing",
+        "plant_count": 0,
+        "plate_meta": {},
+    }
+    if not os.path.exists(json_path):
+        return result
+
+    try:
+        with open(json_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError, ValueError):
+        return result
+
+    summary = data.get("summary") or {}
+    ann_raw = summary.get("annotation_status") or data.get("status")
+    result["annotation_status"] = normalize_annotation_status(ann_raw)
+    result["plant_count"] = int(
+        summary.get("plant_count")
+        or len(data.get("annotations", []))
+        or 0
+    )
+    result["plate_meta"] = data.get("plate_meta") or {}
+    return result
 
 HIGH_CONTRAST_COLORS = [
     (255, 0, 0),    (0, 255, 0),    (0, 0, 255),    (255, 255, 0),
@@ -79,6 +317,9 @@ class PlantImageModel:
         self.status = "pending" 
         self.original_multiclass = None
         self.class_patches = {}
+        self.plants_meta = {}
+        self.plate_meta = {}
+        self.analysis_meta = {}
         self.class_colors = {
             0: (0, 0, 0, 0),        
             1: (255, 0, 0, 255),    
@@ -118,90 +359,198 @@ class PlantImageModel:
         self.active_uid = list(self.selected_uids)[0] if len(self.selected_uids) == 1 else None
         self._notify_selection_changed()
 
+    def set_task_metadata(self, plants_meta=None, plate_meta=None):
+        """Inject per-plant and plate metadata before save."""
+        if plants_meta is not None:
+            self.plants_meta = {
+                int(uid): {
+                    "genotype": meta.get("genotype", ""),
+                    "plant_num": str(meta.get("plant_num", uid)),
+                }
+                for uid, meta in plants_meta.items()
+            }
+        if plate_meta is not None:
+            self.plate_meta = dict(plate_meta)
+
+    def get_plants_metadata(self):
+        return {
+            uid: {
+                "genotype": meta.get("genotype", ""),
+                "plant_num": str(meta.get("plant_num", uid)),
+            }
+            for uid, meta in self.plants_meta.items()
+        }
+
+    def get_plate_meta(self):
+        return dict(self.plate_meta)
+
+    def get_analysis_meta(self):
+        return dict(self.analysis_meta)
+
+    def update_analysis_meta(self, base_name, plants_analyzed, out_dir=None):
+        """Session-only analysis tracking; not written to annotation JSON."""
+        metrics_file = canonical_metrics_name(base_name)
+        topology_file = canonical_topology_name(base_name)
+        self.analysis_meta = {
+            "status": "analyzed",
+            "metrics_file": metrics_file,
+            "topology_file": topology_file,
+            "exported_at": datetime.now(timezone.utc).isoformat(),
+            "plants_analyzed": int(plants_analyzed),
+        }
+        if out_dir:
+            self.analysis_meta["output_dir"] = out_dir
+
+    def invalidate_peek_cache(self, json_path=None):
+        """Clear browse peek cache after annotation save."""
+        if json_path:
+            _file_peek_cache.pop(json_path, None)
+        else:
+            _file_peek_cache.clear()
+
+    def _remap_plants_meta(self, mapping):
+        if not mapping or not self.plants_meta:
+            return
+        remapped = {}
+        for old_uid, meta in self.plants_meta.items():
+            new_uid = mapping.get(old_uid, old_uid)
+            remapped[new_uid] = meta
+        self.plants_meta = remapped
+
+    def _remap_uid_collections(self, mapping):
+        """Remap masks and related per-UID collections using old->new mapping."""
+        if not mapping:
+            return
+
+        new_masks, new_bboxes, new_areas, new_color_map, new_class_patches = {}, {}, {}, {}, {}
+
+        for old_uid, new_uid in mapping.items():
+            if old_uid not in self.masks:
+                continue
+            new_masks[new_uid] = self.masks[old_uid]
+            if old_uid in self.bboxes:
+                new_bboxes[new_uid] = self.bboxes[old_uid]
+            if old_uid in self.areas:
+                new_areas[new_uid] = self.areas[old_uid]
+            new_color_map[new_uid] = HIGH_CONTRAST_COLORS[new_uid % len(HIGH_CONTRAST_COLORS)]
+            if old_uid in self.class_patches:
+                new_class_patches[new_uid] = self.class_patches[old_uid]
+
+        self.masks = new_masks
+        self.bboxes = new_bboxes
+        self.areas = new_areas
+        self.color_map = new_color_map
+        self.class_patches = new_class_patches
+        self.max_id = len(new_masks)
+        self.history.clear()
+        self._remap_plants_meta(mapping)
+
     # --- FILE SYSTEM & IO (Completely Isolated) ---
     
-    def scan_directory(self, folder_path):
+    def scan_directory(self, folder_path, output_dir=None, fixed_output=False):
         """Scans a directory and returns a formatted list of dicts for the GUI without exposing OS/JSON ops."""
         contents = []
-        if not os.path.exists(folder_path): return contents
-        
+        if not os.path.exists(folder_path):
+            return contents
+
         items = sorted(os.listdir(folder_path))
-        
+        effective_out = output_dir or folder_path
+        file_metrics_dir = effective_out if fixed_output else folder_path
+
+        def file_entry(root, base, image_path, probe_analysis=False, metrics_dir=None):
+            if metrics_dir is None:
+                metrics_dir = effective_out if fixed_output else root
+            json_path = os.path.join(root, base + ".json")
+            summary = peek_task_summary(
+                json_path,
+                root,
+                base,
+                out_dir=metrics_dir,
+                probe_analysis=probe_analysis,
+            )
+            ann = summary["annotation_status"]
+            analysis = summary["analysis_status"]
+            plant_count = summary["plant_count"]
+            display_status = annotation_status_display(ann)
+            return {
+                "type": "file",
+                "name": base,
+                "path": image_path,
+                "annotation_status": ann,
+                "status": display_status,
+                "plant_count": plant_count,
+                "analysis_status": analysis,
+                "analyzer_status": analysis_status_display(analysis),
+            }
+
         # 1. Folders
         for item_name in items:
             full_path = os.path.join(folder_path, item_name)
-            if os.path.isdir(full_path):
-                total, in_progress, completed = 0, 0, 0
-                for root, _, files in os.walk(full_path):
-                    processed_bases = set()
-                    for f in files:
-                        # Make extension checking case-insensitive
-                        if f.lower().endswith(('.png', '.jpg', '.jpeg')):
-                            base = os.path.splitext(f)[0]
-                            if base in processed_bases: continue
-                            processed_bases.add(base)
-                            
-                            total += 1
-                            json_path = os.path.join(root, base + '.json')
-                            if os.path.exists(json_path):
-                                try:
-                                    # --- FAST FOLDER PEEK ---
-                                    # Only read the first 2000 chars to find the status header. 
-                                    # Saves massive amounts of RAM when scanning hundreds of files.
-                                    with open(json_path, 'r', encoding='utf-8') as jf:
-                                        chunk = jf.read(2000).replace(" ", "").replace("\n", "")
-                                        if '"status":"completed"' in chunk:
-                                            completed += 1
-                                        else:
-                                            in_progress += 1
-                                except: pass
-                contents.append({
-                    "type": "dir", "name": item_name, "path": full_path,
-                    "total": total, "in_progress": in_progress, "completed": completed
-                })
+            if not os.path.isdir(full_path):
+                continue
+
+            total = missing = in_progress = completed = 0
+            analyzed = not_analyzed = 0
+
+            for root, _, files in os.walk(full_path):
+                processed_bases = set()
+                for f in files:
+                    if not f.lower().endswith(('.png', '.jpg', '.jpeg')):
+                        continue
+                    base = os.path.splitext(f)[0]
+                    if base in processed_bases:
+                        continue
+                    processed_bases.add(base)
+
+                    total += 1
+                    image_path = os.path.join(root, f)
+                    entry = file_entry(
+                        root, base, image_path,
+                        probe_analysis=True,
+                        metrics_dir=effective_out if fixed_output else root,
+                    )
+                    ann = entry["annotation_status"]
+                    if ann == "missing":
+                        missing += 1
+                    elif ann == "completed":
+                        completed += 1
+                        if entry["analysis_status"] == "analyzed":
+                            analyzed += 1
+                        elif entry["analysis_status"] == "not_analyzed":
+                            not_analyzed += 1
+                    else:
+                        in_progress += 1
+
+            contents.append({
+                "type": "dir",
+                "name": item_name,
+                "path": full_path,
+                "total": total,
+                "missing": missing,
+                "in_progress": in_progress,
+                "completed": completed,
+                "analyzed": analyzed,
+                "not_analyzed": not_analyzed,
+            })
 
         # 2. Files
         processed_bases = set()
         for item_name in items:
-            if item_name.lower().endswith(('.png', '.jpg', '.jpeg')):
-                base = os.path.splitext(item_name)[0]
-                
-                if base in processed_bases: continue
-                processed_bases.add(base)
-                
-                full_path = os.path.join(folder_path, item_name)
-                json_path = os.path.join(folder_path, base + ".json")
-                status = "Pending"
-                plant_count = 0  
-                
-                if os.path.exists(json_path):
-                    try:
-                        # --- FAST FILE PEEK ---
-                        # Read the whole file but strip all formatting for robust searching
-                        with open(json_path, 'r', encoding='utf-8') as f:
-                            raw_text = f.read().replace(" ", "").replace("\n", "")
-                            
-                            if '"status":"completed"' in raw_text:
-                                status = "Completed"
-                            else:
-                                status = "In Progress"
-                                
-                            # Count the occurrences of category blocks to get plant count safely
-                            plant_count = raw_text.count('"category_id":1') 
-                    except: pass
-                else:
-                    nii_path = os.path.join(folder_path, base + ".nii.gz")
-                    if os.path.exists(nii_path):
-                        status = "Pending"
-                        
-                contents.append({
-                    "type": "file", 
-                    "name": base, 
-                    "path": full_path, 
-                    "status": status,
-                    "plant_count": plant_count  
-                })
-                
+            if not item_name.lower().endswith(('.png', '.jpg', '.jpeg')):
+                continue
+            base = os.path.splitext(item_name)[0]
+            if base in processed_bases:
+                continue
+            processed_bases.add(base)
+            full_path = os.path.join(folder_path, item_name)
+            contents.append(
+                file_entry(
+                    folder_path, base, full_path,
+                    probe_analysis=True,
+                    metrics_dir=file_metrics_dir,
+                )
+            )
+
         return contents
 
     def load_task(self, task_path, base_name):
@@ -221,6 +570,9 @@ class PlantImageModel:
         self.dirty = False
         self.original_multiclass = None
         self.class_patches.clear()
+        self.plants_meta.clear()
+        self.plate_meta.clear()
+        self.analysis_meta.clear()
         
         # 2. LOAD NEW DATA
         self.status = "pending"
@@ -269,8 +621,8 @@ class PlantImageModel:
         # ---------------------------------------------------------------------
 
         self.max_id = max(self.masks.keys()) if self.masks else 0
-        self.regenerate_metadata() 
-        self.sort_instances_spatially(row_tolerance=250) 
+        self.regenerate_metadata()
+        self.sort_instances_spatially(row_tolerance=250)
         
         # 3. Warm up class patches for faster GUI response
         for uid in self.masks.keys():
@@ -311,63 +663,39 @@ class PlantImageModel:
     def reindex_instances(self):
         """Remaps all UIDs to be strictly continuous. Returns a mapping of {old_uid: new_uid}."""
         sorted_uids = sorted(self.masks.keys())
-        if not sorted_uids: return {}
-        
-        # If they are already 1 to N perfectly, return a 1:1 mapping
+        if not sorted_uids:
+            return {}
+
         if sorted_uids == list(range(1, len(sorted_uids) + 1)):
             return {u: u for u in sorted_uids}
 
-        mapping = {}
-        new_masks, new_bboxes, new_areas, new_color_map, new_class_patches = {}, {}, {}, {}, {}
-        
-        for new_uid, old_uid in enumerate(sorted_uids, start=1):
-            mapping[old_uid] = new_uid
-            
-            new_masks[new_uid] = self.masks[old_uid]
-            if old_uid in self.bboxes: new_bboxes[new_uid] = self.bboxes[old_uid]
-            if old_uid in self.areas: new_areas[new_uid] = self.areas[old_uid]
-            
-            new_color_map[new_uid] = HIGH_CONTRAST_COLORS[new_uid % len(HIGH_CONTRAST_COLORS)]
-            
-            if old_uid in self.class_patches:
-                patch, x, y = self.class_patches[old_uid]
-                new_class_patches[new_uid] = (patch, x, y)
-                
-        self.masks = new_masks
-        self.bboxes = new_bboxes
-        self.areas = new_areas
-        self.color_map = new_color_map
-        self.class_patches = new_class_patches
-        self.max_id = len(sorted_uids)
-        self.history.clear()
-        
+        mapping = {old_uid: new_uid for new_uid, old_uid in enumerate(sorted_uids, start=1)}
+        self._remap_uid_collections(mapping)
         return mapping
 
     def sort_instances_spatially(self, row_tolerance=250):
         """
         Sorts instances Left-to-Right, grouped by horizontal rows.
-        row_tolerance defines how many vertical pixels of 'wobble' are allowed in a single row.
+        Returns mapping {old_uid: new_uid} (empty if no masks or already ordered).
         """
-        if not self.masks: return
-        
-        # 1. Gather all centroids
+        if not self.masks:
+            return {}
+
         centroids = []
         for uid, bbox in self.bboxes.items():
             x, y, w, h = bbox
             cx, cy = x + (w / 2), y + (h / 2)
             centroids.append((uid, cx, cy))
-            
-        # 2. Sort primarily by Y (Top to Bottom)
+
         centroids.sort(key=lambda item: item[2])
-        
-        # 3. Cluster into rows based on the tolerance
+
         rows = []
         current_row = [centroids[0]]
-        
+
         for item in centroids[1:]:
             _, _, cy = item
             last_cy = current_row[-1][2]
-            
+
             if abs(cy - last_cy) <= row_tolerance:
                 current_row.append(item)
             else:
@@ -375,31 +703,18 @@ class PlantImageModel:
                 current_row = [item]
         if current_row:
             rows.append(current_row)
-            
-        # 4. Sort each row by X (Left to Right)
+
         sorted_uids = []
         for row in rows:
             row.sort(key=lambda item: item[1])
             sorted_uids.extend([item[0] for item in row])
-            
-        # 5. Apply the new continuous re-indexing
-        new_masks, new_bboxes, new_areas, new_color_map, new_class_patches = {}, {}, {}, {}, {}
-        
-        for new_uid, old_uid in enumerate(sorted_uids, start=1):
-            new_masks[new_uid] = self.masks[old_uid]
-            new_bboxes[new_uid] = self.bboxes[old_uid]
-            new_areas[new_uid] = self.areas[old_uid]
-            new_color_map[new_uid] = HIGH_CONTRAST_COLORS[new_uid % len(HIGH_CONTRAST_COLORS)]
-            if old_uid in self.class_patches:
-                new_class_patches[new_uid] = self.class_patches[old_uid]
-                
-        self.masks = new_masks
-        self.bboxes = new_bboxes
-        self.areas = new_areas
-        self.color_map = new_color_map
-        self.class_patches = new_class_patches
-        self.max_id = len(sorted_uids)
-        self.history.clear()
+
+        if sorted_uids == list(range(1, len(sorted_uids) + 1)):
+            return {u: u for u in sorted_uids}
+
+        mapping = {old_uid: new_uid for new_uid, old_uid in enumerate(sorted_uids, start=1)}
+        self._remap_uid_collections(mapping)
+        return mapping
         
     def save_current_task(self, task_path, base_name, mark_finished=False):
         """Writes current mask data to disk. Completely insulates GUI from JSON/NIfTI."""
@@ -418,8 +733,11 @@ class PlantImageModel:
         
         data = self._export_coco()
         json_path = os.path.join(task_path, f"{base_name}.json")
-        with open(json_path, 'w') as f:
-            json.dump(data, f)
+        tmp_path = json_path + ".tmp"
+        with open(tmp_path, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2)
+        os.replace(tmp_path, json_path)
+        self.invalidate_peek_cache(json_path)
             
         final_labels = self._flatten_multiclass()
         self.original_multiclass = final_labels
@@ -460,56 +778,101 @@ class PlantImageModel:
     
     def _load_from_json(self, json_path, shape):
         try:
-            with open(json_path, 'r') as f: data = json.load(f)
-            self.status = data.get("status", "in_progress")
-            
+            with open(json_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+
+            self.status = normalize_annotation_status(data.get("status", "in_progress"))
+            if self.status == "missing":
+                self.status = "in_progress"
+
+            self.plate_meta = data.get("plate_meta") or {}
+            # analysis_meta in legacy JSON is ignored; analysis lives in export files only
+            self.plants_meta = {}
+
             for ann in data.get('annotations', []):
-                uid = ann['id']
-                
-                # --- BUGFIX: Prioritize lossless RLE to preserve holes ---
+                uid = int(ann['id'])
+
                 if "instance_rle" in ann:
                     mask = decode_rle(ann["instance_rle"])
                 else:
-                    # Fallback for old saves (using the hole-filling polygons)
                     mask = np.zeros(shape, dtype=np.uint8)
                     for seg in ann.get('segmentation', []):
                         poly = np.array(seg).reshape((-1, 2)).astype(np.int32)
                         cv2.fillPoly(mask, [poly], 1)
-                        
+
                 self.masks[uid] = mask
-                
+
+                genotype = ann.get("genotype", "")
+                plant_num = str(ann.get("plant_num", uid))
+                self.plants_meta[uid] = {"genotype": genotype, "plant_num": plant_num}
+
                 ys, xs = np.where(mask)
                 if len(xs) > 0 and "semantic_rle" in ann:
-                    self.class_patches[uid] = (decode_rle(ann["semantic_rle"]), int(xs.min()), int(ys.min()))
-        except Exception as e: print(f"JSON Error: {e}")
-    
+                    self.class_patches[uid] = (
+                        decode_rle(ann["semantic_rle"]), int(xs.min()), int(ys.min())
+                    )
+        except Exception as e:
+            print(f"JSON Error: {e}")
+
     def _export_coco(self):
+        ann_status = normalize_annotation_status(self.status)
+        if ann_status == "missing":
+            ann_status = "in_progress"
+
         output = {
-            "info": {"status": self.status}, "status": self.status,
-            "images": [{"id": 1, "file_name": os.path.basename(self.image_path), 
-                        "width": self.raw_image.shape[1], "height": self.raw_image.shape[0]}],
-            "annotations": [], "categories": [{"id": 1, "name": "Plant"}]
+            "schema_version": SCHEMA_VERSION,
+            "summary": {
+                "annotation_status": ann_status,
+                "plant_count": len(self.masks),
+            },
+            "info": {"status": ann_status},
+            "status": ann_status,
+            "plate_meta": dict(self.plate_meta),
+            "images": [{
+                "id": 1,
+                "file_name": os.path.basename(self.image_path),
+                "width": self.raw_image.shape[1],
+                "height": self.raw_image.shape[0],
+            }],
+            "categories": [{"id": 1, "name": "Plant"}],
+            "annotations": [],
         }
-        ann_id = 1
-        for uid, mask in self.masks.items():
-            if np.sum(mask) == 0: continue
-            
-            # We keep standard polygons for legacy readers, but they lose holes
-            polys = [c.flatten().tolist() for c in cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)[0] if c.shape[0] >= 3]
-            
+
+        for uid in sorted(self.masks.keys()):
+            mask = self.masks[uid]
+            if np.sum(mask) == 0:
+                continue
+
+            polys = [
+                c.flatten().tolist()
+                for c in cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)[0]
+                if c.shape[0] >= 3
+            ]
+
             ys, xs = np.where(mask)
-            if len(xs) == 0: continue
-            
+            if len(xs) == 0:
+                continue
+
             patch, _, _ = self._get_class_patch(uid)
+            plant_meta = self.plants_meta.get(uid, {})
             output["annotations"].append({
-                "id": ann_id, "image_id": 1, "category_id": 1,
-                "segmentation": polys, 
-                "instance_rle": encode_rle(mask), # <--- BUGFIX: Lossless binary mask encoding
-                "semantic_rle": encode_rle(patch), 
-                "area": float(np.sum(mask)), "iscrowd": 0,
-                "bbox": [float(xs.min()), float(ys.min()), float(xs.max()-xs.min()), float(ys.max()-ys.min())]
+                "id": int(uid),
+                "image_id": 1,
+                "category_id": 1,
+                "genotype": plant_meta.get("genotype", ""),
+                "plant_num": str(plant_meta.get("plant_num", uid)),
+                "segmentation": polys,
+                "instance_rle": encode_rle(mask),
+                "semantic_rle": encode_rle(patch),
+                "area": float(np.sum(mask)),
+                "iscrowd": 0,
+                "bbox": [
+                    float(xs.min()), float(ys.min()),
+                    float(xs.max() - xs.min()), float(ys.max() - ys.min()),
+                ],
             })
-            ann_id += 1
+
+        output["summary"]["plant_count"] = len(output["annotations"])
         return output
 
     # --- GUI-FRIENDLY RENDER EXPORTS ---

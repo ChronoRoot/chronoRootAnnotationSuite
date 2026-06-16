@@ -11,8 +11,18 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QHBoxLayout, QV
                              QCheckBox, QRadioButton)
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 
-from core.model import PlantImageModel
-from core.analyzer_engine import extract_plate_metrics, export_rsml_and_json
+from core.model import (
+    PlantImageModel,
+    annotation_status_display,
+    find_metrics_file,
+    find_topology_file,
+    normalize_annotation_status,
+)
+from core.analyzer_engine import (
+    extract_plate_metrics,
+    export_rsml_and_json,
+    load_measurements_from_metrics_json,
+)
 
 from components.file_browser import UnifiedFileBrowser
 from components.analyzer_panel import PhenomicsControlPanel
@@ -57,6 +67,7 @@ class ChronoRootSuite(QMainWindow):
         self.active_workers = set()
         self.measurements_cache = {}
         self.is_calibrating = False
+        self.metadata_dirty = False
 
         self.current_task_path = ""
         self.current_base_name = ""
@@ -304,7 +315,9 @@ class ChronoRootSuite(QMainWindow):
         self.panel_phenomics.set_calib_ruler_requested.connect(self.start_calibration_flow)
         self.panel_phenomics.test_ruler_toggled.connect(self.toggle_ruler_mode)
         self.panel_phenomics.calibration_changed.connect(self.validate_and_update_ruler)
+        self.panel_phenomics.calibration_changed.connect(self._on_metadata_dirty)
         self.panel_phenomics.overlay_labels_changed.connect(self.update_overlay_labels)
+        self.panel_phenomics.metadata_dirty_changed.connect(self._on_metadata_dirty)
 
         if hasattr(self.workspaces.canvas_review, "distance_measured"):
             self.workspaces.canvas_review.distance_measured.connect(self.on_distance_measured)
@@ -321,6 +334,42 @@ class ChronoRootSuite(QMainWindow):
         self.rad_fmt_text_global.toggled.connect(self._apply_global_label_preferences)
         self.rad_fmt_num_global.toggled.connect(self._apply_global_label_preferences)
         self._apply_global_label_preferences()
+
+    def _on_metadata_dirty(self):
+        self.metadata_dirty = True
+
+    def _is_task_dirty(self):
+        return self.global_model.dirty or self.metadata_dirty
+
+    def _resolve_metrics_path(self, task_dir=None, base_name=None):
+        task_dir = task_dir or self.current_task_path
+        base_name = base_name or self.current_base_name
+        if not task_dir or not base_name:
+            return None
+
+        out_dir = self.browser.get_effective_output_dir(task_dir)
+        plate_meta = self.global_model.plate_meta
+        analysis_meta = self.global_model.analysis_meta
+
+        metrics_path = find_metrics_file(out_dir, base_name, plate_meta, analysis_meta)
+        if not metrics_path and out_dir != task_dir:
+            metrics_path = find_metrics_file(task_dir, base_name, plate_meta, analysis_meta)
+        return metrics_path
+
+    def _resolve_topology_path(self, task_dir=None, base_name=None):
+        task_dir = task_dir or self.current_task_path
+        base_name = base_name or self.current_base_name
+        if not task_dir or not base_name:
+            return None
+
+        out_dir = self.browser.get_effective_output_dir(task_dir)
+        plate_meta = self.global_model.plate_meta
+        analysis_meta = self.global_model.analysis_meta
+
+        topo_path = find_topology_file(out_dir, base_name, plate_meta, analysis_meta)
+        if not topo_path and out_dir != task_dir:
+            topo_path = find_topology_file(task_dir, base_name, plate_meta, analysis_meta)
+        return topo_path
 
     def _on_input_dir_changed(self, path):
         self.config["input_root"] = path
@@ -583,23 +632,6 @@ class ChronoRootSuite(QMainWindow):
             self.progress.deleteLater()
             self.progress = None
 
-    def _enrich_with_analyzer_status(self, contents):
-        for item in contents:
-            if item["type"] != "file":
-                continue
-            if item.get("status") != "Completed":
-                item["analyzer_status"] = "Not Annotated"
-            else:
-                metrics_found = False
-                task_dir = os.path.dirname(item["path"])
-                out_dir = self.browser.get_effective_output_dir(task_dir)
-                if os.path.exists(out_dir):
-                    for f in os.listdir(out_dir):
-                        if item["name"] in f and f.endswith("_Metrics.json"):
-                            metrics_found = True
-                            break
-                item["analyzer_status"] = "Analyzed" if metrics_found else "Ready"
-
     def scan_directory(self, folder_path, force_refresh=False):
         self.browser.current_dir = folder_path
 
@@ -610,12 +642,15 @@ class ChronoRootSuite(QMainWindow):
 
         cached = self.browser.get_cached_contents(folder_path)
         if cached is not None and not force_refresh:
-            self._enrich_with_analyzer_status(cached)
             self.browser.render_contents(cached, use_cache=False)
             return
 
+        out_dir = self.browser.get_effective_output_dir(folder_path)
+        fixed_output = self.config.get("output_mode", "task_folder") == "fixed"
         self.show_loading(f"Scanning directory stats...\n{folder_path}")
-        worker = ModelWorker(self.global_model.scan_directory, folder_path)
+        worker = ModelWorker(
+            self.global_model.scan_directory, folder_path, out_dir, fixed_output
+        )
         self.active_workers.add(worker)
         worker.finished.connect(self._on_scan_finished)
         worker.error.connect(self._on_thread_error)
@@ -628,13 +663,20 @@ class ChronoRootSuite(QMainWindow):
             self.active_workers.remove(worker)
             worker.deleteLater()
 
-        self._enrich_with_analyzer_status(contents)
         self.browser.render_contents(contents)
 
+    def _save_prompt_message(self):
+        if self.metadata_dirty and not self.global_model.dirty:
+            return "Save unsaved annotation metadata (genotypes, plate fields)?"
+        if self.metadata_dirty and self.global_model.dirty:
+            return "Save unsaved annotation changes and metadata?"
+        return "Save annotation changes?"
+
     def load_file(self, data):
-        if self.global_model.dirty:
+        if self._is_task_dirty():
             reply = QMessageBox.question(
-                self, "Save?", "Save changes?",
+                self, "Save?",
+                self._save_prompt_message(),
                 QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel
             )
             if reply == QMessageBox.Yes:
@@ -688,21 +730,115 @@ class ChronoRootSuite(QMainWindow):
         self.panel_phenomics.reset_measurements()
         self.workspaces.inspector_tab.show_no_measurements_state()
 
+        self.panel_phenomics.restore_plate_meta(self.global_model.get_plate_meta())
+
         if self.global_model.masks:
             uids = list(self.global_model.masks.keys())
-            self.panel_phenomics.populate_table(uids, self.config.get("saved_genotypes", []))
+            self.panel_phenomics.populate_table(
+                uids,
+                self.config.get("saved_genotypes", []),
+                preserved_metadata=self.global_model.get_plants_metadata(),
+            )
             self.panel_phenomics.enable_tools(True)
             self.ensure_active_plant()
         else:
             self.panel_phenomics.clear_table()
 
+        self.metadata_dirty = False
+        self._offer_analysis_restore()
+
         self.workspaces.canvas_review.refresh_canvas()
         self.update_canvas_ruler()
         self.workspaces.setCurrentIndex(0)
 
+    def _offer_analysis_restore(self):
+        metrics_path = self._resolve_metrics_path()
+        if not metrics_path:
+            return
+
+        reply = QMessageBox.question(
+            self,
+            "Existing Analysis",
+            f"Found prior analysis export:\n{os.path.basename(metrics_path)}\n\n"
+            "• Yes — restore measurements into the inspector\n"
+            "• No — delete previous analysis files\n"
+            "• Cancel — keep files on disk but do not load them now",
+            QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
+            QMessageBox.Yes,
+        )
+
+        if reply == QMessageBox.Cancel:
+            return
+        if reply == QMessageBox.No:
+            self._delete_previous_analysis_files(metrics_path)
+            return
+
+        self._restore_analysis_from_metrics(metrics_path)
+
+    def _delete_previous_analysis_files(self, metrics_path):
+        paths_to_remove = [metrics_path]
+        topo_path = self._resolve_topology_path()
+        if topo_path:
+            paths_to_remove.append(topo_path)
+
+        for path in paths_to_remove:
+            try:
+                if path and os.path.exists(path):
+                    os.remove(path)
+            except OSError as exc:
+                QMessageBox.warning(self, "Delete Failed", f"Could not remove {path}:\n{exc}")
+                return
+
+        self.global_model.analysis_meta = {}
+        self.measurements_cache.clear()
+        self.panel_phenomics.reset_measurements()
+        self.workspaces.inspector_tab.show_no_measurements_state()
+        if self.current_file_path:
+            self.browser.update_file_status_in_cache(
+                self.current_file_path,
+                new_analysis_status="not_analyzed",
+            )
+
+    def _restore_analysis_from_metrics(self, metrics_path):
+        try:
+            restored, warnings = load_measurements_from_metrics_json(
+                metrics_path,
+                self.global_model.masks.keys(),
+                self.global_model.get_plants_metadata(),
+            )
+        except (OSError, json.JSONDecodeError, ValueError) as exc:
+            QMessageBox.warning(self, "Restore Failed", f"Could not load metrics file:\n{exc}")
+            return
+
+        if not restored:
+            QMessageBox.warning(
+                self, "Restore Failed",
+                "No measurements could be matched to the current annotation UIDs."
+            )
+            return
+
+        self.measurements_cache = restored
+        self.panel_phenomics.btn_export.setEnabled(True)
+        self.sync_inspector()
+
+        if warnings:
+            QMessageBox.information(
+                self, "Analysis Restored with Warnings",
+                "Measurements were restored, but some plants could not be matched "
+                "exactly by UID and were remapped by plant number/genotype:\n\n"
+                + "\n".join(f"• {w}" for w in warnings[:12])
+                + ("\n• …" if len(warnings) > 12 else "")
+            )
+
     def save_task(self, mark_finished=False):
         if not self.global_model.masks:
             return
+
+        shape = self.global_model.raw_image.shape if self.global_model.raw_image is not None else None
+        self.global_model.set_task_metadata(
+            self.panel_phenomics.capture_metadata(),
+            self.panel_phenomics.capture_plate_meta(shape),
+        )
 
         self.global_model.callbacks_muted = True
         self.show_loading("Saving progress...\n(Flattening multi-class masks and generating NIfTI)")
@@ -738,6 +874,7 @@ class ChronoRootSuite(QMainWindow):
         self.setWindowTitle(
             f"ChronoRoot | {self.current_base_name} [{self.global_model.status.upper()}]"
         )
+        self.metadata_dirty = False
 
         if self._is_closing:
             self.close()
@@ -746,14 +883,18 @@ class ChronoRootSuite(QMainWindow):
             self._pending_load_data = None
             self._execute_load(data_to_load)
         elif self.current_file_path:
-            new_status = "Completed" if self._pending_mark_finished else "In Progress"
+            ann_display = annotation_status_display(self.global_model.status)
+            analysis_status = (
+                "not_analyzed"
+                if normalize_annotation_status(self.global_model.status) == "completed"
+                else "not_applicable"
+            )
             self.browser.update_file_status_in_cache(
                 self.current_file_path,
-                new_status,
+                new_status=ann_display,
                 new_plant_count=len(self.global_model.masks),
+                new_analysis_status=analysis_status,
             )
-        else:
-            self.scan_directory(self.browser.current_dir, force_refresh=True)
 
     # --- Analysis Engine ---
     def run_measurements(self, plants_meta, cm_per_px):
@@ -805,49 +946,22 @@ class ChronoRootSuite(QMainWindow):
         if not self.measurements_cache:
             return
 
-        os.makedirs(self.browser.get_effective_output_dir(self.current_task_path), exist_ok=True)
+        out_dir = self.browser.get_effective_output_dir(self.current_task_path)
+        os.makedirs(out_dir, exist_ok=True)
         cm_per_px = plate_meta.get("scale_cm_px")
         if cm_per_px is None:
             QMessageBox.warning(self, "Error", "Invalid Calibration Value.")
             return
 
-        out_dir = self.browser.get_effective_output_dir(self.current_task_path)
-        export_base_name = (
-            f"{plate_meta['plate_id']}_{plate_meta['condition']}_{plate_meta['timepoint']}"
-        )
+        export_base_name = self.current_base_name
         json_check_path = os.path.join(out_dir, f"{export_base_name}_Metrics.json")
         rsml_check_path = os.path.join(out_dir, f"{export_base_name}_Topology.rsml")
-
-        existing_json_payload = None
-        if os.path.exists(json_check_path):
-            try:
-                with open(json_check_path, "r") as f:
-                    existing_json_payload = json.load(f)
-            except (json.JSONDecodeError, ValueError):
-                existing_json_payload = None
-
-        duplicate_msg = None
-        if existing_json_payload and self.config.get("output_mode", "task_folder") == "task_folder":
-            same_image = (
-                existing_json_payload.get("original_image")
-                == (os.path.basename(self.global_model.image_path) if self.global_model.image_path else "unknown")
-            )
-            same_plate = existing_json_payload.get("plate_id") == plate_meta.get("plate_id")
-            same_condition = existing_json_payload.get("condition") == plate_meta.get("condition")
-            same_timepoint = existing_json_payload.get("timepoint") == plate_meta.get("timepoint")
-            if same_image or (same_plate and same_condition and same_timepoint):
-                duplicate_msg = (
-                    "An existing analysis JSON in this image folder appears to correspond to "
-                    "the same image or plate metadata.\n\n"
-                )
 
         if os.path.exists(json_check_path) or os.path.exists(rsml_check_path):
             reply = QMessageBox.question(
                 self, "Confirm Export Overwrite",
-                (duplicate_msg or "")
-                + f"Warning: Files for '{export_base_name}' already exist in the output folder.\n\n"
-                "Did you forget to update the Plate ID, Condition, or Timepoint parameters?\n\n"
-                "Do you want to permanently overwrite the existing files?",
+                f"Analysis files for '{export_base_name}' already exist in the output folder.\n\n"
+                "Overwrite them with the current measurements?",
                 QMessageBox.Yes | QMessageBox.No,
                 QMessageBox.No,
             )
@@ -880,9 +994,20 @@ class ChronoRootSuite(QMainWindow):
             self.active_workers.remove(worker)
             worker.deleteLater()
 
-        self.scan_directory(self.browser.current_dir, force_refresh=True)
-        self.workspaces.report_tab.refresh_file_list()
         out_dir = self.browser.get_effective_output_dir(self.current_task_path)
+        self.global_model.update_analysis_meta(
+            self.current_base_name,
+            len(self.measurements_cache),
+            out_dir=out_dir,
+        )
+
+        if self.current_file_path:
+            self.browser.update_file_status_in_cache(
+                self.current_file_path,
+                new_analysis_status="analyzed",
+            )
+
+        self.workspaces.report_tab.refresh_file_list()
         QMessageBox.information(
             self, "Export Complete",
             f"Successfully exported to:\n{out_dir}"
@@ -922,11 +1047,11 @@ class ChronoRootSuite(QMainWindow):
             event.accept()
             return
 
-        if self.global_model.dirty:
+        if self._is_task_dirty():
             reply = QMessageBox.question(
                 self,
                 "Unsaved Changes",
-                "You have unsaved changes.\nDo you want to save your progress before exiting?",
+                self._save_prompt_message() + "\nDo you want to save before exiting?",
                 QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel,
                 QMessageBox.Save,
             )

@@ -7,7 +7,6 @@ from tabs.frangi_tab import FrangiCanvasTab
 from tabs.graph_tab import GraphCanvasTab
 from tabs.inspector_tab import PhenomicsInspectorTab
 from tabs.report_tab import ComparisonReportTab
-from tabs.guidelines_tab import GuidelinesTab
 from tabs.about_tab import AboutTab
 
 class WorkspaceManager(QTabWidget):
@@ -40,9 +39,6 @@ class WorkspaceManager(QTabWidget):
         # 5. Batch Reports (NEW: Passing the main_window reference)
         self.report_tab = ComparisonReportTab(self.main_window)
         self.addTab(self.report_tab, "5. Batch Reports")
-
-        self.guidelines_tab = GuidelinesTab()
-        self.addTab(self.guidelines_tab, "Guidelines")
 
         self.about_tab = AboutTab()
         self.addTab(self.about_tab, "About")

@@ -7,35 +7,37 @@ from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
 from PyQt5.QtGui import QPainter, QColor
 from PyQt5.QtCore import Qt, pyqtSignal
 
+from core.model import annotation_status_display, analysis_status_display, normalize_annotation_status
+
 
 # ==========================================
-# CUSTOM LIST ITEM WIDGETS (Annotator)
+# CUSTOM LIST ITEM WIDGETS
 # ==========================================
-class HeightProgressBar(QWidget):
-    def __init__(self, total, prog, comp):
+class SegmentedProgressBar(QWidget):
+    def __init__(self, segments, colors, height=6):
         super().__init__()
-        self.total = total
-        self.prog = prog
-        self.comp = comp
-        self.setFixedHeight(6)
+        self.segments = segments
+        self.colors = colors
+        self.setFixedHeight(height)
 
     def paintEvent(self, event):
         painter = QPainter(self)
         w = self.width()
         h = self.height()
-
+        total = sum(self.segments) or 1
+        x = 0
         painter.fillRect(0, 0, w, h, QColor("#e0e0e0"))
-
-        if self.total > 0:
-            w_comp = (self.comp / self.total) * w
-            w_prog = (self.prog / self.total) * w
-
-            painter.fillRect(0, 0, int(w_comp), h, QColor("#28a745"))
-            painter.fillRect(int(w_comp), 0, int(w_prog), h, QColor("#ffc107"))
+        for count, color in zip(self.segments, self.colors):
+            if count <= 0:
+                continue
+            seg_w = int((count / total) * w)
+            painter.fillRect(x, 0, seg_w, h, QColor(color))
+            x += seg_w
 
 
 class FolderStatsWidget(QWidget):
-    def __init__(self, text, total, in_progress, completed, is_folder=True):
+    def __init__(self, text, total, missing, in_progress, completed,
+                 analyzed=0, not_analyzed=0, is_folder=True):
         super().__init__()
         layout = QVBoxLayout(self)
         layout.setContentsMargins(5, 5, 5, 5)
@@ -43,10 +45,9 @@ class FolderStatsWidget(QWidget):
 
         top_row = QHBoxLayout()
         icon_label = QLabel()
-        if is_folder:
-            icon = QApplication.style().standardIcon(QStyle.SP_DirIcon)
-        else:
-            icon = QApplication.style().standardIcon(QStyle.SP_FileIcon)
+        icon = QApplication.style().standardIcon(
+            QStyle.SP_DirIcon if is_folder else QStyle.SP_FileIcon
+        )
         icon_label.setPixmap(icon.pixmap(16, 16))
 
         name_label = QLabel(text)
@@ -58,132 +59,119 @@ class FolderStatsWidget(QWidget):
         layout.addLayout(top_row)
 
         if is_folder and total > 0:
-            self.total = total
-            self.prog = in_progress
-            self.comp = completed
+            ann_txt = (
+                f"Annotation — Missing: {missing} | Active: {in_progress} | "
+                f"Done: {completed} | Total: {total}"
+            )
+            lbl_ann = QLabel(ann_txt)
+            lbl_ann.setStyleSheet("color: gray; font-size: 10px;")
+            layout.addWidget(lbl_ann)
 
-            stats_txt = f"Done: {completed} | Active: {in_progress} | Total: {total}"
-            lbl_stats = QLabel(stats_txt)
-            lbl_stats.setStyleSheet("color: gray; font-size: 10px;")
-            layout.addWidget(lbl_stats)
+            layout.addWidget(SegmentedProgressBar(
+                [completed, in_progress, missing],
+                ["#28a745", "#ffc107", "#bdbdbd"],
+            ))
 
-            self.bar = HeightProgressBar(total, in_progress, completed)
-            layout.addWidget(self.bar)
+            if completed > 0:
+                anal_txt = (
+                    f"Analysis — Analyzed: {analyzed} | Ready: {not_analyzed} | "
+                    f"Completed tasks: {completed}"
+                )
+                lbl_anal = QLabel(anal_txt)
+                lbl_anal.setStyleSheet("color: #666; font-size: 10px;")
+                layout.addWidget(lbl_anal)
+                layout.addWidget(SegmentedProgressBar(
+                    [analyzed, not_analyzed],
+                    ["#007bff", "#d6e4ff"],
+                ))
+
+
+def _annotation_row_style(display_status):
+    if display_status == "Completed":
+        return "color: #28a745; font-size: 10px; font-weight: bold;"
+    if display_status == "In Progress":
+        return "color: #d68910; font-size: 10px; font-weight: bold;"
+    return "color: gray; font-size: 10px;"
+
+
+def _analysis_row_style(analysis_status):
+    if analysis_status == "analyzed":
+        return "color: #28a745; font-size: 10px; font-weight: bold;"
+    if analysis_status == "not_analyzed":
+        return "color: #007bff; font-size: 10px; font-weight: bold;"
+    return "color: #999; font-size: 10px;"
+
+
+def _annotation_icon(display_status):
+    if display_status == "Completed":
+        return QApplication.style().standardIcon(QStyle.SP_DialogApplyButton)
+    if display_status == "In Progress":
+        return QApplication.style().standardIcon(QStyle.SP_FileIcon)
+    return QApplication.style().standardIcon(QStyle.SP_MessageBoxWarning)
 
 
 class FileStatsWidget(QWidget):
-    def __init__(self, name, status, plant_count):
+    """Annotator-only: annotation row only."""
+
+    def __init__(self, name, annotation_status, plant_count):
         super().__init__()
+        display = annotation_status_display(annotation_status)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(5, 5, 5, 5)
         layout.setSpacing(2)
 
         top_row = QHBoxLayout()
         icon_label = QLabel()
-
-        if status == "Completed":
-            icon = QApplication.style().standardIcon(QStyle.SP_DialogApplyButton)
-        else:
-            icon = QApplication.style().standardIcon(QStyle.SP_FileIcon)
-
-        icon_label.setPixmap(icon.pixmap(16, 16))
-
-        name_label = QLabel(name)
-
-        top_row.addWidget(icon_label)
-        top_row.addWidget(name_label)
-        top_row.addStretch()
-        layout.addLayout(top_row)
-
-        stats_txt = f"Status: {status} | Nº Plants: {plant_count}"
-        lbl_stats = QLabel(stats_txt)
-
-        if status == "Completed":
-            lbl_stats.setStyleSheet("color: #28a745; font-size: 10px; font-weight: bold;")
-        elif status == "In Progress":
-            lbl_stats.setStyleSheet("color: #d68910; font-size: 10px; font-weight: bold;")
-        else:
-            lbl_stats.setStyleSheet("color: gray; font-size: 10px;")
-
-        layout.addWidget(lbl_stats)
-
-
-# ==========================================
-# CUSTOM LIST ITEM WIDGETS (Analyzer)
-# ==========================================
-class AnalyzerFileStatsWidget(QWidget):
-    def __init__(self, name, annotator_status, analyzer_status, plant_count):
-        super().__init__()
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(5, 5, 5, 5)
-        layout.setSpacing(2)
-        top_row = QHBoxLayout()
-        icon_label = QLabel()
-
-        if analyzer_status == "Analyzed":
-            icon = QApplication.style().standardIcon(QStyle.SP_DialogApplyButton)
-        elif analyzer_status == "Ready":
-            icon = QApplication.style().standardIcon(QStyle.SP_FileIcon)
-        else:
-            icon = QApplication.style().standardIcon(QStyle.SP_MessageBoxWarning)
-
-        icon_label.setPixmap(icon.pixmap(16, 16))
+        icon_label.setPixmap(_annotation_icon(display).pixmap(16, 16))
         top_row.addWidget(icon_label)
         top_row.addWidget(QLabel(name))
         top_row.addStretch()
         layout.addLayout(top_row)
 
-        lbl_stats = QLabel(f"Status: {analyzer_status} | Num Plants: {plant_count}")
-        if analyzer_status == "Analyzed":
-            lbl_stats.setStyleSheet("color: #28a745; font-size: 10px; font-weight: bold;")
-        elif analyzer_status == "Ready":
-            lbl_stats.setStyleSheet("color: #007bff; font-size: 10px; font-weight: bold;")
-        else:
-            lbl_stats.setStyleSheet("color: #dc3545; font-size: 10px;")
+        lbl_stats = QLabel(f"Annotation: {display} | Plants: {plant_count}")
+        lbl_stats.setStyleSheet(_annotation_row_style(display))
         layout.addWidget(lbl_stats)
 
 
-class UnifiedFileStatsWidget(QWidget):
-    """Combines Annotator and Analyzer status into a single visual."""
+class DualRowFileStatsWidget(QWidget):
+    """Unified browser: separate annotation and analysis rows."""
 
-    def __init__(self, name, annotator_status, analyzer_status, plant_count):
+    def __init__(self, name, annotation_status, analysis_status, plant_count,
+                 plants_analyzed=None):
         super().__init__()
+        ann_display = annotation_status_display(annotation_status)
+        anal_display = analysis_status_display(analysis_status)
+        if analysis_status == "analyzed" and plants_analyzed is not None:
+            anal_line = f"Analysis: {anal_display} | Plants: {plants_analyzed}"
+        elif analysis_status == "not_analyzed":
+            anal_line = f"Analysis: {anal_display} | Plants: {plant_count}"
+        else:
+            anal_line = f"Analysis: {anal_display}"
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(5, 5, 5, 5)
         layout.setSpacing(2)
 
         top_row = QHBoxLayout()
         icon_label = QLabel()
-
-        if analyzer_status == "Analyzed":
-            icon = QApplication.style().standardIcon(QStyle.SP_DialogApplyButton)
-        elif annotator_status == "Completed":
-            icon = QApplication.style().standardIcon(QStyle.SP_FileIcon)
-        else:
-            icon = QApplication.style().standardIcon(QStyle.SP_MessageBoxWarning)
-
-        icon_label.setPixmap(icon.pixmap(16, 16))
+        icon_label.setPixmap(_annotation_icon(ann_display).pixmap(16, 16))
         top_row.addWidget(icon_label)
         top_row.addWidget(QLabel(name))
         top_row.addStretch()
         layout.addLayout(top_row)
 
-        if analyzer_status == "Analyzed":
-            stat_str = f"Fully Analyzed | Plants: {plant_count}"
-            color = "#28a745"
-        elif annotator_status == "Completed":
-            stat_str = f"Ready for Extraction | Plants: {plant_count}"
-            color = "#007bff"
-        elif annotator_status == "In Progress":
-            stat_str = f"Annotation Active | Plants: {plant_count}"
-            color = "#d68910"
-        else:
-            stat_str = f"Pending Annotation | Plants: {plant_count}"
-            color = "gray"
+        lbl_ann = QLabel(f"Annotation: {ann_display} | Plants: {plant_count}")
+        lbl_ann.setStyleSheet(_annotation_row_style(ann_display))
+        layout.addWidget(lbl_ann)
 
-        lbl_stats = QLabel(stat_str)
-        lbl_stats.setStyleSheet(f"color: {color}; font-size: 10px; font-weight: bold;")
-        layout.addWidget(lbl_stats)
+        lbl_anal = QLabel(anal_line)
+        lbl_anal.setStyleSheet(_analysis_row_style(analysis_status))
+        layout.addWidget(lbl_anal)
+
+
+class AnalyzerFileStatsWidget(DualRowFileStatsWidget):
+    """Analyzer browser reuses dual-row layout."""
+    pass
 
 
 # ==========================================
@@ -426,55 +414,105 @@ class UnifiedFileBrowser(QWidget):
     def get_cached_contents(self, directory):
         return self.folder_cache.get(directory)
 
-    def update_file_status_in_cache(self, file_path, new_status, new_plant_count=None):
-        """Surgically updates the cache for a single file and propagates folder stats upward."""
+    def update_file_status_in_cache(
+        self,
+        file_path,
+        new_status=None,
+        new_plant_count=None,
+        new_analysis_status=None,
+    ):
+        """Update cached file entry and propagate folder annotation/analysis aggregates."""
         file_dir = os.path.dirname(file_path)
 
-        delta_in_progress = 0
-        delta_completed = 0
+        delta_missing = delta_in_progress = delta_completed = 0
+        delta_analyzed = delta_not_analyzed = 0
 
-        if file_dir in self.folder_cache:
-            for item in self.folder_cache[file_dir]:
-                if item["type"] == "file" and item["path"] == file_path:
-                    old_status = item["status"]
-                    old_plant_count = item.get("plant_count", 0)
+        def ann_key(display_or_raw):
+            if display_or_raw in ("Missing", "missing", "Pending", "pending"):
+                return "missing"
+            if display_or_raw in ("Completed", "completed"):
+                return "completed"
+            if display_or_raw in ("In Progress", "in_progress"):
+                return "in_progress"
+            return normalize_annotation_status(display_or_raw)
 
-                    status_changed = (old_status != new_status)
-                    count_changed = (new_plant_count is not None and old_plant_count != new_plant_count)
-
-                    if not status_changed and not count_changed:
-                        return
-
-                    item["status"] = new_status
-                    if new_plant_count is not None:
-                        item["plant_count"] = new_plant_count
-
-                    if status_changed:
-                        if old_status == "Pending" and new_status == "In Progress":
-                            delta_in_progress = 1
-                        elif old_status == "Pending" and new_status == "Completed":
-                            delta_completed = 1
-                        elif old_status == "In Progress" and new_status == "Completed":
-                            delta_in_progress = -1
-                            delta_completed = 1
-                        elif old_status == "Completed" and new_status == "In Progress":
-                            delta_completed = -1
-                            delta_in_progress = 1
-                    break
-            else:
-                return
-        else:
+        if file_dir not in self.folder_cache:
             return
 
-        if delta_in_progress != 0 or delta_completed != 0:
+        target = None
+        for item in self.folder_cache[file_dir]:
+            if item["type"] == "file" and item["path"] == file_path:
+                target = item
+                break
+        if target is None:
+            return
+
+        old_ann = ann_key(target.get("annotation_status") or target.get("status"))
+        old_analysis = target.get("analysis_status", "not_applicable")
+        old_plant_count = target.get("plant_count", 0)
+
+        new_ann = ann_key(new_status) if new_status is not None else old_ann
+        new_analysis = new_analysis_status if new_analysis_status is not None else old_analysis
+
+        ann_changed = new_ann != old_ann
+        analysis_changed = new_analysis != old_analysis
+        count_changed = new_plant_count is not None and old_plant_count != new_plant_count
+
+        if not ann_changed and not analysis_changed and not count_changed:
+            return
+
+        target["annotation_status"] = new_ann
+        target["status"] = annotation_status_display(new_ann)
+        if new_plant_count is not None:
+            target["plant_count"] = new_plant_count
+        if new_analysis_status is not None:
+            target["analysis_status"] = new_analysis
+            target["analyzer_status"] = analysis_status_display(new_analysis)
+
+        if ann_changed:
+            for bucket, delta_name in (
+                ("missing", "delta_missing"),
+                ("in_progress", "delta_in_progress"),
+                ("completed", "delta_completed"),
+            ):
+                if old_ann == bucket:
+                    if bucket == "missing":
+                        delta_missing -= 1
+                    elif bucket == "in_progress":
+                        delta_in_progress -= 1
+                    elif bucket == "completed":
+                        delta_completed -= 1
+                if new_ann == bucket:
+                    if bucket == "missing":
+                        delta_missing += 1
+                    elif bucket == "in_progress":
+                        delta_in_progress += 1
+                    elif bucket == "completed":
+                        delta_completed += 1
+
+        if analysis_changed and old_ann == "completed":
+            if old_analysis == "analyzed":
+                delta_analyzed -= 1
+            elif old_analysis == "not_analyzed":
+                delta_not_analyzed -= 1
+        if analysis_changed and new_ann == "completed":
+            if new_analysis == "analyzed":
+                delta_analyzed += 1
+            elif new_analysis == "not_analyzed":
+                delta_not_analyzed += 1
+
+        if any([delta_missing, delta_in_progress, delta_completed, delta_analyzed, delta_not_analyzed]):
             current_iter_dir = file_dir
             while True:
                 parent_dir = os.path.dirname(current_iter_dir)
                 if parent_dir in self.folder_cache:
                     for item in self.folder_cache[parent_dir]:
                         if item["type"] == "dir" and item["path"] == current_iter_dir:
-                            item["in_progress"] += delta_in_progress
-                            item["completed"] += delta_completed
+                            item["missing"] = item.get("missing", 0) + delta_missing
+                            item["in_progress"] = item.get("in_progress", 0) + delta_in_progress
+                            item["completed"] = item.get("completed", 0) + delta_completed
+                            item["analyzed"] = item.get("analyzed", 0) + delta_analyzed
+                            item["not_analyzed"] = item.get("not_analyzed", 0) + delta_not_analyzed
                             break
 
                 if current_iter_dir == self.root_dir or parent_dir == current_iter_dir:
@@ -482,7 +520,7 @@ class UnifiedFileBrowser(QWidget):
                 current_iter_dir = parent_dir
 
         if self.current_dir in self.folder_cache:
-            self.render_contents(self.folder_cache[self.current_dir])
+            self.render_contents(self.folder_cache[self.current_dir], use_cache=False)
 
     def render_contents(self, contents, use_cache=True):
         if use_cache:
@@ -498,7 +536,14 @@ class UnifiedFileBrowser(QWidget):
                 list_item.setData(Qt.UserRole, {"type": "dir", "path": item["path"]})
 
                 widget = FolderStatsWidget(
-                    item["name"], item["total"], item["in_progress"], item["completed"], is_folder=True
+                    item["name"],
+                    item["total"],
+                    item.get("missing", 0),
+                    item.get("in_progress", 0),
+                    item.get("completed", 0),
+                    analyzed=item.get("analyzed", 0),
+                    not_analyzed=item.get("not_analyzed", 0),
+                    is_folder=True,
                 )
                 list_item.setSizeHint(widget.sizeHint())
                 self.task_list.addItem(list_item)
@@ -513,15 +558,18 @@ class UnifiedFileBrowser(QWidget):
                 })
 
                 plant_count = item.get("plant_count", 0)
-                annotator_status = item.get("status", "Pending")
-                analyzer_status = item.get("analyzer_status", "Not Analyzed")
+                annotation_status = item.get("annotation_status") or item.get("status", "missing")
+                analysis_status = item.get("analysis_status", "not_applicable")
 
                 if self.unified_file_stats:
-                    widget = UnifiedFileStatsWidget(
-                        item["name"], annotator_status, analyzer_status, plant_count
+                    widget = DualRowFileStatsWidget(
+                        item["name"],
+                        annotation_status,
+                        analysis_status,
+                        plant_count,
                     )
                 else:
-                    widget = FileStatsWidget(item["name"], annotator_status, plant_count)
+                    widget = FileStatsWidget(item["name"], annotation_status, plant_count)
 
                 list_item.setSizeHint(widget.sizeHint())
                 self.task_list.addItem(list_item)
@@ -549,8 +597,8 @@ class UnifiedFileBrowser(QWidget):
                 })
                 widget = AnalyzerFileStatsWidget(
                     item["name"],
-                    item.get("status", "Pending"),
-                    item.get("analyzer_status", "Not Annotated"),
+                    item.get("annotation_status") or item.get("status", "missing"),
+                    item.get("analysis_status", "not_applicable"),
                     item.get("plant_count", 0),
                 )
                 list_item.setSizeHint(widget.sizeHint())
@@ -567,7 +615,8 @@ class UnifiedFileBrowser(QWidget):
     def on_item_clicked(self, item):
         data = item.data(Qt.UserRole)
         if data["type"] == "file":
-            if data.get("status") == "Not Annotated":
+            ann = normalize_annotation_status(data.get("status") or data.get("annotation_status"))
+            if ann != "completed":
                 QMessageBox.warning(
                     self, "Skip",
                     "This file has not been completed in the Annotation Suite yet."

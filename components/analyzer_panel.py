@@ -21,6 +21,8 @@ class PhenomicsControlPanel(QWidget):
     manage_genotypes_requested = pyqtSignal()
     overlay_labels_changed = pyqtSignal()
 
+    metadata_dirty_changed = pyqtSignal()
+
     def __init__(self, global_config, config_file=None):
         super().__init__()
         self.config = global_config
@@ -45,9 +47,9 @@ class PhenomicsControlPanel(QWidget):
         self.in_condition = QLineEdit("Control")
         self.in_timepoint = QLineEdit("Day_07")
 
-        self.in_plate_id.editingFinished.connect(lambda: self._sanitize_input(self.in_plate_id, "Plate ID"))
-        self.in_condition.editingFinished.connect(lambda: self._sanitize_input(self.in_condition, "Condition"))
-        self.in_timepoint.editingFinished.connect(lambda: self._sanitize_input(self.in_timepoint, "Timepoint"))
+        self.in_plate_id.editingFinished.connect(lambda: self._on_plate_field_edited(self.in_plate_id, "Plate ID"))
+        self.in_condition.editingFinished.connect(lambda: self._on_plate_field_edited(self.in_condition, "Condition"))
+        self.in_timepoint.editingFinished.connect(lambda: self._on_plate_field_edited(self.in_timepoint, "Timepoint"))
 
         self.cb_calibration = QComboBox()
         self.cb_calibration.addItems([
@@ -151,6 +153,10 @@ class PhenomicsControlPanel(QWidget):
         btn_layout.addWidget(self.btn_export)
         layout.addLayout(btn_layout)
 
+    def _on_plate_field_edited(self, line_edit, field_name):
+        self._sanitize_input(line_edit, field_name)
+        self.metadata_dirty_changed.emit()
+
     def _sanitize_input(self, line_edit, field_name):
         raw_text = line_edit.text()
         if " " in raw_text:
@@ -234,11 +240,13 @@ class PhenomicsControlPanel(QWidget):
                 combo.setCurrentText(genotype)
                 combo.blockSignals(False)
         self.update_overlay_labels()
+        self.metadata_dirty_changed.emit()
 
     def _on_table_item_changed(self, item):
         GenotypeHelper.sanitize_table_cell(self.table_plants, item)
-        if item.column() == 2:
+        if item.column() in (1, 2):
             self.update_overlay_labels()
+            self.metadata_dirty_changed.emit()
 
     def _populate_bulk_genotype_combo(self, genotypes, select_text=None):
         self.cb_bulk_genotype.blockSignals(True)
@@ -340,6 +348,46 @@ class PhenomicsControlPanel(QWidget):
             }
         return metadata
 
+    def capture_plate_meta(self, raw_img_shape=None):
+        """Snapshot plate-level metadata and calibration for persistence."""
+        scale = self.get_cm_per_px(raw_img_shape)
+        return {
+            "plate_id": self.in_plate_id.text().strip(),
+            "condition": self.in_condition.text().strip(),
+            "timepoint": self.in_timepoint.text().strip(),
+            "calibration_mode": self.cb_calibration.currentText(),
+            "calibration_val": self.in_calib_val.text(),
+            "scale_cm_px": scale,
+        }
+
+    def restore_plate_meta(self, plate_meta):
+        """Restore plate fields and calibration from persisted metadata."""
+        if not plate_meta:
+            return
+        self.in_plate_id.blockSignals(True)
+        self.in_condition.blockSignals(True)
+        self.in_timepoint.blockSignals(True)
+        self.cb_calibration.blockSignals(True)
+        self.in_calib_val.blockSignals(True)
+
+        if plate_meta.get("plate_id"):
+            self.in_plate_id.setText(str(plate_meta["plate_id"]))
+        if plate_meta.get("condition"):
+            self.in_condition.setText(str(plate_meta["condition"]))
+        if plate_meta.get("timepoint"):
+            self.in_timepoint.setText(str(plate_meta["timepoint"]))
+        if plate_meta.get("calibration_mode"):
+            self.cb_calibration.setCurrentText(str(plate_meta["calibration_mode"]))
+        if plate_meta.get("calibration_val") is not None:
+            self.in_calib_val.setText(str(plate_meta["calibration_val"]))
+
+        self.in_plate_id.blockSignals(False)
+        self.in_condition.blockSignals(False)
+        self.in_timepoint.blockSignals(False)
+        self.cb_calibration.blockSignals(False)
+        self.in_calib_val.blockSignals(False)
+        self.calibration_changed.emit()
+
     @staticmethod
     def remap_metadata(metadata, uid_mapping):
         """Re-key preserved metadata after model UID remapping (e.g. on save)."""
@@ -381,6 +429,16 @@ class PhenomicsControlPanel(QWidget):
             return
 
         self._apply_genotype_to_rows(genotype, selected_rows)
+
+    def _on_genotype_line_edited(self, combo):
+        GenotypeHelper.check_and_add_genotype(
+            combo, self.config.get("saved_genotypes", []),
+            on_genotypes_changed=self._on_genotypes_list_changed,
+            on_text_resolved=self.update_overlay_labels,
+            config_file=self.config_file,
+            config_dict=self.config,
+        )
+        self.metadata_dirty_changed.emit()
 
     def _on_genotypes_list_changed(self, genotypes):
         self.config["saved_genotypes"] = genotypes
@@ -449,15 +507,10 @@ class PhenomicsControlPanel(QWidget):
                     combo.addItem(genotype)
                 combo.setCurrentText(genotype)
             combo.lineEdit().editingFinished.connect(
-                lambda c=combo: GenotypeHelper.check_and_add_genotype(
-                    c, self.config.get("saved_genotypes", []),
-                    on_genotypes_changed=self._on_genotypes_list_changed,
-                    on_text_resolved=self.update_overlay_labels,
-                    config_file=self.config_file,
-                    config_dict=self.config,
-                )
+                lambda c=combo: self._on_genotype_line_edited(c)
             )
             combo.currentIndexChanged.connect(self.update_overlay_labels)
+            combo.currentIndexChanged.connect(self.metadata_dirty_changed.emit)
             self.table_plants.setCellWidget(row, 1, combo)
 
             plant_num = saved.get("plant_num", str(row + 1))

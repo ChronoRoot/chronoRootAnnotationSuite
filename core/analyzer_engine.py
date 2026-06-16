@@ -144,6 +144,82 @@ class NumpyEncoder(json.JSONEncoder):
             return float(obj)
         return super(NumpyEncoder, self).default(obj)
 
+
+def _plant_match_key(plant):
+    return (
+        str(plant.get("plant_num", "")).strip(),
+        str(plant.get("genotype", "")).strip().lower(),
+    )
+
+
+def load_measurements_from_metrics_json(metrics_path, current_uids, plants_metadata=None):
+    """
+    Load a prior metrics export into an in-memory measurements_cache dict.
+    Remaps plant UIDs when saved UIDs no longer match the loaded annotation model.
+    Returns (cache_dict, warnings_list).
+    """
+    plants_metadata = plants_metadata or {}
+    warnings = []
+
+    with open(metrics_path, "r", encoding="utf-8") as f:
+        payload = json.load(f)
+
+    plants = payload.get("plants") or []
+    if not plants:
+        return {}, ["Metrics file contains no plant records."]
+
+    uid_set = set(int(u) for u in current_uids)
+    by_uid = {}
+    unmatched = []
+
+    for plant in plants:
+        saved_uid = plant.get("uid")
+        if saved_uid is not None and int(saved_uid) in uid_set:
+            by_uid[int(saved_uid)] = dict(plant)
+            continue
+        unmatched.append(plant)
+
+    if unmatched:
+        meta_by_key = {
+            _plant_match_key(meta): uid
+            for uid, meta in plants_metadata.items()
+        }
+        for plant in unmatched:
+            key = _plant_match_key(plant)
+            if key in meta_by_key:
+                new_uid = int(meta_by_key[key])
+                if new_uid in by_uid:
+                    warnings.append(
+                        f"Duplicate match for plant #{plant.get('plant_num')} ({plant.get('genotype')})."
+                    )
+                    continue
+                remapped = dict(plant)
+                remapped["uid"] = new_uid
+                by_uid[new_uid] = remapped
+                warnings.append(
+                    f"Remapped plant #{plant.get('plant_num')} ({plant.get('genotype')}) "
+                    f"from UID {plant.get('uid')} to UID {new_uid}."
+                )
+            else:
+                warnings.append(
+                    f"Could not match plant #{plant.get('plant_num')} ({plant.get('genotype')}) "
+                    f"to current annotations."
+                )
+
+    missing_uids = uid_set - set(by_uid.keys())
+    if missing_uids:
+        warnings.append(
+            f"{len(missing_uids)} annotated plant(s) have no restored measurements."
+        )
+
+    extra_uids = set(by_uid.keys()) - uid_set
+    for uid in extra_uids:
+        by_uid.pop(uid, None)
+        warnings.append(f"Dropped restored measurement for stale UID {uid}.")
+
+    return by_uid, warnings
+
+
 def export_rsml_and_json(out_dir, base_name, plate_meta, measurements_dict):
     # 1. Initialize the Master XML Tree
     master_rsml = ET.Element('rsml')
