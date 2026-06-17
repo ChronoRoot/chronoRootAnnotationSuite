@@ -9,10 +9,12 @@ from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QSplitter, QLabel,
     QPushButton, QComboBox, QFormLayout, QFileDialog, QMessageBox,
     QGroupBox, QProgressDialog, QTreeWidget, QTreeWidgetItem,
-    QHeaderView, QAbstractItemView, QCheckBox, QRadioButton, QButtonGroup,
-    QTextEdit, QDoubleSpinBox, QStackedWidget, QScrollArea, QListWidget,
+    QHeaderView, QAbstractItemView, QRadioButton, QButtonGroup,
+    QTextEdit, QDoubleSpinBox, QStackedWidget, QListWidget,
+    QListWidgetItem, QSizePolicy,
 )
 from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtGui import QFontMetrics
 
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.backends.backend_qt5agg import NavigationToolbar2QT as NavigationToolbar
@@ -48,7 +50,7 @@ PLOT_TYPES = [
 
 QUALITATIVE_PLOT_TYPE = "Qualitative Atlas"
 
-AXIS_OPTIONS = ["timepoint", "condition", "genotype", "relative_folder", "day_folder"]
+AXIS_OPTIONS = ["timepoint", "condition", "genotype"]
 HUE_OPTIONS = ["None"] + AXIS_OPTIONS
 STAT_FACTOR_OPTIONS = ["genotype", "condition", "timepoint"]
 STAT_STRATIFY_OPTIONS = ["(none)", "condition", "timepoint", "genotype"]
@@ -64,6 +66,19 @@ ERROR_BAR_MAP = {
 }
 
 TEST_OPTIONS = ["auto", "mannwhitney", "kruskal", "anova"]
+
+REPORT_HELP_TEXT = """<b>Batch Report Guide</b><br><br>
+<b>Workflow:</b> Load plates → tune the plot → review statistics → <i>Add to Report</i> → repeat → <i>Generate Report</i>.<br><br>
+<b>Compare / Within / And within:</b><br>
+Example: Compare <i>genotype</i>, within each <i>timepoint</i>, and within each <i>condition</i>
+tests whether genotypes differ at every timepoint, separately for each condition.<br><br>
+<b>Statistical tests:</b><br>
+• <b>Automatic</b> — Mann-Whitney U for 2 groups; Kruskal-Wallis + pairwise Mann-Whitney for 3+.<br>
+• <b>Mann-Whitney U</b> — non-parametric; best for 2 independent groups.<br>
+• <b>Kruskal-Wallis</b> — non-parametric; needs 3+ groups (2 groups use Mann-Whitney).<br>
+• <b>One-way ANOVA</b> — parametric; needs 3+ groups and roughly normal data.<br><br>
+<b>Empty results?</b> Usually only one genotype/condition in a stratum, too few plants, or missing metric values.
+"""
 
 
 def natural_sort_key(s):
@@ -161,33 +176,144 @@ def discover_metrics_files(main_window):
     return discovered
 
 
-def render_quantitative_plot(ax, df, plot_type, y_var, x_var, hue_var, error_bar=None):
+METADATA_COLOR_PALETTES = {
+    "genotype": "tab10",
+    "timepoint": "husl",
+    "condition": "Set2",
+}
+
+
+def _category_order(df, column):
+    if column not in df.columns:
+        return []
+    series = df[column].dropna()
+    if hasattr(series.dtype, "categories"):
+        return list(series.cat.categories)
+    values = series.unique().tolist()
+    values.sort(key=natural_sort_key)
+    return values
+
+
+def build_metadata_color_map(df, column):
+    if column not in df.columns:
+        return {}
+    values = _category_order(df, column)
+    if not values:
+        return {}
+    palette_name = METADATA_COLOR_PALETTES.get(column, "tab10")
+    colors = sns.color_palette(palette_name, n_colors=len(values))
+    return {value: colors[i] for i, value in enumerate(values)}
+
+
+def build_all_metadata_color_maps(df):
+    return {
+        column: build_metadata_color_map(df, column)
+        for column in METADATA_COLOR_PALETTES
+        if column in df.columns
+    }
+
+
+def _palette_for_column(df, column, color_maps=None):
+    if color_maps and column in color_maps:
+        return color_maps[column]
+    return build_metadata_color_map(df, column)
+
+
+def _list_palette_for_order(color_map, order):
+    return [color_map[value] for value in order if value in color_map]
+
+
+def _neutral_violin_palette(color_map, fill=0.88):
+    return {key: (fill, fill, fill) for key in color_map}
+
+
+def _base_categorical_kwargs(df, x_var, y_var, ax, hue_var=None):
+    kwargs = dict(data=df, x=x_var, y=y_var, ax=ax)
+    x_order = _category_order(df, x_var)
+    if x_order:
+        kwargs["order"] = x_order
+    if hue_var:
+        kwargs["hue"] = hue_var
+        hue_order = _category_order(df, hue_var)
+        if hue_order:
+            kwargs["hue_order"] = hue_order
+    return kwargs
+
+
+def render_quantitative_plot(ax, df, plot_type, y_var, x_var, hue_var, error_bar=None,
+                             color_maps=None):
     hue_var = None if not hue_var or hue_var == "None" else hue_var
+    x_order = _category_order(df, x_var)
+    hue_order = _category_order(df, hue_var) if hue_var else []
+    hue_palette = _palette_for_column(df, hue_var, color_maps) if hue_var else {}
+    x_palette = _palette_for_column(df, x_var, color_maps)
+
+    common = _base_categorical_kwargs(df, x_var, y_var, ax, hue_var)
 
     if plot_type == "Box Plot":
-        sns.boxplot(data=df, x=x_var, y=y_var, hue=hue_var, ax=ax, width=0.5, fliersize=3)
+        if hue_var:
+            sns.boxplot(**common, palette=hue_palette, width=0.5, fliersize=3)
+        else:
+            sns.boxplot(
+                **common, width=0.5, fliersize=3,
+                palette=_list_palette_for_order(x_palette, x_order),
+            )
     elif plot_type == "Swarm Plot":
-        sns.swarmplot(data=df, x=x_var, y=y_var, hue=hue_var, ax=ax, dodge=True, size=4)
+        if hue_var:
+            sns.swarmplot(**common, dodge=True, size=4, palette=hue_palette)
+        else:
+            sns.swarmplot(
+                **common, dodge=False, size=4,
+                palette=_list_palette_for_order(x_palette, x_order),
+            )
     elif plot_type == "Violin Plot":
-        sns.violinplot(
-            data=df, x=x_var, y=y_var, hue=hue_var, ax=ax,
-            inner="quartile", density_norm="width",
-        )
+        if hue_var:
+            sns.violinplot(
+                **common, palette=hue_palette,
+                inner="quartile", density_norm="width",
+            )
+        else:
+            sns.violinplot(
+                **common,
+                palette=_list_palette_for_order(x_palette, x_order),
+                inner="quartile", density_norm="width",
+            )
     elif plot_type == "Violin + Swarm Plot":
-        sns.violinplot(
-            data=df, x=x_var, y=y_var, hue=hue_var, ax=ax,
-            inner=None, color=".9", density_norm="width",
+        violin_kwargs = _base_categorical_kwargs(df, x_var, y_var, ax, hue_var)
+        violin_kwargs.update(
+            inner=None, density_norm="width", width=0.8, linewidth=1,
         )
-        sns.swarmplot(
-            data=df, x=x_var, y=y_var, hue=hue_var, ax=ax,
-            dodge=True, size=4, palette="dark:black", alpha=0.6,
+        if hue_var:
+            violin_kwargs["palette"] = _neutral_violin_palette(hue_palette)
+        else:
+            violin_kwargs["palette"] = _list_palette_for_order(x_palette, x_order)
+        sns.violinplot(**violin_kwargs)
+
+        swarm_kwargs = _base_categorical_kwargs(df, x_var, y_var, ax, hue_var)
+        swarm_kwargs.update(
+            dodge=bool(hue_var),
+            size=4,
+            alpha=0.85,
+            legend=False,
         )
+        if hue_var:
+            swarm_kwargs["palette"] = hue_palette
+        else:
+            swarm_kwargs["palette"] = _list_palette_for_order(x_palette, x_order)
+        sns.swarmplot(**swarm_kwargs)
     elif plot_type == "Line Plot (Means)":
         err_val = ERROR_BAR_MAP.get(error_bar or "Standard Error (SE)", "se")
-        sns.lineplot(
-            data=df, x=x_var, y=y_var, hue=hue_var, ax=ax,
-            marker="o", err_style="bars", errorbar=err_val,
+        line_kwargs = dict(
+            data=df, x=x_var, y=y_var, ax=ax,
+            marker="o", err_style="bars", errorbar=err_val, sort=False,
         )
+        if hue_var:
+            line_kwargs["hue"] = hue_var
+            if hue_order:
+                line_kwargs["hue_order"] = hue_order
+            sns.lineplot(**line_kwargs, palette=hue_palette)
+        else:
+            sns.lineplot(**line_kwargs, palette=x_palette)
     else:
         raise ValueError(f"Unknown plot type: {plot_type}")
 
@@ -201,7 +327,13 @@ def render_quantitative_plot(ax, df, plot_type, y_var, x_var, hue_var, error_bar
     ax.set_ylabel(y_var, fontweight="bold")
     ax.tick_params(axis="x", rotation=45)
     if hue_var:
-        ax.legend(title=hue_var.capitalize(), bbox_to_anchor=(1.05, 1), loc="upper left")
+        handles, labels = ax.get_legend_handles_labels()
+        if handles:
+            by_label = dict(zip(labels, handles))
+            ax.legend(
+                by_label.values(), by_label.keys(),
+                title=hue_var.capitalize(), bbox_to_anchor=(1.05, 1), loc="upper left",
+            )
 
 
 class ReportFileListPanel(QWidget):
@@ -227,21 +359,16 @@ class ReportFileListPanel(QWidget):
     def init_ui(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(5, 5, 5, 5)
-        layout.addWidget(QLabel("<b>Processed Plates</b>"))
-
-        top_btns = QHBoxLayout()
-        self.btn_browse = QPushButton("Browse Folder…")
-        self.btn_browse.clicked.connect(self.browse_folder)
-        self.btn_refresh = QPushButton("Refresh")
-        self.btn_refresh.clicked.connect(self.refresh_file_list)
-        top_btns.addWidget(self.btn_browse)
-        top_btns.addWidget(self.btn_refresh)
-        layout.addLayout(top_btns)
 
         sel_btns = QHBoxLayout()
-        self.btn_sel_all = QPushButton("Select All")
+        sel_btns.addWidget(QLabel("<b>Processed Plates</b>"))
+        self.btn_sel_all = QPushButton("All")
+        self.btn_sel_all.setMaximumHeight(24)
+        #self.btn_sel_all.setFlat(True)
         self.btn_sel_all.clicked.connect(lambda: self._set_all_checks(Qt.Checked))
         self.btn_clear = QPushButton("Clear")
+        self.btn_clear.setMaximumHeight(24)
+        #self.btn_clear.setFlat(True)
         self.btn_clear.clicked.connect(lambda: self._set_all_checks(Qt.Unchecked))
         sel_btns.addWidget(self.btn_sel_all)
         sel_btns.addWidget(self.btn_clear)
@@ -271,17 +398,6 @@ class ReportFileListPanel(QWidget):
         action_btns.addWidget(self.btn_open)
         action_btns.addWidget(self.btn_load_data)
         layout.addLayout(action_btns)
-
-    def browse_folder(self):
-        start = _metrics_output_dir(self.main_window)
-        folder = QFileDialog.getExistingDirectory(self, "Select Metrics Search Folder", start)
-        if not folder:
-            return
-        folder = os.path.abspath(folder)
-        roots = self.main_window.config.setdefault("report_search_roots", [])
-        if folder not in roots:
-            roots.append(folder)
-        self.refresh_file_list()
 
     def _set_all_checks(self, state):
         self._block_checks = True
@@ -445,6 +561,7 @@ class ComparisonReportTab(QWidget):
         self.main_window = main_window
         self.file_panel = file_panel
         self.df = pd.DataFrame()
+        self.color_maps = {}
         self.report_queue = []
         self.file_panel.load_requested.connect(self.load_selected_data)
         self.init_ui()
@@ -453,17 +570,30 @@ class ComparisonReportTab(QWidget):
         layout = QHBoxLayout(self)
         splitter = QSplitter(Qt.Horizontal)
 
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setMinimumWidth(300)
-        scroll.setMaximumWidth(380)
+        self.explorer_panel = QWidget()
+        self.explorer_panel.setMinimumWidth(280)
+        controls_layout = QVBoxLayout(self.explorer_panel)
+        controls_layout.setContentsMargins(6, 6, 6, 6)
+        controls_layout.setSpacing(4)
 
-        controls = QWidget()
-        controls_layout = QVBoxLayout(controls)
-        controls_layout.addWidget(QLabel("<b>Report Explorer</b>"))
+        header_row = QHBoxLayout()
+        header_row.addWidget(QLabel("<b>Report Explorer</b>"))
+        
+        self.btn_stats_help = QPushButton("Help")
+        self.btn_stats_help.setToolTip("Open report and statistics help")
+        self.btn_stats_help.clicked.connect(self._show_report_help)
+        header_row.addWidget(self.btn_stats_help)
+        
+        self.btn_focus_plot = QPushButton("Focus on Plot")
+        self.btn_focus_plot.setToolTip("Hide side panels to maximize the plot area")
+        self.btn_focus_plot.clicked.connect(self._toggle_focus_mode)
+        header_row.addWidget(self.btn_focus_plot)
+        controls_layout.addLayout(header_row)
 
         plot_group = QGroupBox("Plot")
         plot_form = QFormLayout(plot_group)
+        plot_form.setContentsMargins(6, 6, 6, 6)
+        plot_form.setSpacing(4)
 
         self.cb_plot_type = QComboBox()
         self.cb_plot_type.addItems(PLOT_TYPES)
@@ -495,6 +625,8 @@ class ComparisonReportTab(QWidget):
 
         self.qual_group = QGroupBox("Atlas Columns")
         qual_form = QFormLayout(self.qual_group)
+        qual_form.setContentsMargins(6, 6, 6, 6)
+        qual_form.setSpacing(4)
         self.lbl_qual_rows = QLabel("Rows: timepoint (fixed)")
         self.col_group = QButtonGroup(self)
         self.rad_col_condition = QRadioButton("Condition")
@@ -508,13 +640,13 @@ class ComparisonReportTab(QWidget):
         qual_form.addRow(self.rad_col_condition)
         qual_form.addRow(self.rad_col_genotype)
         qual_form.addRow(self.rad_col_combined)
-        self.chk_qual_svg = QCheckBox("Export SVG in final report")
-        qual_form.addRow(self.chk_qual_svg)
         self.qual_group.setVisible(False)
         controls_layout.addWidget(self.qual_group)
 
-        stats_group = QGroupBox("Statistics")
-        stats_form = QFormLayout(stats_group)
+        self.stats_group = QGroupBox("Statistics")
+        stats_form = QFormLayout(self.stats_group)
+        stats_form.setContentsMargins(6, 6, 6, 6)
+        stats_form.setSpacing(4)
 
         self.cb_stat_compare = QComboBox()
         self.cb_stat_compare.addItems(STAT_FACTOR_OPTIONS)
@@ -527,7 +659,8 @@ class ComparisonReportTab(QWidget):
         self.cb_stat_and_within.setEnabled(False)
 
         self.cb_stat_test = QComboBox()
-        self.cb_stat_test.addItems(TEST_OPTIONS)
+        for key in TEST_OPTIONS:
+            self.cb_stat_test.addItem(stats_module.test_display_name(key), key)
 
         self.spin_alpha = QDoubleSpinBox()
         self.spin_alpha.setRange(0.001, 0.5)
@@ -540,40 +673,28 @@ class ComparisonReportTab(QWidget):
         stats_form.addRow("And within:", self.cb_stat_and_within)
         stats_form.addRow("Test:", self.cb_stat_test)
         stats_form.addRow("Alpha:", self.spin_alpha)
-        controls_layout.addWidget(stats_group)
+        controls_layout.addWidget(self.stats_group)
 
-        self.lbl_stat_hint = QLabel(
-            "Example: Compare genotype within each timepoint and within each condition "
-            "→ genotype differences at each timepoint, separately per condition."
-        )
-        self.lbl_stat_hint.setWordWrap(True)
-        self.lbl_stat_hint.setStyleSheet("color: #666; font-size: 11px;")
-        controls_layout.addWidget(self.lbl_stat_hint)
+        self.lbl_test_hint = QLabel()
+        self.lbl_test_hint.setWordWrap(True)
+        self.lbl_test_hint.setStyleSheet("color: #666; font-size: 11px;")
+        controls_layout.addWidget(self.lbl_test_hint)
 
-        self.txt_stat_results = QTextEdit()
-        self.txt_stat_results.setReadOnly(True)
-        self.txt_stat_results.setMaximumHeight(140)
-        self.txt_stat_results.setStyleSheet("font-family: monospace; font-size: 10px;")
-        controls_layout.addWidget(self.txt_stat_results)
-
-        queue_group = QGroupBox("Figures in this Report")
+        queue_group = QGroupBox("Report Queue")
         queue_layout = QVBoxLayout(queue_group)
+        queue_layout.setContentsMargins(6, 6, 6, 6)
 
         add_row = QHBoxLayout()
-        self.chk_include_current = QCheckBox("Include current view")
         self.btn_add_to_report = QPushButton("Add to Report")
         self.btn_add_to_report.clicked.connect(self.add_current_to_report)
-        add_row.addWidget(self.chk_include_current)
+        self.btn_remove_from_report = QPushButton("Remove")
+        self.btn_remove_from_report.clicked.connect(self.remove_selected_from_report)
         add_row.addWidget(self.btn_add_to_report)
+        add_row.addWidget(self.btn_remove_from_report)
         queue_layout.addLayout(add_row)
 
         self.list_report_queue = QListWidget()
-        self.list_report_queue.setMaximumHeight(120)
         queue_layout.addWidget(self.list_report_queue)
-
-        self.btn_remove_from_report = QPushButton("Remove Selected")
-        self.btn_remove_from_report.clicked.connect(self.remove_selected_from_report)
-        queue_layout.addWidget(self.btn_remove_from_report)
         controls_layout.addWidget(queue_group)
 
         self.btn_generate_report = QPushButton("Generate Report")
@@ -589,11 +710,16 @@ class ComparisonReportTab(QWidget):
         self.btn_export_csv.setEnabled(False)
         controls_layout.addWidget(self.btn_export_csv)
 
-        controls_layout.addStretch()
-        scroll.setWidget(controls)
+        canvas_column = QWidget()
+        canvas_column_layout = QVBoxLayout(canvas_column)
+        canvas_column_layout.setContentsMargins(0, 0, 0, 0)
+        canvas_column_layout.setSpacing(0)
+
+        canvas_splitter = QSplitter(Qt.Vertical)
 
         canvas_panel = QWidget()
         canvas_layout = QVBoxLayout(canvas_panel)
+        canvas_layout.setContentsMargins(0, 0, 0, 0)
         self.canvas_stack = QStackedWidget()
 
         self.empty_canvas_page = QWidget()
@@ -612,6 +738,7 @@ class ComparisonReportTab(QWidget):
 
         self.plot_canvas_page = QWidget()
         plot_layout = QVBoxLayout(self.plot_canvas_page)
+        plot_layout.setContentsMargins(0, 0, 0, 0)
         self.figure, self.ax = plt.subplots(figsize=(8, 6))
         self.figure.patch.set_facecolor("#f4f4f4")
         self.canvas = FigureCanvas(self.figure)
@@ -623,9 +750,30 @@ class ComparisonReportTab(QWidget):
         self.canvas_stack.addWidget(self.plot_canvas_page)
         canvas_layout.addWidget(self.canvas_stack)
 
-        splitter.addWidget(scroll)
-        splitter.addWidget(canvas_panel)
-        splitter.setSizes([340, 860])
+        self.stats_results_panel = QGroupBox("Statistical Results")
+        stats_results_layout = QVBoxLayout(self.stats_results_panel)
+        stats_results_layout.setContentsMargins(6, 6, 6, 6)
+        self.txt_stat_results = QTextEdit()
+        self.txt_stat_results.setReadOnly(True)
+        self.txt_stat_results.setStyleSheet("font-family: monospace; font-size: 12px;")
+        stats_results_layout.addWidget(self.txt_stat_results)
+        self.stats_results_panel.setMinimumHeight(100)
+        self.stats_results_panel.setMaximumHeight(220)
+        self.stats_results_panel.setSizePolicy(
+            QSizePolicy.Preferred, QSizePolicy.Preferred,
+        )
+
+        canvas_splitter.addWidget(canvas_panel)
+        canvas_splitter.addWidget(self.stats_results_panel)
+        canvas_splitter.setStretchFactor(0, 3)
+        canvas_splitter.setStretchFactor(1, 1)
+        canvas_column_layout.addWidget(canvas_splitter)
+
+        splitter.addWidget(self.explorer_panel)
+        splitter.addWidget(canvas_column)
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([300, 900])
         layout.addWidget(splitter)
 
         self.cb_stat_compare.currentIndexChanged.connect(self._refresh_stratify_options)
@@ -635,7 +783,61 @@ class ComparisonReportTab(QWidget):
         self.cb_stat_test.currentIndexChanged.connect(self._on_stat_settings_changed)
         self.spin_alpha.valueChanged.connect(self._on_stat_settings_changed)
 
-        sns.set_theme(style="whitegrid", palette="muted")
+        self._setup_stat_test_tooltips()
+        sns.set_theme(style="whitegrid")
+
+    def _setup_stat_test_tooltips(self):
+        for i in range(self.cb_stat_test.count()):
+            key = self.cb_stat_test.itemData(i)
+            tip = stats_module.TEST_TOOLTIPS.get(key, "")
+            self.cb_stat_test.setItemData(i, tip, Qt.ToolTipRole)
+
+    def _show_report_help(self):
+        QMessageBox.information(self, "Report Help", REPORT_HELP_TEXT)
+
+    def _toggle_focus_mode(self):
+        if hasattr(self.main_window, "toggle_focus_mode"):
+            self.main_window.toggle_focus_mode()
+            active = getattr(self.main_window, "_focus_mode_active", False)
+            self.btn_focus_plot.setText("Exit Focus" if active else "Focus on Plot")
+
+    def _stat_test_key(self):
+        key = self.cb_stat_test.currentData()
+        return key if key else self.cb_stat_test.currentText()
+
+    def _format_stat_config(self, entry=None):
+        if entry:
+            return stats_module.format_stat_config(
+                entry.get("stat_compare", ""),
+                entry.get("stat_within"),
+                entry.get("stat_and_within"),
+                entry.get("stat_test", "auto"),
+                entry.get("stat_alpha", 0.05),
+            )
+        settings = self._current_stat_settings()
+        return stats_module.format_stat_config(
+            settings["stat_compare"],
+            settings["stat_within"],
+            settings["stat_and_within"],
+            settings["stat_test"],
+            settings["stat_alpha"],
+        )
+
+    def _count_compare_groups(self):
+        if self.df.empty:
+            return 0
+        col = self.cb_stat_compare.currentText()
+        if col not in self.df.columns:
+            return 0
+        return self.df[col].dropna().nunique()
+
+    def _update_test_hint(self):
+        if self._is_qualitative_plot():
+            return
+        n_groups = self._count_compare_groups()
+        self.lbl_test_hint.setText(
+            stats_module.describe_test_choice(self._stat_test_key(), n_groups)
+        )
 
     def _get_col_group(self):
         if self.rad_col_genotype.isChecked():
@@ -662,15 +864,6 @@ class ComparisonReportTab(QWidget):
 
     def refresh_file_list(self):
         self.file_panel.refresh_file_list()
-
-    @staticmethod
-    def _infer_day_folder(relative_folder):
-        if not relative_folder:
-            return ""
-        for part in relative_folder.replace("\\", "/").split("/"):
-            if re.match(r"(?i)^day[\s_-]?\d+", part) or re.match(r"(?i)^d\d+", part):
-                return part
-        return ""
 
     def _stratify_value(self, combo):
         text = combo.currentText()
@@ -715,6 +908,7 @@ class ComparisonReportTab(QWidget):
         self.update_plot()
 
     def _on_stat_settings_changed(self):
+        self._update_test_hint()
         self.update_inline_stats()
 
     def on_plot_type_changed(self):
@@ -726,26 +920,20 @@ class ComparisonReportTab(QWidget):
         self.cb_x_axis.setEnabled(not is_atlas)
         self.cb_hue.setEnabled(not is_atlas)
         self.qual_group.setVisible(is_atlas)
-        self.stats_group_enabled(not is_atlas)
+        for widget in (
+            self.stats_group, self.lbl_test_hint, self.stats_results_panel,
+            self.btn_stats_help,
+        ):
+            widget.setVisible(not is_atlas)
+        if not is_atlas:
+            self.update_inline_stats()
+            self._update_test_hint()
         self.update_plot()
-
-    def stats_group_enabled(self, enabled):
-        self.cb_stat_compare.setEnabled(enabled)
-        self.cb_stat_within.setEnabled(enabled)
-        self.cb_stat_and_within.setEnabled(
-            enabled and self.cb_stat_within.currentText() != "(none)"
-        )
-        self.cb_stat_test.setEnabled(enabled)
-        self.spin_alpha.setEnabled(enabled)
-        if not enabled:
-            self.txt_stat_results.setPlainText(
-                "Statistics apply to quantitative metrics only."
-            )
 
     def _get_clean_dataframe(self):
         meta_cols = [
             "plate_id", "condition", "timepoint", "genotype", "plant_num",
-            "relative_folder", "day_folder", "source_file",
+            "relative_folder", "source_file",
         ]
         metric_cols = list(METRIC_MAPPING.values())
         desired_cols = [c for c in meta_cols + metric_cols if c in self.df.columns]
@@ -780,7 +968,6 @@ class ComparisonReportTab(QWidget):
                     "condition": data.get("condition", "Unknown"),
                     "timepoint": data.get("timepoint", "Unknown"),
                     "relative_folder": relative_folder or "root",
-                    "day_folder": self._infer_day_folder(relative_folder) or "Unknown",
                     "source_file": os.path.basename(file_path),
                 }
                 for plant in data.get("plants", []):
@@ -812,12 +999,15 @@ class ComparisonReportTab(QWidget):
                     self.df[col], categories=unique_vals, ordered=True,
                 )
 
+        self.color_maps = build_all_metadata_color_maps(self.df)
+
         self.cb_y_metric.blockSignals(True)
         self.cb_y_metric.clear()
         self.cb_y_metric.addItems(sorted(numeric_metrics))
         self.cb_y_metric.blockSignals(False)
 
         self._refresh_stratify_options()
+        self._update_test_hint()
         self._set_data_loaded_state(True)
         self.update_plot()
 
@@ -826,7 +1016,7 @@ class ComparisonReportTab(QWidget):
             "stat_compare": self.cb_stat_compare.currentText(),
             "stat_within": self._stratify_value(self.cb_stat_within),
             "stat_and_within": self._stratify_value(self.cb_stat_and_within),
-            "stat_test": self.cb_stat_test.currentText(),
+            "stat_test": self._stat_test_key(),
             "stat_alpha": self.spin_alpha.value(),
         }
 
@@ -859,15 +1049,36 @@ class ComparisonReportTab(QWidget):
             return f"Fig {index}: Qualitative Atlas (columns: {entry['col_group_label']})"
         hue = entry.get("hue_var", "None")
         hue_part = f" × {hue}" if hue and hue != "None" else ""
+        stat_line = self._format_stat_config(entry)
         return (
             f"Fig {index}: {entry['metric']} — {entry['plot_type']} "
-            f"({entry['x_var']}{hue_part})"
+            f"({entry['x_var']}{hue_part})\n"
+            f"       Stats: {stat_line}"
+        )
+
+    def _queue_entry_tooltip(self, entry, index):
+        if entry["kind"] == "qualitative":
+            return (
+                f"Figure {index}: Qualitative Atlas\n"
+                f"Columns: {entry['col_group_label']}\n"
+                "Exports PNG and SVG in the final report."
+            )
+        sig_count = sum(1 for r in entry.get("stat_results", []) if r.significant)
+        return (
+            f"Figure {index}: {entry['metric']}\n"
+            f"Plot: {entry['plot_type']}\n"
+            f"X: {entry['x_var']}, Hue: {entry.get('hue_var', 'None')}\n"
+            f"Error bars: {entry.get('error_bar', '')}\n"
+            f"{self._format_stat_config(entry)}\n"
+            f"Significant comparisons: {sig_count}"
         )
 
     def _refresh_report_queue_list(self):
         self.list_report_queue.clear()
         for i, entry in enumerate(self.report_queue, start=1):
-            self.list_report_queue.addItem(self._queue_entry_label(entry, i))
+            item = QListWidgetItem(self._queue_entry_label(entry, i))
+            item.setToolTip(self._queue_entry_tooltip(entry, i))
+            self.list_report_queue.addItem(item)
 
     def _current_view_snapshot(self):
         if self._is_qualitative_plot():
@@ -876,7 +1087,6 @@ class ComparisonReportTab(QWidget):
                 "plot_type": QUALITATIVE_PLOT_TYPE,
                 "col_group": self._get_col_group(),
                 "col_group_label": self._col_group_label(),
-                "export_svg": self.chk_qual_svg.isChecked(),
             }
         metric = self.cb_y_metric.currentText()
         if not metric:
@@ -893,6 +1103,7 @@ class ComparisonReportTab(QWidget):
             "stat_results": stat_results,
         }
 
+
     def add_current_to_report(self):
         if self.df.empty:
             return
@@ -907,7 +1118,6 @@ class ComparisonReportTab(QWidget):
             ]
 
         self.report_queue.append(entry)
-        self.chk_include_current.setChecked(True)
         self._refresh_report_queue_list()
 
     def remove_selected_from_report(self):
@@ -929,7 +1139,8 @@ class ComparisonReportTab(QWidget):
             return
         ax = figure.add_subplot(111)
         render_quantitative_plot(
-            ax, self.df, plot_type, y_var, x_var, hue_var, error_bar=error_bar,
+            ax, self.df, plot_type, y_var, x_var, hue_var,
+            error_bar=error_bar, color_maps=self.color_maps,
         )
         figure.tight_layout()
 
@@ -1039,8 +1250,11 @@ class ComparisonReportTab(QWidget):
                 stat_results = entry.get("stat_results", [])
                 all_stat_results.extend(stat_results)
                 label = self._queue_entry_label(entry, fig_num)
+                config_line = self._format_stat_config(entry)
                 summary_sections.append(
-                    f"\n{'=' * 50}\n{label}\n{'=' * 50}\n"
+                    f"\n{'=' * 50}\n{label}\n"
+                    f"Statistical settings: {config_line}\n"
+                    f"{'=' * 50}\n"
                     + stats_module.results_to_text(
                         stat_results, alpha=entry.get("stat_alpha", 0.05),
                     )
@@ -1054,7 +1268,7 @@ class ComparisonReportTab(QWidget):
                 self.df,
                 target_dir,
                 col_group=qual["col_group"],
-                export_svg=qual.get("export_svg", False),
+                export_svg=True,
             )
             step += 1
             progress.setValue(step)

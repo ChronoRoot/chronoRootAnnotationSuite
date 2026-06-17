@@ -24,6 +24,74 @@ class StatResult:
 
 STAT_FACTOR_COLUMNS = ("genotype", "condition", "timepoint")
 
+TEST_LABELS = {
+    "auto": "Automatic (recommended)",
+    "mannwhitney": "Mann-Whitney U (2 groups)",
+    "kruskal": "Kruskal-Wallis (3+ groups)",
+    "anova": "One-way ANOVA (3+ groups, assumes normality)",
+}
+
+TEST_TOOLTIPS = {
+    "auto": (
+        "Picks Mann-Whitney U for 2 groups, Kruskal-Wallis for 3 or more. "
+        "Pairwise follow-ups always use Mann-Whitney U with Bonferroni correction."
+    ),
+    "mannwhitney": (
+        "Non-parametric test for exactly 2 independent groups. "
+        "Use when comparing two genotypes, conditions, or timepoints."
+    ),
+    "kruskal": (
+        "Non-parametric test for 3 or more groups. "
+        "With only 2 groups, Mann-Whitney U is used instead."
+    ),
+    "anova": (
+        "Parametric test for 3 or more groups; assumes roughly normal distributions. "
+        "With 2 groups, Welch t-test is used instead."
+    ),
+}
+
+
+def test_display_name(test_key: str) -> str:
+    return TEST_LABELS.get(test_key, test_key)
+
+
+def describe_test_choice(test: str, n_groups: int) -> str:
+    if n_groups < 2:
+        return "Need at least 2 groups with data in each comparison block."
+    if test == "auto":
+        if n_groups == 2:
+            return "Automatic: Mann-Whitney U for 2 groups."
+        return "Automatic: Kruskal-Wallis omnibus + Mann-Whitney pairwise comparisons."
+    if test == "mannwhitney":
+        if n_groups == 2:
+            return "Mann-Whitney U compares the two groups directly."
+        return "Mann-Whitney U is for 2 groups only; omnibus uses Kruskal-Wallis here."
+    if test == "kruskal":
+        if n_groups == 2:
+            return "2 groups: Mann-Whitney U is used (equivalent non-parametric pair test)."
+        return "Kruskal-Wallis tests whether any group differs (non-parametric)."
+    if test == "anova":
+        if n_groups == 2:
+            return "2 groups: Welch t-test is used (parametric pair test)."
+        return "One-way ANOVA tests whether any group differs (assumes normality)."
+    return ""
+
+
+def format_stat_config(
+    compare_col: str,
+    within_col: Optional[str],
+    and_within_col: Optional[str],
+    test: str,
+    alpha: float,
+) -> str:
+    parts = [f"Compare: {compare_col}"]
+    if within_col:
+        parts.append(f"within each {within_col}")
+    if and_within_col:
+        parts.append(f"and within each {and_within_col}")
+    parts.append(f"Test: {test_display_name(test)} (α={alpha})")
+    return " | ".join(parts)
+
 
 def _normalize_col(value: Optional[str]) -> Optional[str]:
     if not value or value == "None" or value == "(none)":
@@ -59,10 +127,14 @@ def _clean_values(series) -> np.ndarray:
     return pd.Series(series).dropna().astype(float).values
 
 
-def _resolve_test(test: str, n_groups: int) -> str:
-    if test != "auto":
+def _resolve_omnibus_test(test: str, n_groups: int) -> str:
+    if test == "auto":
+        return "mannwhitney" if n_groups == 2 else "kruskal"
+    if test == "mannwhitney" and n_groups > 2:
+        return "kruskal"
+    if test in ("kruskal", "anova") and n_groups == 2:
         return test
-    return "mannwhitney" if n_groups == 2 else "kruskal"
+    return test
 
 
 def _run_two_group_test(a, b, test: str):
@@ -70,25 +142,34 @@ def _run_two_group_test(a, b, test: str):
     b_vals = _clean_values(b)
     if len(a_vals) < 1 or len(b_vals) < 1:
         return None
-    resolved = _resolve_test(test, 2)
-    if resolved == "mannwhitney":
-        if len(a_vals) < 1 or len(b_vals) < 1:
-            return None
+
+    if test in ("auto", "mannwhitney", "kruskal"):
         stat, p = stats.mannwhitneyu(a_vals, b_vals, alternative="two-sided")
-        return "Mann-Whitney U", float(stat), float(p)
-    if resolved == "ttest":
+        label = "Mann-Whitney U"
+        if test == "kruskal":
+            label = "Mann-Whitney U (2-group equivalent of Kruskal-Wallis)"
+        return label, float(stat), float(p)
+
+    if test in ("anova", "ttest"):
         if len(a_vals) < 2 or len(b_vals) < 2:
             return None
         stat, p = stats.ttest_ind(a_vals, b_vals, equal_var=False)
-        return "Welch t-test", float(stat), float(p)
+        label = "Welch t-test"
+        if test == "anova":
+            label = "Welch t-test (2-group equivalent of ANOVA)"
+        return label, float(stat), float(p)
+
     return None
 
 
 def _run_omnibus(groups: dict, test: str):
     arrays = [v for v in groups.values() if len(v) >= 1]
-    if len(arrays) < 2:
+    n_groups = len(arrays)
+    if n_groups < 2:
         return None
-    resolved = _resolve_test(test, len(arrays))
+
+    resolved = _resolve_omnibus_test(test, n_groups)
+
     if resolved == "kruskal":
         stat, p = stats.kruskal(*arrays)
         return "Kruskal-Wallis", float(stat), float(p)
@@ -97,7 +178,7 @@ def _run_omnibus(groups: dict, test: str):
             return None
         stat, p = stats.f_oneway(*arrays)
         return "One-way ANOVA", float(stat), float(p)
-    if resolved == "mannwhitney" and len(arrays) == 2:
+    if resolved == "mannwhitney" and n_groups == 2:
         stat, p = stats.mannwhitneyu(arrays[0], arrays[1], alternative="two-sided")
         return "Mann-Whitney U", float(stat), float(p)
     return None
@@ -107,7 +188,6 @@ def _pairwise_comparisons(
     groups: dict,
     metric: str,
     comparison: str,
-    test: str,
     alpha: float,
     stratum: Optional[str] = None,
 ) -> List[StatResult]:
@@ -116,7 +196,7 @@ def _pairwise_comparisons(
     n_pairs = max(len(list(combinations(names, 2))), 1)
 
     for ga, gb in combinations(names, 2):
-        outcome = _run_two_group_test(groups[ga], groups[gb], test)
+        outcome = _run_two_group_test(groups[ga], groups[gb], "mannwhitney")
         if outcome is None:
             continue
         test_name, stat, p = outcome
@@ -198,8 +278,22 @@ def _compare_on_factor(
                 stratum=stratum,
             )
         )
+    elif test == "mannwhitney":
+        results.append(
+            StatResult(
+                metric=metric,
+                comparison=comparison,
+                group_a="(note)",
+                group_b=None,
+                test="Mann-Whitney U applies to 2 groups; Kruskal-Wallis could not be computed",
+                statistic=0.0,
+                p_value=1.0,
+                significant=False,
+                stratum=stratum,
+            )
+        )
     results.extend(
-        _pairwise_comparisons(groups, metric, comparison, test, alpha, stratum)
+        _pairwise_comparisons(groups, metric, comparison, alpha, stratum)
     )
     return results
 
@@ -243,7 +337,11 @@ def run_comparisons_structured(
 
 def results_to_text(results: List[StatResult], alpha: float = 0.05) -> str:
     if not results:
-        return "No statistical comparisons could be computed for the current selection."
+        return (
+            "No statistical comparisons could be computed.\n"
+            "Common reasons: only one group in a stratum, too few plants per group, "
+            "or missing values for the selected metric."
+        )
 
     lines = [
         "Statistical Analysis Summary",

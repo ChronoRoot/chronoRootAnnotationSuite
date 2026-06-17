@@ -13,7 +13,6 @@ def calculate_optimal_canvas(df, buffer=50):
     Scans the dataframe to determine the minimal canvas size and optimal seed placement.
     Rotates all hulls around (0,0) to find the absolute maximum geometric extents.
     """
-    print("Scanning dataset to determine minimal Atlas size...")
     
     global_min_x, global_max_x = 0, 0
     global_min_y, global_max_y = 0, 0
@@ -73,7 +72,6 @@ def calculate_optimal_canvas(df, buffer=50):
     canvas_w = int(dest_ini_x + global_max_x + buffer)
     canvas_h = int(dest_ini_y + global_max_y + buffer)
     
-    print(f"Optimal Geometry: Size[{canvas_h}, {canvas_w}], Seed Center[{dest_ini_y}, {dest_ini_x}]")
     return (canvas_w, canvas_h), (dest_ini_x, dest_ini_y)
 
 def get_rotated_hulls(row, dest_ini):
@@ -182,7 +180,6 @@ def draw_atlas_grid_on_figure(df, fig, canvas_dims, dest_ini, col_group="conditi
 
 def generate_qualitative_grid(df, out_dir, col_group="condition", export_svg=False):
     """Wrapper used by the Full Report generator to save the atlas to disk."""
-    print("Generating Qualitative Atlas Grid...")
     
     # 1. Calculate dynamic bounds first
     canvas_dims, dest_ini = calculate_optimal_canvas(df)
