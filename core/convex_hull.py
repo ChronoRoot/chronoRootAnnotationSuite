@@ -117,15 +117,28 @@ def get_rotated_hulls(row, dest_ini):
     
     return np.int32(warped.reshape(-1, 2))
 
-def draw_atlas_grid_on_figure(df, fig, canvas_dims, dest_ini):
+def _build_atlas_groups(df, col_group="condition"):
+    """Build column group labels for the qualitative atlas grid."""
+    df_copy = df.copy()
+    if col_group == "genotype":
+        df_copy["group"] = df_copy["genotype"].astype(str)
+    elif col_group == "condition":
+        df_copy["group"] = df_copy["condition"].astype(str)
+    else:
+        df_copy["group"] = (
+            df_copy["condition"].astype(str) + " | " + df_copy["genotype"].astype(str)
+        )
+    return df_copy
+
+
+def draw_atlas_grid_on_figure(df, fig, canvas_dims, dest_ini, col_group="condition"):
     """Draws the NxM grid of Accumulated Convex Hull heatmaps."""
     canvas_w, canvas_h = canvas_dims  # Unpack the dynamic dimensions
     
     # Drop NAs to prevent weird "nan" headers
     timepoints = sorted(df['timepoint'].dropna().unique(), key=natural_sort_key)
     
-    df_copy = df.copy()
-    df_copy['group'] = df_copy['condition'].astype(str) + " | " + df_copy['genotype'].astype(str)
+    df_copy = _build_atlas_groups(df, col_group)
     groups = sorted(df_copy['group'].dropna().unique())
 
     axes = fig.subplots(len(timepoints), len(groups), squeeze=False)
@@ -167,22 +180,28 @@ def draw_atlas_grid_on_figure(df, fig, canvas_dims, dest_ini):
 
     fig.tight_layout()
 
-def generate_qualitative_grid(df, out_dir):
+def generate_qualitative_grid(df, out_dir, col_group="condition", export_svg=False):
     """Wrapper used by the Full Report generator to save the atlas to disk."""
     print("Generating Qualitative Atlas Grid...")
     
     # 1. Calculate dynamic bounds first
     canvas_dims, dest_ini = calculate_optimal_canvas(df)
     
-    timepoints = df['timepoint'].dropna().unique()
-    groups = (df['condition'].astype(str) + " | " + df['genotype'].astype(str)).unique()
+    df_copy = _build_atlas_groups(df, col_group)
+    timepoints = df_copy['timepoint'].dropna().unique()
+    groups = df_copy['group'].dropna().unique()
     
     # Make the figure large enough for high-res saving
-    fig = plt.figure(figsize=(5 * len(groups), 6 * len(timepoints)))
+    n_groups = max(len(groups), 1)
+    n_timepoints = max(len(timepoints), 1)
+    fig = plt.figure(figsize=(5 * n_groups, 6 * n_timepoints))
     
     # 2. Pass dynamic variables to the drawing function
-    draw_atlas_grid_on_figure(df, fig, canvas_dims, dest_ini)
+    draw_atlas_grid_on_figure(df, fig, canvas_dims, dest_ini, col_group=col_group)
     
     grid_path = os.path.join(out_dir, "Qualitative_Atlas_Grid.png")
     fig.savefig(grid_path, dpi=300, bbox_inches='tight', facecolor='white')
+    if export_svg:
+        svg_path = os.path.join(out_dir, "Qualitative_Atlas_Grid.svg")
+        fig.savefig(svg_path, format='svg', bbox_inches='tight', facecolor='white')
     plt.close(fig)

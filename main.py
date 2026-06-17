@@ -73,6 +73,7 @@ class ChronoRootAnnotationSuite(QMainWindow):
         self.current_base_name = ""
         self.current_file_path = ""
         self._pending_load_data = None
+        self._pending_open_annotation_tab = False
         self._pending_mark_finished = False
         self._pending_export_plate_meta = None
         self._is_closing = False
@@ -93,6 +94,7 @@ class ChronoRootAnnotationSuite(QMainWindow):
             "output_root": ".",
             "output_mode": "task_folder",
             "saved_genotypes": ["Col-0", "Ler", "Cvi-0"],
+            "report_search_roots": [],
             "calib_mode": "Scanner DPI",
             "calib_val": "600",
         }
@@ -110,6 +112,8 @@ class ChronoRootAnnotationSuite(QMainWindow):
             self.config["output_mode"] = "task_folder"
         if "saved_genotypes" not in self.config:
             self.config["saved_genotypes"] = ["Col-0", "Ler", "Cvi-0"]
+        if "report_search_roots" not in self.config:
+            self.config["report_search_roots"] = []
 
     def save_interface_config(self):
         try:
@@ -124,6 +128,7 @@ class ChronoRootAnnotationSuite(QMainWindow):
             cfg["input_root"] = self.browser.in_dir
             cfg["output_root"] = self.browser.out_dir
             cfg["output_mode"] = self.config.get("output_mode", "task_folder")
+            cfg["report_search_roots"] = self.config.get("report_search_roots", [])
             cfg["calib_mode"] = self.panel_phenomics.cb_calibration.currentText()
             cfg["calib_val"] = self.panel_phenomics.in_calib_val.text()
 
@@ -328,6 +333,10 @@ class ChronoRootAnnotationSuite(QMainWindow):
             self.panel_phenomics._on_measure_clicked
         )
 
+        self.workspaces.report_file_panel.open_requested.connect(
+            self.open_task_from_metrics
+        )
+
         self.global_model.register_selection_callback(self._on_model_selection_changed)
         self.global_model.register_data_callback(self._on_model_data_changed)
 
@@ -447,7 +456,7 @@ class ChronoRootAnnotationSuite(QMainWindow):
             self.control_tabs.setEnabled(False)
             self.middle_stack.setCurrentIndex(1)
             if self.splitter.sizes()[1] == 0:
-                self.splitter.setSizes([300, 350, 950])
+                self.splitter.setSizes([300, 420, 880])
             self.workspaces.report_file_panel.refresh_file_list()
 
         elif index == 5:
@@ -721,9 +730,25 @@ class ChronoRootAnnotationSuite(QMainWindow):
                 self.save_task(mark_finished=False)
                 return
             if reply == QMessageBox.Cancel:
+                self._pending_open_annotation_tab = False
                 return
 
         self._execute_load(data)
+
+    def open_task_from_metrics(self, metrics_path):
+        from tabs.report_tab import resolve_task_image_path
+
+        image_path = resolve_task_image_path(metrics_path)
+        if not image_path:
+            QMessageBox.warning(
+                self,
+                "Source Image Not Found",
+                "Could not resolve the original image for this metrics file.\n"
+                f"Metrics: {metrics_path}",
+            )
+            return
+        self._pending_open_annotation_tab = True
+        self.load_file({"path": image_path})
 
     def _execute_load(self, data):
         file_path = data["path"]
@@ -787,6 +812,10 @@ class ChronoRootAnnotationSuite(QMainWindow):
 
         self.metadata_dirty = False
         self._offer_analysis_restore()
+
+        if self._pending_open_annotation_tab:
+            self._pending_open_annotation_tab = False
+            self.workspaces.setCurrentIndex(0)
 
         self.workspaces.canvas_review.refresh_canvas()
         self.update_canvas_ruler()
