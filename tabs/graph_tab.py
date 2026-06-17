@@ -6,7 +6,7 @@ from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QPushButton,
                              QLabel, QSpinBox, QFrame, QFormLayout, 
                              QComboBox, QGridLayout, QStyleOption, QStyle,
                              QListWidget, QListWidgetItem,
-                             QScrollArea, QHBoxLayout)
+                             QHBoxLayout, QSizePolicy)
 from PyQt5.QtGui import QImage, QPixmap, QColor, QPainter
 from PyQt5.QtCore import Qt, pyqtSignal
 
@@ -579,18 +579,13 @@ class GraphToolPanel(QWidget):
         self.model.register_selection_callback(self.on_selection_changed)
 
     def init_ui(self):
-        # 1. Master Layout
+        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(0, 0, 0, 0)
-        
-        # 2. Scroll Area Setup
-        scroll_area = QScrollArea()
-        scroll_area.setWidgetResizable(True)
-        scroll_area.setFrameShape(QFrame.NoFrame)
-        
-        scroll_content = QWidget()
-        layout = QVBoxLayout(scroll_content)
+
+        layout = QVBoxLayout()
         layout.setContentsMargins(5, 5, 5, 5)
+        layout.setSpacing(4)
 
         graph_header = QHBoxLayout()
         graph_header.addWidget(QLabel("<b>Root tracing check</b>"))
@@ -665,19 +660,19 @@ class GraphToolPanel(QWidget):
         self.list_target_classes.itemChanged.connect(self.push_params)
         layout.addWidget(self.list_target_classes)
 
-        layout.addStretch()
+        main_layout.addLayout(layout)
 
-        # Finalize Scroll Area
-        scroll_area.setWidget(scroll_content)
-        main_layout.addWidget(scroll_area)
-
-        # --- Apply Button (Sticky at the bottom) ---
+        # --- Apply Button (sticky at the bottom) ---
         self.btn_apply_mask = QPushButton("Save root tracing for this plant")
         self.btn_apply_mask.setToolTip("Commit the traced main/lateral colors to this plant's mask.")
-        self.btn_apply_mask.setStyleSheet("background-color: #d4edda; font-weight: bold; color: #155724; padding: 15px; font-size: 14px;")
+        self.btn_apply_mask.setFixedHeight(32)
+        self.btn_apply_mask.setStyleSheet(
+            "background-color: #d4edda; font-weight: bold; color: #155724; font-size: 12px;"
+        )
         self.btn_apply_mask.clicked.connect(self.canvas_tab.apply_graph_colors)
         
         main_layout.addWidget(self.btn_apply_mask)
+        self.setFixedHeight(self.sizeHint().height())
         self.toggle_buttons(False)
 
     def update_mode(self):

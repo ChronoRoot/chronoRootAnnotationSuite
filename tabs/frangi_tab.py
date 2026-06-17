@@ -2,9 +2,8 @@ import cv2
 import numpy as np
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QGridLayout, 
                              QPushButton, QLabel, QSpinBox, QDoubleSpinBox, 
-                             QCheckBox, QComboBox, QFormLayout, QStyleOption, QStyle, QSizePolicy,
-                             QListWidget, QListWidgetItem,
-                             QScrollArea, QFrame, QHBoxLayout)
+                             QCheckBox, QComboBox, QFrame, QStyleOption, QStyle, QSizePolicy,
+                             QHBoxLayout)
 
 from components.ui_help import HELP_FRANGI, show_help
 from PyQt5.QtGui import QImage, QPixmap, QColor, QPainter
@@ -13,6 +12,23 @@ from PyQt5.QtCore import Qt, QTimer
 from skimage.filters import frangi, apply_hysteresis_threshold
 from skimage.morphology import skeletonize
 from scipy.ndimage import label, distance_transform_edt
+
+
+class _NoWheelSpinBox(QSpinBox):
+    def wheelEvent(self, event):
+        if self.hasFocus():
+            super().wheelEvent(event)
+        else:
+            event.ignore()
+
+
+class _NoWheelDoubleSpinBox(QDoubleSpinBox):
+    def wheelEvent(self, event):
+        if self.hasFocus():
+            super().wheelEvent(event)
+        else:
+            event.ignore()
+
 
 # --- FIXED: Upgraded to QWidget with manual paintEvent to stop UI bouncing ---
 class AspectRatioLabel(QWidget):
@@ -414,115 +430,165 @@ class FrangiToolPanel(QWidget):
         self.model.register_selection_callback(self.on_selection_changed)
 
     def init_ui(self):
-        # 1. Master Layout (holds the scroll area AND the sticky button)
-        main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(0, 0, 0, 0)
-        
-        # 2. Scroll Area Setup
-        scroll_area = QScrollArea()
-        scroll_area.setWidgetResizable(True)
-        scroll_area.setFrameShape(QFrame.NoFrame)
-        
-        scroll_content = QWidget()
-        layout = QVBoxLayout(scroll_content) # This layout holds the actual parameters
-        layout.setContentsMargins(5, 5, 5, 5)
+        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
 
+        # Main layout with very tight margins
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(4, 4, 4, 4)
+        main_layout.setSpacing(4)
+
+        # Helper functions for inputs
+        def make_spin(val, vmin, vmax, step=1):
+            sb = _NoWheelSpinBox()
+            sb.setRange(vmin, vmax)
+            sb.setSingleStep(step)
+            sb.setValue(val)
+            sb.setMaximumWidth(65) # Widened slightly to use horizontal space
+            return sb
+
+        def make_dspin(val, vmin, vmax, step=0.01):
+            sb = _NoWheelDoubleSpinBox()
+            sb.setRange(vmin, vmax)
+            sb.setSingleStep(step)
+            sb.setValue(val)
+            sb.setMaximumWidth(65)
+            return sb
+
+        def separator():
+            line = QFrame()
+            line.setFrameShape(QFrame.HLine)
+            line.setFrameShadow(QFrame.Sunken)
+            return line
+
+        # --- Header ---
         frangi_header = QHBoxLayout()
-        frangi_header.addWidget(QLabel("<b>Centerline cleanup (optional)</b>"))
+        frangi_header.setContentsMargins(0, 0, 0, 0)
+        frangi_header.addWidget(QLabel("<b>Root Cleanup Tools</b>"))
         frangi_header.addStretch()
         btn_help = QPushButton("Help")
-        btn_help.setToolTip("Open centerline cleanup help")
         btn_help.clicked.connect(lambda: show_help(self, "Centerline Help", HELP_FRANGI))
         frangi_header.addWidget(btn_help)
-        layout.addLayout(frangi_header)
-        
-        # --- Form Layout for Numeric Parameters ---
-        form = QFormLayout()
-        
-        def make_spin(val, vmin, vmax, step=1):
-            sb = QSpinBox(); sb.setRange(vmin, vmax); sb.setSingleStep(step); sb.setValue(val)
-            return sb
-            
-        def make_dspin(val, vmin, vmax, step=0.01):
-            sb = QDoubleSpinBox(); sb.setRange(vmin, vmax); sb.setSingleStep(step); sb.setValue(val)
-            return sb
+        main_layout.addLayout(frangi_header)
+        main_layout.addWidget(separator())
 
-        self.sp_search = make_spin(self.canvas_tab.p_search_range, 0, 50)
-        self.sp_bridge = make_spin(self.canvas_tab.p_bridge_gaps, 0, 50)
-        self.sp_min_part = make_spin(self.canvas_tab.p_min_part, 1, 500)
-        self.sp_f_low = make_dspin(self.canvas_tab.p_faint_sens, 0.0, 1.0)
-        self.sp_f_high = make_dspin(self.canvas_tab.p_strong_conf, 0.0, 1.0)
-        self.sp_thick = make_spin(self.canvas_tab.p_final_thick, 1, 10)
+        # --- Section 1: Modes (Expanded Labels & Tooltips) ---
+        mode_grid = QGridLayout()
+        mode_grid.setContentsMargins(0, 0, 0, 0)
+        mode_grid.setVerticalSpacing(2)
         
-        self.sp_search.setToolTip("How far to search for faint root signal (pixels).")
-        self.sp_bridge.setToolTip("Bridge small gaps in faint roots (pixels).")
-        self.sp_min_part.setToolTip("Ignore specks smaller than this size (pixels).")
-        self.sp_f_low.setToolTip("Sensitivity for faint root tissue (lower = more inclusive).")
-        self.sp_f_high.setToolTip("Confidence for solid root core (higher = stricter).")
-        self.sp_thick.setToolTip("Final mask thickness after centerline correction.")
-        
-        form.addRow("Search Range (px):", self.sp_search)
-        form.addRow("Bridge Gaps (px):", self.sp_bridge)
-        form.addRow("Ignore Specks < (px):", self.sp_min_part)
-        form.addRow("Low Thresh (Faint):", self.sp_f_low)
-        form.addRow("High Thresh (Core):", self.sp_f_high)        
-        form.addRow("Final Thick:", self.sp_thick)
-        layout.addLayout(form)
-        
-        # --- Checkboxes ---
-        self.chk_correction = QCheckBox("Apply Centerline Correction")
+        self.chk_correction = QCheckBox("Apply Correction")
         self.chk_correction.setChecked(self.canvas_tab.p_centerline_correction)
-        self.chk_correction.setToolTip("Thin and center the mask along the root midline.")
-        layout.addWidget(self.chk_correction)
-
+        self.chk_correction.setToolTip("On: Redraws roots using Frangi heatmap.\nOff: Simply reshapes existing mask to uniform width.")
+        
         self.chk_dark = QCheckBox("Dark Roots")
         self.chk_dark.setChecked(self.canvas_tab.p_roots_dark)
-        self.chk_dark.setToolTip("Enable if roots appear darker than the agar background.")
-        layout.addWidget(self.chk_dark)
+        self.chk_dark.setToolTip("On: For infrared/backlight (dark roots, light background).\nOff: For scanned images (light roots, dark agar).")
         
-        self.chk_disconnected = QCheckBox("Allow Disconnected Parts")
+        self.chk_disconnected = QCheckBox("Keep Disconnected Pieces")
         self.chk_disconnected.setChecked(self.canvas_tab.p_allow_disconnected)
-        self.chk_disconnected.setToolTip("Keep separate root fragments instead of merging them.")
-        layout.addWidget(self.chk_disconnected)
+        self.chk_disconnected.setToolTip("On: Keep all floating root pieces.\nOff: Discard floaters and keep only the main connected root system.")
+        
+        mode_grid.addWidget(self.chk_correction, 0, 0)
+        mode_grid.addWidget(self.chk_dark, 0, 1)
+        mode_grid.addWidget(self.chk_disconnected, 1, 0, 1, 2)
+        main_layout.addLayout(mode_grid)
+        main_layout.addWidget(separator())
 
-        # --- Dropdowns ---
-        layout.addWidget(QLabel("Image Mode:"))
+        # --- Section 2: Structure & Thresholds (Expanded Labels & Tooltips) ---
+        main_layout.addWidget(QLabel("<b>Thresholds</b>"))
+        param_grid = QGridLayout()
+        param_grid.setContentsMargins(0, 0, 0, 0)
+        param_grid.setHorizontalSpacing(8) 
+        param_grid.setVerticalSpacing(2)
+        
+        self.sp_thick = make_spin(self.canvas_tab.p_final_thick, 1, 10)
+        self.sp_thick.setToolTip("Final root mask width (pixels).\nUse 1 for standard resolution, 2 or 3 for high-resolution images.")
+        
+        self.sp_f_high = make_dspin(self.canvas_tab.p_strong_conf, 0.0, 1.0)
+        self.sp_f_high.setToolTip("Strict threshold (0-1) for solid root tissue.\nRaise to drop background noise; lower if the root core is missing.")
+        
+        self.sp_f_low = make_dspin(self.canvas_tab.p_faint_sens, 0.0, 1.0)
+        self.sp_f_low.setToolTip("Relaxed threshold (0-1).\nRecovers faint lateral tips that physically connect to core roots (Hysteresis).")
+        
+        self.sp_search = make_spin(self.canvas_tab.p_search_range, 0, 50)
+        self.sp_search.setToolTip("Pixels to look outside the current mask boundary for missing root segments.")
+        
+        self.sp_bridge = make_spin(self.canvas_tab.p_bridge_gaps, 0, 50)
+        self.sp_bridge.setToolTip("Maximum gap (pixels) to jump across broken heatmap segments.\nRaise to connect 'dotted' roots.")
+        
+        self.sp_min_part = make_spin(self.canvas_tab.p_min_part, 1, 500)
+        self.sp_min_part.setToolTip("Discard isolated heatmap blobs smaller than this pixel count.\nRaise to remove salt-and-pepper noise.")
+
+        param_grid.addWidget(QLabel("Final Width:"), 0, 0)
+        param_grid.addWidget(self.sp_thick, 0, 1)
+        param_grid.addWidget(QLabel("Search Radius:"), 0, 2)
+        param_grid.addWidget(self.sp_search, 0, 3)
+
+        param_grid.addWidget(QLabel("Core Threshold:"), 1, 0)
+        param_grid.addWidget(self.sp_f_high, 1, 1)
+        param_grid.addWidget(QLabel("Bridge Gaps:"), 1, 2)
+        param_grid.addWidget(self.sp_bridge, 1, 3)
+
+        param_grid.addWidget(QLabel("Faint Threshold:"), 2, 0)
+        param_grid.addWidget(self.sp_f_low, 2, 1)
+        param_grid.addWidget(QLabel("Min Size:"), 2, 2)
+        param_grid.addWidget(self.sp_min_part, 2, 3)
+        main_layout.addLayout(param_grid)
+        main_layout.addWidget(separator())
+
+        # --- Section 3: Image Adjustments (Expanded Labels & Tooltips) ---
+        main_layout.addWidget(QLabel("<b>Image Adjustments</b>"))
+        img_grid = QGridLayout()
+        img_grid.setContentsMargins(0, 0, 0, 0)
+        img_grid.setHorizontalSpacing(8)
+        img_grid.setVerticalSpacing(2)
+        
         self.cb_channel = QComboBox()
-        self.cb_channel.addItems(["Red-Blue Avg (RB)", "Standard Avg", "Red Channel", "Green Channel", "Blue Channel"])
+        self.cb_channel.addItems(["Red-Blue Avg", "Standard Avg", "Red", "Green", "Blue"])
         self.cb_channel.setCurrentText(self.canvas_tab.p_channel_mode)
-        layout.addWidget(self.cb_channel)
-
-        layout.addWidget(QLabel("Contrast Enhancement:"))
+        self.cb_channel.setToolTip("Color channel used for grayscale conversion.\n'Red-Blue Avg' works best for typical scanned plates.")
+        
         self.cb_clahe = QComboBox()
         self.cb_clahe.addItems(["None", "Before Smoothing", "After Smoothing"])
         self.cb_clahe.setCurrentText(self.canvas_tab.p_clahe_mode)
-        layout.addWidget(self.cb_clahe)
+        self.cb_clahe.setToolTip("Local contrast boost (CLAHE) to fix uneven lighting or shadows.")
         
-        layout.addWidget(QLabel("Smoothing:"))
         self.cb_smooth = QComboBox()
         self.cb_smooth.addItems(["None", "Light", "Medium", "High"])
         self.cb_smooth.setCurrentText(self.canvas_tab.p_smooth_mode)
-        layout.addWidget(self.cb_smooth)
+        self.cb_smooth.setToolTip("Blurs the image to reduce noise before generating the root heatmap.")
         
-        # --- Target Classes ---
-        layout.addWidget(QLabel("<b>Classes to Modify:</b>"))
-        self.list_target_classes = QListWidget()
-        self.list_target_classes.setFixedHeight(100)
+        img_grid.addWidget(QLabel("Image Channel:"), 0, 0)
+        img_grid.addWidget(self.cb_channel, 0, 1)
+        img_grid.addWidget(QLabel("Contrast Enhancement:"), 1, 0)
+        img_grid.addWidget(self.cb_clahe, 1, 1)
+        img_grid.addWidget(QLabel("Smooth Filter:"), 2, 0)
+        img_grid.addWidget(self.cb_smooth, 2, 1)
+        main_layout.addLayout(img_grid)
+        main_layout.addWidget(separator())
 
-        classes = [(1, "Main Root"), (2, "Lateral Root"), (3, "Seed"),
-                   (4, "Hypocotyl"), (5, "Leaves/Aerial"), (6, "Petiole")]
+        # --- Section 4: Target Classes ---
+        main_layout.addWidget(QLabel("<b>Classes to Refine</b>"))
+        class_grid = QGridLayout()
+        class_grid.setContentsMargins(0, 0, 0, 0)
+        class_grid.setHorizontalSpacing(4)
+        class_grid.setVerticalSpacing(2)
+        
+        self.class_checkboxes = {}
+        class_defs = [
+            (1, "Main Root"), (2, "Lateral Root"), (3, "Seed"),
+            (4, "Hypocotyl"), (5, "Leaves/Aerial"), (6, "Petiole"),
+        ]
+        for i, (cid, name) in enumerate(class_defs):
+            chk = QCheckBox(name)
+            chk.setChecked(cid in self.canvas_tab.p_target_classes)
+            chk.setToolTip("Checked: Refines this root class.\nUnchecked: Preserves current mask exactly without changes.")
+            chk.stateChanged.connect(self.push_params)
+            self.class_checkboxes[cid] = chk
+            class_grid.addWidget(chk, i // 2, i % 2)
+        main_layout.addLayout(class_grid)
 
-        for cid, name in classes:
-            item = QListWidgetItem(f"{cid} - {name}")
-            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-            item.setCheckState(Qt.Checked if cid in self.canvas_tab.p_target_classes else Qt.Unchecked)
-            item.setData(Qt.UserRole, cid)
-            self.list_target_classes.addItem(item)
-
-        self.list_target_classes.itemChanged.connect(self.push_params)
-        layout.addWidget(self.list_target_classes)
-
-        # --- Connections ---
+        # --- Connect Signals ---
         self.sp_search.valueChanged.connect(self.push_params)
         self.sp_bridge.valueChanged.connect(self.push_params)
         self.sp_min_part.valueChanged.connect(self.push_params)
@@ -535,28 +601,19 @@ class FrangiToolPanel(QWidget):
         self.cb_clahe.currentIndexChanged.connect(self.push_params)
         self.cb_smooth.currentIndexChanged.connect(self.push_params)
         self.chk_correction.stateChanged.connect(self.push_params)
+
+        # --- Bottom Stretch & Button ---
+        main_layout.addStretch(1)
         
-        layout.addStretch() # Push everything in the scroll area up
-
-        # Finalize Scroll Area
-        scroll_area.setWidget(scroll_content)
-        main_layout.addWidget(scroll_area) # Add scrolling content to main layout
-
-        # --- Accept Button (Sticky at the bottom, outside the scroll area) ---
         self.btn_accept = QPushButton("Apply to this plant")
-        self.btn_accept.setToolTip(
-            "Apply the proposed refinement to this plant. "
-            "Use Save Progress or Finish Annotation to save to disk."
-        )
-        self.btn_accept.setStyleSheet("background-color: #cceeff; font-weight: bold; color: black; padding: 15px; font-size: 14px;")
+        self.btn_accept.setToolTip("Apply the proposed refinement to this plant.\nRemember to Save Progress afterwards to commit changes to disk.")
         self.btn_accept.clicked.connect(self.canvas_tab.accept_proposal)
-        
         main_layout.addWidget(self.btn_accept)
+
         self.toggle_buttons(False)
 
     def push_params(self):
         """Intercepts the UI signal and restarts the countdown timer."""
-        # Wait 300 milliseconds after the last interaction before processing
         self.debounce_timer.start(300)
 
     def execute_push_params(self):
@@ -574,13 +631,7 @@ class FrangiToolPanel(QWidget):
         self.canvas_tab.p_clahe_mode = self.cb_clahe.currentText()
         self.canvas_tab.p_smooth_mode = self.cb_smooth.currentText()
         
-        # Extract checked classes
-        targets = []
-        for i in range(self.list_target_classes.count()):
-            item = self.list_target_classes.item(i)
-            if item.checkState() == Qt.Checked:
-                targets.append(item.data(Qt.UserRole))
-                
+        targets = [cid for cid, chk in self.class_checkboxes.items() if chk.isChecked()]
         self.canvas_tab.p_target_classes = targets
         
         if self.model.active_uid:

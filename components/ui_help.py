@@ -29,11 +29,30 @@ HELP_ANNOTATION = """<b>Annotation</b><br><br>
 • <b>Review all labels</b> — see every label at once.<br><br>
 <b>Navigation:</b> Ctrl+drag to pan, wheel to zoom."""
 
-HELP_FRANGI = """<b>Centerline Cleanup</b><br><br>
-Select a plant in the list.<br>
-Compare the panels for that plant.<br>
-Click <b>Apply to this plant</b> if the refinement looks better.<br>
-Use <b>Save Progress</b> or <b>Finish Annotation</b> to write changes to disk."""
+HELP_FRANGI = """<b>Root Refinement & Cleanup</b><br><br>
+Select a plant in the list. Compare the <b>Current Segmentation</b> with the <b>Proposed Refinement</b>.<br>
+Tune parameters until the refinement panel matches the true root structure, then click <b>Apply to this plant</b>.<br><br>
+
+<b>Core Processing Modes</b><br>
+• <b>Centerline correction</b> — <b>On:</b> Uses Frangi vesselness to find and redraw roots based on the image heatmap. <b>Off:</b> Skips the heatmap and simply reshapes your <i>existing</i> mask to a uniform width.<br>
+• <b>Dark roots</b> — <b>On:</b> Use for infrared or backlight pictures (dark roots on a light background). <b>Off:</b> Use for standard scanned images (light roots on dark agar).<br>
+• <b>Allow disconnected</b> — <b>On:</b> Keeps every separate root fragment. <b>Off:</b> Discards disconnected floating pieces and keeps only the main connected root system.<br><br>
+
+<b>Thresholds & Structure</b><br>
+• <b>Thick</b> — The final uniform width of the root mask. Use <b>1</b> for standard/low-resolution images. Increase to <b>2 or 3</b> for high-resolution images.<br>
+• <b>Core (Strong Conf.)</b> — The strict heatmap threshold (0–1). Only very clear, high-confidence root pixels pass. Raise this to drop background noise; lower it if the main root core is disappearing.<br>
+• <b>Faint (Weak Conf.)</b> — The relaxed threshold (0–1). Weak pixels are kept <i>only</i> if they physically connect to a 'Core' pixel (Hysteresis). Lower this to recover faint lateral tips that branch off the main root.<br>
+• <b>Search</b> — How many pixels outside the current mask to look for missing roots. Raise this when root tips are cut off too early.<br>
+• <b>Bridge</b> — Maximum gap (in pixels) to jump across broken heatmap segments. Raise to connect "dotted" roots; lower if neighboring separate roots are merging together.<br>
+• <b>Ignore</b> — Discards heatmap blobs smaller than this pixel count. Raise to remove salt-and-pepper noise; lower to keep tiny lateral roots.<br><br>
+
+<b>Image Adjustments</b><br>
+• <b>Image</b> — Channel used for the grayscale panel. "Red-Blue Avg" works best for typical plates. Switch if contrast is poor.<br>
+• <b>Contrast</b> — Local contrast boost (CLAHE). Use if the image has uneven lighting.<br>
+• <b>Smooth</b> — Blurs the grayscale panel to reduce noise. Use Light/Medium/High if the resulting heatmap looks too speckled.<br>
+• <b>Class Checkboxes</b> — Only checked root classes are refined. Unchecked classes are copied perfectly from the current mask.<br><br>
+
+Use <b>Save Progress</b> or <b>Finish Annotation</b> to write applied changes to disk."""
 
 HELP_GRAPH = """<b>Root Tracing Check</b><br><br>
 Select each plant and confirm skeleton and main-root path look correct.<br><br>

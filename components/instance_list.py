@@ -1,6 +1,6 @@
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                              QPushButton, QTreeWidget, QHeaderView, QTreeWidgetItem,
-                             QMessageBox)
+                             QMessageBox, QSizePolicy)
 from PyQt5.QtGui import QIcon, QPixmap, QColor
 from PyQt5.QtCore import Qt, pyqtSignal
 
@@ -20,6 +20,7 @@ class InstanceListPanel(QWidget):
         self.workspaces = workspaces
         self.review_tool_panel = review_tool_panel
         self.annotation_tab_index = annotation_tab_index
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.init_ui()
 
         self.model.register_data_callback(self.populate_list)
@@ -28,7 +29,7 @@ class InstanceListPanel(QWidget):
     def init_ui(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setAlignment(Qt.AlignTop)
+        layout.setSpacing(2)
 
         self.lbl_instance_count = QLabel("<b>Plants (0 total):</b>")
         layout.addWidget(self.lbl_instance_count)
@@ -38,14 +39,14 @@ class InstanceListPanel(QWidget):
         self.list_instances.setSortingEnabled(True)
         self.list_instances.setRootIsDecorated(False)
         self.list_instances.setSelectionMode(QTreeWidget.ExtendedSelection)
-        self.list_instances.setMinimumHeight(150)
-        self.list_instances.setMaximumHeight(300)
+        self.list_instances.setMinimumHeight(120)
+        self.list_instances.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
         self.list_instances.header().setSectionResizeMode(0, QHeaderView.ResizeToContents)
         self.list_instances.header().setSectionResizeMode(1, QHeaderView.Stretch)
         self.list_instances.itemSelectionChanged.connect(self.on_selection_changed)
         self.list_instances.itemClicked.connect(self.on_item_clicked)
-        layout.addWidget(self.list_instances)
+        layout.addWidget(self.list_instances, stretch=1)
 
         btn_layout = QHBoxLayout()
         self.btn_new = QPushButton("+ New")
@@ -78,6 +79,12 @@ class InstanceListPanel(QWidget):
         if hasattr(self.workspaces, "currentIndex"):
             return self.workspaces.currentIndex() == self.annotation_tab_index
         return True
+
+    def sync_toolbar_for_tab(self, workspace_index):
+        enabled = workspace_index == self.annotation_tab_index
+        self.btn_new.setEnabled(enabled)
+        self.btn_merge.setEnabled(enabled)
+        self.btn_del.setEnabled(enabled)
 
     def populate_list(self):
         self.lbl_instance_count.setText(f"<b>Plants ({len(self.model.masks)} total):</b>")

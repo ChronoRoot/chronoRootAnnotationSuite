@@ -8,8 +8,10 @@ import json
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
                              QSplitter, QStackedWidget, QProgressDialog, QMessageBox,
                              QLabel, QFrame, QInputDialog, QTabWidget, QGroupBox,
-                             QCheckBox, QRadioButton, QPushButton)
-from PyQt5.QtCore import Qt, QThread, pyqtSignal
+                             QCheckBox, QRadioButton, QPushButton, QSizePolicy, QToolButton,
+                             QStyle)
+from PyQt5.QtGui import QIcon
+from PyQt5.QtCore import Qt, QThread, pyqtSignal, QSize
 
 from core.model import (
     PlantImageModel,
@@ -58,6 +60,8 @@ class ModelWorker(QThread):
 
 
 class ChronoRootAnnotationSuite(QMainWindow):
+    COLLAPSED_PANEL_WIDTH = 28
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("ChronoRoot Annotation Suite")
@@ -135,7 +139,14 @@ class ChronoRootAnnotationSuite(QMainWindow):
             cfg["output_root"] = self.browser.out_dir
             cfg["output_mode"] = self.config.get("output_mode", "task_folder")
             cfg["report_search_roots"] = self.config.get("report_search_roots", [])
-            cfg["panel_sizes_report"] = list(self.splitter.sizes())
+            sizes = list(self.splitter.sizes())
+            if not self._focus_mode_active:
+                ws = self.workspaces.currentIndex()
+                if sizes[1] == 0 and ws in (0, 1, 2, 3, 5):
+                    sizes[1] = self._saved_middle_width or 320
+                elif sizes[1] > 0:
+                    self._saved_middle_width = sizes[1]
+            cfg["panel_sizes_report"] = sizes
             cfg["calib_mode"] = self.panel_phenomics.cb_calibration.currentText()
             cfg["calib_val"] = self.panel_phenomics.in_calib_val.text()
 
@@ -146,9 +157,7 @@ class ChronoRootAnnotationSuite(QMainWindow):
             }
 
             f_targets = [
-                self.panel_frangi.list_target_classes.item(i).data(Qt.UserRole)
-                for i in range(self.panel_frangi.list_target_classes.count())
-                if self.panel_frangi.list_target_classes.item(i).checkState() == Qt.Checked
+                cid for cid, chk in self.panel_frangi.class_checkboxes.items() if chk.isChecked()
             ]
             cfg["frangi"] = {
                 "search_range": self.panel_frangi.sp_search.value(),
@@ -190,20 +199,24 @@ class ChronoRootAnnotationSuite(QMainWindow):
         main_layout = QVBoxLayout(main_widget)
         main_layout.setContentsMargins(4, 4, 4, 4)
 
-        panel_bar = QHBoxLayout()
-        self.btn_toggle_files = QPushButton("Hide Files")
-        self.btn_toggle_files.setToolTip("Show or hide the project file browser")
-        self.btn_toggle_files.clicked.connect(self.toggle_browser_panel)
-        self.btn_toggle_plates = QPushButton("Hide Plates")
-        self.btn_toggle_plates.setToolTip("Show or hide the plate list (Batch Reports)")
-        self.btn_toggle_plates.clicked.connect(self.toggle_middle_panel)
-        panel_bar.addWidget(self.btn_toggle_files)
-        panel_bar.addWidget(self.btn_toggle_plates)
-        panel_bar.addStretch()
-        main_layout.addLayout(panel_bar)
-
         self.splitter = QSplitter(Qt.Horizontal)
         main_layout.addWidget(self.splitter, stretch=1)
+
+        self.browser_panel = QWidget()
+        browser_panel_layout = QVBoxLayout(self.browser_panel)
+        browser_panel_layout.setContentsMargins(0, 0, 0, 0)
+        browser_panel_layout.setSpacing(0)
+
+        browser_header = QHBoxLayout()
+        browser_header.setContentsMargins(4, 4, 4, 0)
+        browser_header.addStretch()
+        self.btn_toggle_files = self._create_panel_toggle_button(
+            "Hide file browser",
+            "Show file browser",
+            self.toggle_browser_panel,
+        )
+        browser_header.addWidget(self.btn_toggle_files)
+        browser_panel_layout.addLayout(browser_header)
 
         self.browser = UnifiedFileBrowser(
             self.config.get("input_root", "."),
@@ -215,19 +228,17 @@ class ChronoRootAnnotationSuite(QMainWindow):
         )
         self.browser.setMinimumWidth(250)
         self.browser.setMaximumWidth(400)
-        self.splitter.addWidget(self.browser)
+        browser_panel_layout.addWidget(self.browser, stretch=1)
+        self.splitter.addWidget(self.browser_panel)
 
         self.workspaces = WorkspaceManager(self, self.global_model)
         self._inject_canvas_configs()
 
         self.middle_stack = QStackedWidget()
-        self.middle_stack.setMinimumWidth(300)
-        self.middle_stack.setMaximumWidth(450)
 
         annotator_container = QWidget()
         al = QVBoxLayout(annotator_container)
         al.setContentsMargins(5, 5, 5, 5)
-        al.setAlignment(Qt.AlignTop)
 
         self.tool_stack = QStackedWidget()
         self.panel_review = ReviewToolPanel(self.global_model, self.workspaces.canvas_review)
@@ -237,11 +248,11 @@ class ChronoRootAnnotationSuite(QMainWindow):
         self.instance_list = InstanceListPanel(
             self.global_model, self.workspaces, review_tool_panel=self.panel_review, annotation_tab_index=0
         )
-        al.addWidget(self.instance_list)
+        al.addWidget(self.instance_list, stretch=1)
 
-        al.addSpacing(10)
+        al.addSpacing(6)
         al.addWidget(QFrame(frameShape=QFrame.HLine, frameShadow=QFrame.Sunken))
-        al.addSpacing(10)
+        al.addSpacing(4)
         al.addWidget(QLabel("<b>Control Panel:</b>"))
 
         r_cfg = self.config.get("review", {})
@@ -256,7 +267,8 @@ class ChronoRootAnnotationSuite(QMainWindow):
         self.tool_stack.addWidget(self.panel_review)
         self.tool_stack.addWidget(self.panel_frangi)
         self.tool_stack.addWidget(self.panel_graph)
-        al.addWidget(self.tool_stack)
+        self.tool_stack.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+        al.addWidget(self.tool_stack, stretch=0)
 
         self.panel_phenomics = PhenomicsControlPanel(self.config, config_file=self.config_file)
         self.control_tabs = QTabWidget()
@@ -296,13 +308,69 @@ class ChronoRootAnnotationSuite(QMainWindow):
         self.middle_stack.addWidget(controls_container)
         self.middle_stack.addWidget(self.workspaces.report_file_panel)
 
-        self.splitter.addWidget(self.middle_stack)
+        self.middle_panel = QWidget()
+        middle_panel_layout = QVBoxLayout(self.middle_panel)
+        middle_panel_layout.setContentsMargins(0, 0, 0, 0)
+        middle_panel_layout.setSpacing(0)
+
+        middle_header = QHBoxLayout()
+        middle_header.setContentsMargins(4, 4, 4, 0)
+        middle_header.addStretch()
+        self.btn_toggle_plates = self._create_panel_toggle_button(
+            "Hide plate checklist",
+            "Show plate checklist",
+            self.toggle_middle_panel,
+        )
+        self.btn_toggle_plates.setVisible(False)
+        middle_header.addWidget(self.btn_toggle_plates)
+        middle_panel_layout.addLayout(middle_header)
+        middle_panel_layout.addWidget(self.middle_stack, stretch=1)
+        self.middle_panel.setMinimumWidth(300)
+        self.middle_panel.setMaximumWidth(450)
+
+        self.splitter.addWidget(self.middle_panel)
         self.splitter.addWidget(self.workspaces)
         default_sizes = self.config.get("panel_sizes_report", [250, 320, 930])
         if len(default_sizes) == 3:
             self.splitter.setSizes(default_sizes)
         else:
             self.splitter.setSizes([250, 320, 930])
+
+    def _panel_expanded(self, size):
+        return size > self.COLLAPSED_PANEL_WIDTH
+
+    def _visibility_icon(self, visible):
+        name = "view-visible" if visible else "view-hidden"
+        icon = QIcon.fromTheme(name)
+        if not icon.isNull():
+            return icon
+        style = self.style()
+        fallback = QStyle.SP_FileDialogDetailedView if visible else QStyle.SP_FileDialogListView
+        return style.standardIcon(fallback)
+
+    def _create_panel_toggle_button(self, hide_tooltip, show_tooltip, slot):
+        btn = QToolButton()
+        btn.setAutoRaise(True)
+        btn.setToolTip(hide_tooltip)
+        btn.setProperty("hide_tooltip", hide_tooltip)
+        btn.setProperty("show_tooltip", show_tooltip)
+        btn.clicked.connect(slot)
+        self._set_panel_toggle_appearance(btn, expanded=True)
+        return btn
+
+    def _set_panel_toggle_appearance(self, btn, expanded):
+        btn.setIcon(self._visibility_icon(expanded))
+        btn.setToolTip(btn.property("hide_tooltip" if expanded else "show_tooltip"))
+        if expanded:
+            btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+            btn.setText("Hide")
+            btn.setFixedSize(QSize())
+            btn.setMinimumSize(0, 26)
+            btn.setMaximumSize(16777215, 26)
+        else:
+            btn.setToolButtonStyle(Qt.ToolButtonIconOnly)
+            btn.setText("")
+            btn.setFixedSize(self.COLLAPSED_PANEL_WIDTH - 4, 26)
 
     def _splitter_sizes(self):
         return list(self.splitter.sizes())
@@ -314,21 +382,30 @@ class ChronoRootAnnotationSuite(QMainWindow):
         if self._focus_mode_active:
             return
         sizes = self._splitter_sizes()
-        if sizes[0] > 0:
+        rail = self.COLLAPSED_PANEL_WIDTH
+        if self._panel_expanded(sizes[0]):
             self._saved_browser_width = sizes[0]
-            self._apply_splitter_sizes(0, sizes[1], sizes[2] + sizes[0])
-            self.btn_toggle_files.setText("Show Files")
+            self.browser.hide()
+            self.browser_panel.setMinimumWidth(rail)
+            self.browser_panel.setMaximumWidth(rail)
+            self._apply_splitter_sizes(rail, sizes[1], sizes[2] + sizes[0] - rail)
+            self._set_panel_toggle_appearance(self.btn_toggle_files, expanded=False)
         else:
+            self.browser.show()
+            self.browser_panel.setMinimumWidth(0)
+            self.browser_panel.setMaximumWidth(16777215)
+            self.browser.setMinimumWidth(250)
+            self.browser.setMaximumWidth(400)
             width = self._saved_browser_width or 250
             give_back = min(width, sizes[2])
             self._apply_splitter_sizes(width, sizes[1], sizes[2] - give_back)
-            self.btn_toggle_files.setText("Hide Files")
+            self._set_panel_toggle_appearance(self.btn_toggle_files, expanded=True)
 
     def toggle_middle_panel(self):
-        if self._focus_mode_active:
+        if self._focus_mode_active or self.workspaces.currentIndex() != 4:
             return
         sizes = self._splitter_sizes()
-        if sizes[1] > 0:
+        if self._panel_expanded(sizes[1]):
             self.collapse_middle_panel()
         else:
             self.expand_middle_panel()
@@ -337,22 +414,29 @@ class ChronoRootAnnotationSuite(QMainWindow):
         if self._focus_mode_active:
             return
         sizes = self._splitter_sizes()
-        if sizes[1] <= 0:
+        if not self._panel_expanded(sizes[1]):
             return
+        rail = self.COLLAPSED_PANEL_WIDTH
         self._saved_middle_width = sizes[1]
-        self._apply_splitter_sizes(sizes[0], 0, sizes[2] + sizes[1])
-        self.btn_toggle_plates.setText("Show Plates")
+        self.middle_stack.hide()
+        self.middle_panel.setMinimumWidth(rail)
+        self.middle_panel.setMaximumWidth(rail)
+        self._apply_splitter_sizes(sizes[0], rail, sizes[2] + sizes[1] - rail)
+        self._set_panel_toggle_appearance(self.btn_toggle_plates, expanded=False)
 
     def expand_middle_panel(self):
         if self._focus_mode_active:
             return
         sizes = self._splitter_sizes()
-        if sizes[1] > 0:
+        if self._panel_expanded(sizes[1]):
             return
+        self.middle_stack.show()
+        self.middle_panel.setMinimumWidth(300)
+        self.middle_panel.setMaximumWidth(450)
         width = self._saved_middle_width or 320
         give_back = min(width, sizes[2])
         self._apply_splitter_sizes(sizes[0], width, sizes[2] - give_back)
-        self.btn_toggle_plates.setText("Hide Plates")
+        self._set_panel_toggle_appearance(self.btn_toggle_plates, expanded=True)
 
     def toggle_focus_mode(self):
         if not self._focus_mode_active:
@@ -367,9 +451,11 @@ class ChronoRootAnnotationSuite(QMainWindow):
             self._apply_splitter_sizes(*restore)
             self._focus_mode_active = False
             self.btn_toggle_files.setEnabled(True)
-            self.btn_toggle_plates.setEnabled(True)
-            self.btn_toggle_files.setText("Hide Files" if restore[0] > 0 else "Show Files")
-            self.btn_toggle_plates.setText("Hide Plates" if restore[1] > 0 else "Show Plates")
+            self._sync_workspace_ui(self.workspaces.currentIndex())
+            sizes = self._splitter_sizes()
+            self._set_panel_toggle_appearance(
+                self.btn_toggle_files, expanded=self._panel_expanded(sizes[0])
+            )
 
     def _inject_canvas_configs(self):
         f_cfg = self.config.get("frangi", {})
@@ -436,6 +522,81 @@ class ChronoRootAnnotationSuite(QMainWindow):
         self.rad_fmt_text_global.toggled.connect(self._apply_global_label_preferences)
         self.rad_fmt_num_global.toggled.connect(self._apply_global_label_preferences)
         self._apply_global_label_preferences()
+
+        self._ensure_middle_panel_visible_on_startup()
+        self._sync_workspace_ui(self.workspaces.currentIndex())
+
+    def _ensure_middle_panel_visible_on_startup(self):
+        if self._focus_mode_active:
+            return
+        if self.workspaces.currentIndex() == 5:
+            return
+        if not self._panel_expanded(self.splitter.sizes()[1]):
+            self.expand_middle_panel()
+        sizes = self._splitter_sizes()
+        if sizes[0] == 0:
+            self.browser.show()
+            width = self._saved_browser_width or 250
+            give_back = min(width, sizes[2])
+            self._apply_splitter_sizes(width, sizes[1], sizes[2] - give_back)
+            self._set_panel_toggle_appearance(self.btn_toggle_files, expanded=True)
+
+    def _on_workspace_changed(self, index):
+        self._sync_workspace_ui(index)
+
+    def _sync_workspace_ui(self, index):
+        if index in [0, 1, 2, 3]:
+            self.ensure_active_plant()
+
+        is_batch = index == 4
+        self.btn_toggle_plates.setVisible(is_batch)
+        self.btn_toggle_plates.setEnabled(is_batch and not self._focus_mode_active)
+        if is_batch:
+            self._set_panel_toggle_appearance(
+                self.btn_toggle_plates,
+                expanded=self._panel_expanded(self.splitter.sizes()[1]),
+            )
+
+        self.instance_list.sync_toolbar_for_tab(index)
+
+        if index in [0, 1, 2]:
+            self.control_tabs.setEnabled(True)
+            self.middle_stack.setCurrentIndex(0)
+            self.tool_stack.setCurrentIndex(index)
+            if index in [1, 2]:
+                self.control_tabs.setCurrentIndex(0)
+            if not self._panel_expanded(self.splitter.sizes()[1]) and not self._focus_mode_active:
+                self.expand_middle_panel()
+
+            if index == 0:
+                self.panel_review.force_mode("SELECT")
+                if self.global_model.active_uid:
+                    self.workspaces.canvas_review.zoom_to_plant(self.global_model.active_uid)
+
+        elif index == 3:
+            self.control_tabs.setEnabled(True)
+            self.middle_stack.setCurrentIndex(0)
+            self.control_tabs.setCurrentIndex(1)
+            if not self._panel_expanded(self.splitter.sizes()[1]) and not self._focus_mode_active:
+                self.expand_middle_panel()
+            self.sync_inspector()
+
+        elif index == 4:
+            self.control_tabs.setEnabled(False)
+            self.middle_stack.setCurrentIndex(1)
+            if not self._focus_mode_active and self.splitter.sizes()[1] == 0:
+                self.expand_middle_panel()
+            self.refresh_report_plates_if_active()
+
+        elif index == 5:
+            self.control_tabs.setEnabled(False)
+            self.middle_stack.setCurrentIndex(0)
+            if not self._focus_mode_active:
+                sizes = self._splitter_sizes()
+                if self._panel_expanded(sizes[1]):
+                    self._saved_middle_width = sizes[1]
+                self.middle_stack.hide()
+                self._apply_splitter_sizes(sizes[0], 0, sizes[2] + sizes[1])
 
     def _on_metadata_dirty(self):
         self.metadata_dirty = True
@@ -525,50 +686,7 @@ class ChronoRootAnnotationSuite(QMainWindow):
     def _go_to_plant_metadata(self):
         self.control_tabs.setCurrentIndex(1)
         if self.splitter.sizes()[1] == 0 and not self._focus_mode_active:
-            self.splitter.setSizes([300, 350, 950])
-
-    def _on_workspace_changed(self, index):
-        if index in [0, 1, 2, 3]:
-            self.ensure_active_plant()
-
-        if index in [0, 1, 2]:
-            self.control_tabs.setEnabled(True)
-            self.middle_stack.setCurrentIndex(0)
-            self.tool_stack.setCurrentIndex(index)
-            self.btn_toggle_plates.setVisible(False)
-            if index in [1, 2]:
-                self.control_tabs.setCurrentIndex(0)
-            if self.splitter.sizes()[1] == 0 and not self._focus_mode_active:
-                self.splitter.setSizes([300, 350, 950])
-
-            if index == 0:
-                self.panel_review.force_mode("SELECT")
-                if self.global_model.active_uid:
-                    self.workspaces.canvas_review.zoom_to_plant(self.global_model.active_uid)
-
-        elif index == 3:
-            self.control_tabs.setEnabled(True)
-            self.middle_stack.setCurrentIndex(0)
-            self.control_tabs.setCurrentIndex(1)
-            self.btn_toggle_plates.setVisible(False)
-            if self.splitter.sizes()[1] == 0 and not self._focus_mode_active:
-                self.splitter.setSizes([300, 350, 950])
-            self.sync_inspector()
-
-        elif index == 4:
-            self.control_tabs.setEnabled(False)
-            self.middle_stack.setCurrentIndex(1)
-            self.btn_toggle_plates.setVisible(True)
-            if not self._focus_mode_active and self.splitter.sizes()[1] == 0:
-                self.expand_middle_panel()
-            self.refresh_report_plates_if_active()
-
-        elif index == 5:
-            self.control_tabs.setEnabled(False)
-            self.middle_stack.setCurrentIndex(0)
-            self.btn_toggle_plates.setVisible(False)
-            if not self._focus_mode_active:
-                self.splitter.setSizes([300, 0, 1300])
+            self.expand_middle_panel()
 
     def ensure_active_plant(self):
         """Guarantee a valid active plant when masks exist but selection is empty or stale."""

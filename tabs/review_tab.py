@@ -2,7 +2,7 @@ import math
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QListWidget, 
                              QListWidgetItem, QPushButton, QLabel, QGraphicsView, 
                              QGraphicsScene, QGraphicsPixmapItem, QGraphicsRectItem, 
-                             QMessageBox, QSlider, QGraphicsSimpleTextItem)
+                             QMessageBox, QSlider, QGraphicsSimpleTextItem, QSizePolicy)
 
 from PyQt5.QtCore import Qt, pyqtSignal, QRectF
 from PyQt5.QtGui import (QImage, QPixmap, QPainter, QPainterPath, QPen, QColor, 
@@ -694,8 +694,10 @@ class ReviewToolPanel(QWidget):
         self.model.register_selection_callback(self.on_selection_changed)
 
     def init_ui(self):
+        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         sl = QVBoxLayout(self)
         sl.setContentsMargins(5, 5, 5, 5)
+        sl.setSpacing(4)
 
         tools_header = QHBoxLayout()
         self.lbl_workflow_hint = QLabel(
@@ -798,7 +800,7 @@ class ReviewToolPanel(QWidget):
         op_layout.addWidget(self.lbl_op_val)
         sl.addLayout(op_layout)
 
-        sl.addStretch()
+        self.setFixedHeight(self.sizeHint().height())
 
     def toggle_mode(self, target_mode):
         current = self.canvas_tab.current_mode
@@ -826,6 +828,7 @@ class ReviewToolPanel(QWidget):
         
         self.list_classes.setVisible(mode == "SEMANTIC")
         self.canvas_tab.set_mode(mode)
+        self.setFixedHeight(self.sizeHint().height())
 
     def update_brush_size(self, val):
         self.lbl_size_val.setText(f"{val}px")
