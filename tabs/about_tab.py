@@ -21,7 +21,7 @@ class AboutTab(QWidget):
         layout.addWidget(self.logo_label, alignment=Qt.AlignCenter)
 
         # Short Description
-        title = QLabel("ChronoRoot")
+        title = QLabel("ChronoRoot Annotation Suite")
         title.setStyleSheet("font-size: 28px; font-weight: bold; color: #2c3e50; background-color: transparent;")
         layout.addWidget(title, alignment=Qt.AlignCenter)
 

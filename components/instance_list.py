@@ -94,6 +94,11 @@ class InstanceListPanel(QWidget):
                 area = self.model.areas.get(uid, 0)
                 item.setText(1, f"{area:,}")
                 item.setData(1, Qt.UserRole, area)
+                if uid in self.model.color_map:
+                    c = self.model.color_map[uid]
+                    pix = QPixmap(16, 16)
+                    pix.fill(QColor(c[0], c[1], c[2]))
+                    item.setIcon(0, QIcon(pix))
 
             self.list_instances.setSortingEnabled(True)
             return

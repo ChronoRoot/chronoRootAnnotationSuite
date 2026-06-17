@@ -5,16 +5,17 @@ import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt
 
-from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QSplitter, QLabel, 
-                             QPushButton, QListWidget, QListWidgetItem, QComboBox, 
+from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QSplitter, QLabel,
+                             QPushButton, QListWidget, QListWidgetItem, QComboBox,
                              QFormLayout, QFileDialog, QMessageBox, QAbstractItemView, QGroupBox, QProgressDialog)
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, pyqtSignal
 
 # --- Matplotlib PyQt5 Integration ---
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.backends.backend_qt5agg import NavigationToolbar2QT as NavigationToolbar
 
 from core import convex_hull
+from components.file_browser import qt_display_text
 
 # ==========================================
 # METRIC NAME MAPPING (For Publication-Ready Plots)
@@ -39,51 +40,128 @@ def natural_sort_key(s):
     """Splits strings into text/number chunks for intuitive human sorting (e.g. Day 2 before Day 10)."""
     return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', str(s))]
 
-class ComparisonReportTab(QWidget):
+
+def _metrics_search_roots(main_window):
+    roots = []
+    if hasattr(main_window, "browser"):
+        browser = main_window.browser
+        for candidate in (
+            getattr(browser, "root_dir", None),
+            getattr(browser, "in_dir", None),
+            getattr(browser, "current_dir", None),
+        ):
+            if candidate and os.path.isdir(candidate):
+                abs_path = os.path.abspath(candidate)
+                if abs_path not in roots:
+                    roots.append(abs_path)
+
+    if not roots:
+        out_dir = _metrics_output_dir(main_window)
+        if os.path.isdir(out_dir):
+            roots.append(os.path.abspath(out_dir))
+    return roots
+
+
+def _metrics_output_dir(main_window):
+    if hasattr(main_window, "browser") and hasattr(main_window.browser, "out_dir"):
+        browser = main_window.browser
+        if getattr(browser, "output_mode", "task_folder") == "fixed":
+            return browser.out_dir
+        return getattr(browser, "root_dir", browser.out_dir)
+    return getattr(main_window, "out_dir", ".")
+
+
+def discover_metrics_files(main_window):
+    discovered = {}
+    for root in _metrics_search_roots(main_window):
+        for dirpath, _, filenames in os.walk(root):
+            for filename in filenames:
+                if not filename.endswith("_Metrics.json"):
+                    continue
+                full_path = os.path.join(dirpath, filename)
+                if full_path in discovered:
+                    continue
+                rel_folder = os.path.relpath(dirpath, root)
+                if rel_folder == ".":
+                    display = filename
+                else:
+                    display = f"{rel_folder}/{filename}"
+                discovered[full_path] = {
+                    "display": display,
+                    "relative_folder": rel_folder if rel_folder != "." else "",
+                    "search_root": root,
+                }
+    return discovered
+
+
+class ReportFileListPanel(QWidget):
+    """Metrics file picker shown in the left/middle column during Batch Reports."""
+
+    load_requested = pyqtSignal()
+
     def __init__(self, main_window):
         super().__init__()
         self.main_window = main_window
-        self.df = pd.DataFrame()  
+        self.init_ui()
+
+    def init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(5, 5, 5, 5)
+        layout.addWidget(QLabel("<b>Processed Plates</b>"))
+
+        list_btns = QHBoxLayout()
+        self.btn_refresh = QPushButton("Refresh")
+        self.btn_refresh.clicked.connect(self.refresh_file_list)
+        self.btn_sel_all = QPushButton("Select All")
+        self.btn_sel_all.clicked.connect(self.select_all_files)
+        list_btns.addWidget(self.btn_refresh)
+        list_btns.addWidget(self.btn_sel_all)
+        layout.addLayout(list_btns)
+
+        self.btn_load_data = QPushButton("Load Selected Data")
+        self.btn_load_data.setStyleSheet("background-color: #007bff; color: white; font-weight: bold;")
+        self.btn_load_data.clicked.connect(self.load_requested.emit)
+        layout.addWidget(self.btn_load_data)
+
+        self.file_list = QListWidget()
+        self.file_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        layout.addWidget(self.file_list)
+
+    def refresh_file_list(self):
+        self.file_list.clear()
+        metrics_files = discover_metrics_files(self.main_window)
+        for full_path in sorted(
+            metrics_files.keys(),
+            key=lambda p: natural_sort_key(metrics_files[p]["display"]),
+        ):
+            meta = metrics_files[full_path]
+            item = QListWidgetItem(qt_display_text(meta["display"]))
+            item.setData(Qt.UserRole, full_path)
+            item.setToolTip(full_path)
+            self.file_list.addItem(item)
+
+    def select_all_files(self):
+        for i in range(self.file_list.count()):
+            self.file_list.item(i).setSelected(True)
+
+
+class ComparisonReportTab(QWidget):
+    def __init__(self, main_window, file_panel):
+        super().__init__()
+        self.main_window = main_window
+        self.file_panel = file_panel
+        self.df = pd.DataFrame()
+        self.file_panel.load_requested.connect(self.load_selected_data)
         self.init_ui()
         
     def init_ui(self):
         layout = QHBoxLayout(self)
         splitter = QSplitter(Qt.Horizontal)
-        
-        # ==========================================
-        # LEFT PANEL: File Selection & Data Loading
-        # ==========================================
-        left_panel = QWidget()
-        left_layout = QVBoxLayout(left_panel)
-        left_layout.addWidget(QLabel("<b>1. Select Processed Plates</b>"))
-        
-        # --- NEW: Button row for list management ---
-        list_btns = QHBoxLayout()
-        self.btn_refresh = QPushButton("Refresh")
-        self.btn_refresh.clicked.connect(self.refresh_file_list)
-        
-        self.btn_sel_all = QPushButton("Select All")
-        self.btn_sel_all.clicked.connect(self.select_all_files)
-        
-        list_btns.addWidget(self.btn_refresh)
-        list_btns.addWidget(self.btn_sel_all)
-        left_layout.addLayout(list_btns)
-                
-        self.btn_load_data = QPushButton("Load Selected Data")
-        self.btn_load_data.setStyleSheet("background-color: #007bff; color: white; font-weight: bold;")
-        self.btn_load_data.clicked.connect(self.load_selected_data)
-        left_layout.addWidget(self.btn_load_data)
-        
-        self.file_list = QListWidget()
-        self.file_list.setSelectionMode(QAbstractItemView.ExtendedSelection) 
-        left_layout.addWidget(self.file_list)
-        
-        # ==========================================
-        # MIDDLE PANEL: Plot Controls
-        # ==========================================
+
+        # Plot controls + matplotlib canvas (file list lives in the middle column)
         mid_panel = QWidget()
         mid_layout = QVBoxLayout(mid_panel)
-        mid_layout.addWidget(QLabel("<b>2. Configure Plot</b>"))
+        mid_layout.addWidget(QLabel("<b>Configure Plot</b>"))
         
         control_group = QGroupBox("Aesthetics")
         form = QFormLayout(control_group)
@@ -154,67 +232,24 @@ class ComparisonReportTab(QWidget):
         self.right_layout.addWidget(self.toolbar)
         self.right_layout.addWidget(self.canvas, stretch=1)
         
-        splitter.addWidget(left_panel)
         splitter.addWidget(mid_panel)
         splitter.addWidget(right_panel)
-        splitter.setSizes([200, 250, 750])
+        splitter.setSizes([280, 920])
         layout.addWidget(splitter)
         
         sns.set_theme(style="whitegrid", palette="muted")
 
     def _get_output_dir(self):
-        """Resolves output dir across legacy and unified main window implementations."""
-        if hasattr(self.main_window, "browser") and hasattr(self.main_window.browser, "out_dir"):
-            browser = self.main_window.browser
-            if getattr(browser, "output_mode", "task_folder") == "fixed":
-                return browser.out_dir
-            return getattr(browser, "root_dir", browser.out_dir)
-        return getattr(self.main_window, "out_dir", ".")
+        return _metrics_output_dir(self.main_window)
 
     def _get_search_roots(self):
-        """Collect unique directories to search for Metrics JSON files."""
-        roots = []
-        if hasattr(self.main_window, "browser"):
-            browser = self.main_window.browser
-            for candidate in (
-                getattr(browser, "root_dir", None),
-                getattr(browser, "in_dir", None),
-                getattr(browser, "current_dir", None),
-            ):
-                if candidate and os.path.isdir(candidate):
-                    abs_path = os.path.abspath(candidate)
-                    if abs_path not in roots:
-                        roots.append(abs_path)
-
-        if not roots:
-            out_dir = self._get_output_dir()
-            if os.path.isdir(out_dir):
-                roots.append(os.path.abspath(out_dir))
-
-        return roots
+        return _metrics_search_roots(self.main_window)
 
     def _discover_metrics_files(self):
-        """Recursively find _Metrics.json files under project/search roots."""
-        discovered = {}
-        for root in self._get_search_roots():
-            for dirpath, _, filenames in os.walk(root):
-                for filename in filenames:
-                    if not filename.endswith("_Metrics.json"):
-                        continue
-                    full_path = os.path.join(dirpath, filename)
-                    if full_path in discovered:
-                        continue
-                    rel_folder = os.path.relpath(dirpath, root)
-                    if rel_folder == ".":
-                        display = filename
-                    else:
-                        display = f"{rel_folder}/{filename}"
-                    discovered[full_path] = {
-                        "display": display,
-                        "relative_folder": rel_folder if rel_folder != "." else "",
-                        "search_root": root,
-                    }
-        return discovered
+        return discover_metrics_files(self.main_window)
+
+    def refresh_file_list(self):
+        self.file_panel.refresh_file_list()
 
     @staticmethod
     def _infer_day_folder(relative_folder):
@@ -225,19 +260,6 @@ class ComparisonReportTab(QWidget):
                 return part
         return ""
 
-    def refresh_file_list(self):
-        self.file_list.clear()
-        metrics_files = self._discover_metrics_files()
-        if not metrics_files:
-            return
-
-        for full_path in sorted(metrics_files.keys(), key=lambda p: natural_sort_key(metrics_files[p]["display"])):
-            meta = metrics_files[full_path]
-            item = QListWidgetItem(meta["display"])
-            item.setData(Qt.UserRole, full_path)
-            item.setToolTip(full_path)
-            self.file_list.addItem(item)
-                
     def on_plot_type_changed(self):
         plot_type = self.cb_plot_type.currentText()
         is_line_plot = "Line Plot" in plot_type
@@ -253,36 +275,25 @@ class ComparisonReportTab(QWidget):
         
         self.update_plot()
 
-    
-    def select_all_files(self):
-        """Selects all items in the file list."""
-        for i in range(self.file_list.count()):
-            self.file_list.item(i).setSelected(True)
-
     def _get_clean_dataframe(self):
         """Strips system/JSON variables and returns a pure, publication-ready dataset."""
         meta_cols = [
             "plate_id", "condition", "timepoint", "genotype", "plant_num",
             "relative_folder", "day_folder", "source_file",
         ]
-        # Only grab the nice names defined in METRIC_MAPPING
-        metric_cols = list(METRIC_MAPPING.values()) 
-        
-        # Keep only columns that actually exist in the dataframe to avoid KeyErrors
+        metric_cols = list(METRIC_MAPPING.values())
         desired_cols = [c for c in meta_cols + metric_cols if c in self.df.columns]
-        
         return self.df[desired_cols].copy()
-    
-    
+
     def load_selected_data(self):
-        selected_items = self.file_list.selectedItems()
+        selected_items = self.file_panel.file_list.selectedItems()
         if not selected_items:
             QMessageBox.warning(self, "Selection Empty", "Please select at least one JSON file.")
             return
-            
+
         all_plants_data = []
         metrics_files = self._discover_metrics_files()
-        
+
         for item in selected_items:
             file_path = item.data(Qt.UserRole)
             try:

@@ -6,7 +6,7 @@ from tabs.review_tab import ReviewCanvasTab
 from tabs.frangi_tab import FrangiCanvasTab
 from tabs.graph_tab import GraphCanvasTab
 from tabs.inspector_tab import PhenomicsInspectorTab
-from tabs.report_tab import ComparisonReportTab
+from tabs.report_tab import ComparisonReportTab, ReportFileListPanel
 from tabs.about_tab import AboutTab
 
 class WorkspaceManager(QTabWidget):
@@ -22,7 +22,7 @@ class WorkspaceManager(QTabWidget):
     def init_workspaces(self):
         # 1. Pixel Annotation
         self.canvas_review = ReviewCanvasTab(self.model)
-        self.addTab(self.canvas_review, "1. Annotation & Review")
+        self.addTab(self.canvas_review, "1. Annotation")
         
         # 2. Skeleton Refinement
         self.canvas_frangi = FrangiCanvasTab(self.model)
@@ -36,8 +36,9 @@ class WorkspaceManager(QTabWidget):
         self.inspector_tab = PhenomicsInspectorTab()
         self.addTab(self.inspector_tab, "4. Phenomics Inspector")
         
-        # 5. Batch Reports (NEW: Passing the main_window reference)
-        self.report_tab = ComparisonReportTab(self.main_window)
+        # 5. Batch Reports
+        self.report_file_panel = ReportFileListPanel(self.main_window)
+        self.report_tab = ComparisonReportTab(self.main_window, self.report_file_panel)
         self.addTab(self.report_tab, "5. Batch Reports")
 
         self.about_tab = AboutTab()

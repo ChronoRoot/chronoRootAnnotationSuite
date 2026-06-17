@@ -14,8 +14,8 @@ from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from core.model import (
     PlantImageModel,
     annotation_status_display,
-    find_metrics_file,
-    find_topology_file,
+    metrics_path,
+    topology_path,
     normalize_annotation_status,
 )
 from core.analyzer_engine import (
@@ -34,7 +34,7 @@ from tabs.review_tab import ReviewToolPanel
 from tabs.frangi_tab import FrangiToolPanel
 from tabs.graph_tab import GraphToolPanel
 
-APP_NAME = "chronoroot"
+APP_NAME = "chronoRootAnnotationSuite"
 CONFIG_DIR = os.path.expanduser(f"~/.config/{APP_NAME}")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 
@@ -57,10 +57,10 @@ class ModelWorker(QThread):
             self.error.emit(str(e))
 
 
-class ChronoRootSuite(QMainWindow):
+class ChronoRootAnnotationSuite(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("ChronoRoot - Unified Phenomics Suite")
+        self.setWindowTitle("ChronoRoot Annotation Suite")
         self.resize(1600, 900)
 
         self.global_model = PlantImageModel()
@@ -74,6 +74,7 @@ class ChronoRootSuite(QMainWindow):
         self.current_file_path = ""
         self._pending_load_data = None
         self._pending_mark_finished = False
+        self._pending_export_plate_meta = None
         self._is_closing = False
         self._selection_sync_guard = False
 
@@ -268,7 +269,7 @@ class ChronoRootSuite(QMainWindow):
         controls_layout.addWidget(self.global_label_group)
         controls_layout.addWidget(self.control_tabs)
         self.middle_stack.addWidget(controls_container)
-        self.middle_stack.addWidget(QWidget())
+        self.middle_stack.addWidget(self.workspaces.report_file_panel)
 
         self.splitter.addWidget(self.middle_stack)
         self.splitter.addWidget(self.workspaces)
@@ -318,6 +319,7 @@ class ChronoRootSuite(QMainWindow):
         self.panel_phenomics.calibration_changed.connect(self._on_metadata_dirty)
         self.panel_phenomics.overlay_labels_changed.connect(self.update_overlay_labels)
         self.panel_phenomics.metadata_dirty_changed.connect(self._on_metadata_dirty)
+        self.panel_phenomics.auto_renumber_requested.connect(self._on_auto_renumber_plants)
 
         if hasattr(self.workspaces.canvas_review, "distance_measured"):
             self.workspaces.canvas_review.distance_measured.connect(self.on_distance_measured)
@@ -338,6 +340,17 @@ class ChronoRootSuite(QMainWindow):
     def _on_metadata_dirty(self):
         self.metadata_dirty = True
 
+    def _on_auto_renumber_plants(self):
+        if not self.global_model.masks:
+            return
+        self.global_model.set_task_metadata(
+            plants_meta=self.panel_phenomics.capture_metadata(),
+        )
+        self.global_model.sync_plant_numbers_to_uids(force=True)
+        self.panel_phenomics.apply_plant_numbers(self.global_model.get_plants_metadata())
+        self.metadata_dirty = True
+        self.update_overlay_labels()
+
     def _is_task_dirty(self):
         return self.global_model.dirty or self.metadata_dirty
 
@@ -348,13 +361,10 @@ class ChronoRootSuite(QMainWindow):
             return None
 
         out_dir = self.browser.get_effective_output_dir(task_dir)
-        plate_meta = self.global_model.plate_meta
-        analysis_meta = self.global_model.analysis_meta
-
-        metrics_path = find_metrics_file(out_dir, base_name, plate_meta, analysis_meta)
-        if not metrics_path and out_dir != task_dir:
-            metrics_path = find_metrics_file(task_dir, base_name, plate_meta, analysis_meta)
-        return metrics_path
+        path = metrics_path(out_dir, base_name)
+        if not path and out_dir != task_dir:
+            path = metrics_path(task_dir, base_name)
+        return path
 
     def _resolve_topology_path(self, task_dir=None, base_name=None):
         task_dir = task_dir or self.current_task_path
@@ -363,13 +373,33 @@ class ChronoRootSuite(QMainWindow):
             return None
 
         out_dir = self.browser.get_effective_output_dir(task_dir)
-        plate_meta = self.global_model.plate_meta
-        analysis_meta = self.global_model.analysis_meta
+        path = topology_path(out_dir, base_name)
+        if not path and out_dir != task_dir:
+            path = topology_path(task_dir, base_name)
+        return path
 
-        topo_path = find_topology_file(out_dir, base_name, plate_meta, analysis_meta)
-        if not topo_path and out_dir != task_dir:
-            topo_path = find_topology_file(task_dir, base_name, plate_meta, analysis_meta)
-        return topo_path
+    @staticmethod
+    def _is_identity_uid_mapping(mapping):
+        return not mapping or all(old == new for old, new in mapping.items())
+
+    def _remap_measurements_cache(self, uid_mapping):
+        if not self.measurements_cache or not uid_mapping:
+            return
+        remapped = {}
+        for old_uid, new_uid in uid_mapping.items():
+            if old_uid in self.measurements_cache:
+                remapped[new_uid] = self.measurements_cache[old_uid]
+        self.measurements_cache = remapped
+        if remapped:
+            self.panel_phenomics.btn_export.setEnabled(True)
+
+    def _current_analysis_status_for_cache(self):
+        metrics_file = self._resolve_metrics_path()
+        if self.measurements_cache or (metrics_file and os.path.exists(metrics_file)):
+            return "analyzed"
+        if normalize_annotation_status(self.global_model.status) == "completed":
+            return "not_analyzed"
+        return "not_applicable"
 
     def _on_input_dir_changed(self, path):
         self.config["input_root"] = path
@@ -416,12 +446,13 @@ class ChronoRootSuite(QMainWindow):
         elif index == 4:
             self.control_tabs.setEnabled(False)
             self.middle_stack.setCurrentIndex(1)
-            self.splitter.setSizes([300, 0, 1300])
-            self.workspaces.report_tab.refresh_file_list()
+            if self.splitter.sizes()[1] == 0:
+                self.splitter.setSizes([300, 350, 950])
+            self.workspaces.report_file_panel.refresh_file_list()
 
-        elif index in [5, 6]:
+        elif index == 5:
             self.control_tabs.setEnabled(False)
-            self.middle_stack.setCurrentIndex(1)
+            self.middle_stack.setCurrentIndex(0)
             self.splitter.setSizes([300, 0, 1300])
 
     def ensure_active_plant(self):
@@ -468,8 +499,11 @@ class ChronoRootSuite(QMainWindow):
         """Rebuild plant metadata table when mask topology changes (new/merge/delete/split)."""
         model_uids = set(self.global_model.masks.keys())
         table_uids = self.panel_phenomics.get_table_uids()
-        if model_uids == table_uids and not uid_mapping:
+        if model_uids == table_uids and self._is_identity_uid_mapping(uid_mapping):
             return
+
+        mapping_changed = uid_mapping and not self._is_identity_uid_mapping(uid_mapping)
+        topology_changed = model_uids != table_uids
 
         preserved = self.panel_phenomics.capture_metadata()
         if uid_mapping:
@@ -488,10 +522,13 @@ class ChronoRootSuite(QMainWindow):
         else:
             self.panel_phenomics.clear_table()
 
-        if model_uids != table_uids or uid_mapping:
+        if topology_changed:
             self.measurements_cache.clear()
             self.panel_phenomics.reset_measurements()
             self.workspaces.inspector_tab.show_no_measurements_state()
+        elif mapping_changed:
+            self._remap_measurements_cache(uid_mapping)
+            self.sync_inspector()
 
     def _on_model_data_changed(self):
         self._sync_metadata_table_with_model()
@@ -609,7 +646,7 @@ class ChronoRootSuite(QMainWindow):
             self.panel_phenomics.in_calib_val.blockSignals(False)
             QMessageBox.warning(
                 self, "Invalid Format",
-                "ChronoRoot requires dots (.) instead of commas (,) for decimal numbers.\n\n"
+                "The app requires dots (.) instead of commas (,) for decimal numbers.\n\n"
                 "The value has been automatically corrected for you."
             )
 
@@ -721,9 +758,8 @@ class ChronoRootSuite(QMainWindow):
             worker.deleteLater()
 
         self.global_model.callbacks_muted = False
-        self.global_model._notify_data_changed()
         self.setWindowTitle(
-            f"ChronoRoot | {self.current_base_name} [{self.global_model.status.upper()}]"
+            f"ChronoRoot Annotation Suite | {self.current_base_name} [{self.global_model.status.upper()}]"
         )
 
         self.measurements_cache.clear()
@@ -743,6 +779,11 @@ class ChronoRootSuite(QMainWindow):
             self.ensure_active_plant()
         else:
             self.panel_phenomics.clear_table()
+
+        # Notify views only after the metadata table matches the freshly loaded
+        # model. Doing this earlier makes the table-vs-model sync see stale UIDs
+        # and clear measurements_cache before the restore offer runs.
+        self.global_model._notify_data_changed()
 
         self.metadata_dirty = False
         self._offer_analysis_restore()
@@ -789,7 +830,6 @@ class ChronoRootSuite(QMainWindow):
                 QMessageBox.warning(self, "Delete Failed", f"Could not remove {path}:\n{exc}")
                 return
 
-        self.global_model.analysis_meta = {}
         self.measurements_cache.clear()
         self.panel_phenomics.reset_measurements()
         self.workspaces.inspector_tab.show_no_measurements_state()
@@ -864,6 +904,7 @@ class ChronoRootSuite(QMainWindow):
             worker.deleteLater()
 
         if mapping is None:
+            self._pending_export_plate_meta = None
             return
 
         new_selection = [mapping[uid] for uid in self.global_model.selected_uids if uid in mapping]
@@ -872,7 +913,7 @@ class ChronoRootSuite(QMainWindow):
         self.global_model._notify_data_changed()
         self.ensure_active_plant()
         self.setWindowTitle(
-            f"ChronoRoot | {self.current_base_name} [{self.global_model.status.upper()}]"
+            f"ChronoRoot Annotation Suite | {self.current_base_name} [{self.global_model.status.upper()}]"
         )
         self.metadata_dirty = False
 
@@ -884,20 +925,32 @@ class ChronoRootSuite(QMainWindow):
             self._execute_load(data_to_load)
         elif self.current_file_path:
             ann_display = annotation_status_display(self.global_model.status)
-            analysis_status = (
-                "not_analyzed"
-                if normalize_annotation_status(self.global_model.status) == "completed"
-                else "not_applicable"
-            )
             self.browser.update_file_status_in_cache(
                 self.current_file_path,
                 new_status=ann_display,
                 new_plant_count=len(self.global_model.masks),
-                new_analysis_status=analysis_status,
+                new_analysis_status=self._current_analysis_status_for_cache(),
             )
+
+        if self.measurements_cache:
+            self.panel_phenomics.btn_export.setEnabled(True)
+            self.sync_inspector()
+
+        if self._pending_export_plate_meta is not None:
+            plate_meta = self._pending_export_plate_meta
+            self._pending_export_plate_meta = None
+            self._run_export_worker(plate_meta)
 
     # --- Analysis Engine ---
     def run_measurements(self, plants_meta, cm_per_px):
+        if normalize_annotation_status(self.global_model.status) != "completed":
+            QMessageBox.warning(
+                self, "Finish Annotation First",
+                "This plate's annotation is not marked Completed.\n\n"
+                "Finish the annotation (Save & Finish) before measuring, so the "
+                "analysis is always derived from a completed, saved annotation.",
+            )
+            return
         self.show_loading("Measuring Morphometrics & Tracing RSML...")
         worker = ModelWorker(extract_plate_metrics, self.global_model, plants_meta, cm_per_px)
         self.active_workers.add(worker)
@@ -930,6 +983,14 @@ class ChronoRootSuite(QMainWindow):
             return
 
         data = self.measurements_cache[uid]
+        if data.get("crop_offset") is None and uid in self.global_model.masks:
+            patch_data = self.global_model._get_class_patch(uid)
+            if patch_data:
+                _, x_off, y_off = patch_data
+                data = dict(data)
+                data["crop_offset"] = (x_off, y_off)
+                self.measurements_cache[uid] = data
+
         bbox = self.global_model.bboxes.get(uid, (0, 0, 0, 0))
         shape = self.global_model.raw_image.shape if self.global_model.raw_image is not None else None
         live_cm_per_px = self.panel_phenomics.get_cm_per_px(shape)
@@ -944,6 +1005,15 @@ class ChronoRootSuite(QMainWindow):
 
     def run_export(self, plate_meta):
         if not self.measurements_cache:
+            return
+
+        if normalize_annotation_status(self.global_model.status) != "completed":
+            QMessageBox.warning(
+                self, "Finish Annotation First",
+                "This plate's annotation is not marked Completed.\n\n"
+                "Finish the annotation (Save & Finish) before exporting, so the "
+                "annotation and analysis files always describe the same snapshot.",
+            )
             return
 
         out_dir = self.browser.get_effective_output_dir(self.current_task_path)
@@ -967,6 +1037,17 @@ class ChronoRootSuite(QMainWindow):
             )
             if reply == QMessageBox.No:
                 return
+
+        # Re-save the annotation (masks + plate/plant metadata) as a completed
+        # snapshot first, then export Metrics/RSML in _on_save_finished. This keeps
+        # image.json and _Metrics.json describing the exact same state.
+        self._pending_export_plate_meta = plate_meta
+        self.save_task(mark_finished=True)
+
+    def _run_export_worker(self, plate_meta):
+        out_dir = self.browser.get_effective_output_dir(self.current_task_path)
+        os.makedirs(out_dir, exist_ok=True)
+        export_base_name = self.current_base_name
 
         original_img_name = (
             os.path.basename(self.global_model.image_path)
@@ -995,11 +1076,6 @@ class ChronoRootSuite(QMainWindow):
             worker.deleteLater()
 
         out_dir = self.browser.get_effective_output_dir(self.current_task_path)
-        self.global_model.update_analysis_meta(
-            self.current_base_name,
-            len(self.measurements_cache),
-            out_dir=out_dir,
-        )
 
         if self.current_file_path:
             self.browser.update_file_status_in_cache(
@@ -1025,6 +1101,7 @@ class ChronoRootSuite(QMainWindow):
         QMessageBox.critical(self, "Processing Error", err_msg)
         self._is_closing = False
         self._pending_load_data = None
+        self._pending_export_plate_meta = None
 
     # --- Genotype Management ---
     def open_genotype_manager(self):
@@ -1071,6 +1148,6 @@ class ChronoRootSuite(QMainWindow):
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
-    window = ChronoRootSuite()
+    window = ChronoRootAnnotationSuite()
     window.show()
     sys.exit(app.exec_())

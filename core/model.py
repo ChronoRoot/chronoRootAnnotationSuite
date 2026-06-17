@@ -1,25 +1,29 @@
 import os
 import json
 import re
-from datetime import datetime, timezone
 
 import numpy as np
 import nibabel as nib
 import cv2
 from scipy.ndimage import label, distance_transform_edt
 
-# ==========================================
-# CONSTANTS & HELPERS
-# ==========================================
-LINE_THICKNESS = 1               
-LOGICAL_THICKNESS = 2            
+# --- Constants ---
+LINE_THICKNESS = 1
+LOGICAL_THICKNESS = 2
 MAX_HISTORY = 10
 SCHEMA_VERSION = 1
 
 ANNOTATION_STATUSES = ("missing", "in_progress", "completed")
 ANALYSIS_STATUSES = ("not_applicable", "not_analyzed", "analyzed")
 
+HIGH_CONTRAST_COLORS = [
+    (255, 0, 0),    (0, 255, 0),    (0, 0, 255),    (255, 255, 0),
+    (255, 0, 255),  (0, 255, 255),  (255, 165, 0),  (128, 0, 128),
+    (0, 255, 127),  (255, 20, 147), (139, 69, 19),  (75, 0, 130),
+]
 
+
+# --- Task status vocabulary ---
 def normalize_annotation_status(raw_status):
     """Map legacy/raw status strings to canonical annotation status."""
     if not raw_status:
@@ -52,6 +56,7 @@ def analysis_status_display(status):
     return mapping.get(status, "—")
 
 
+# --- Analysis export paths (filesystem only; not stored in annotation JSON) ---
 def canonical_metrics_name(base_name):
     return f"{base_name}_Metrics.json"
 
@@ -60,79 +65,23 @@ def canonical_topology_name(base_name):
     return f"{base_name}_Topology.rsml"
 
 
-def find_metrics_file(task_dir, base_name, plate_meta=None, analysis_meta=None):
-    """Resolve metrics JSON path: canonical name first, then recorded name, then legacy plate-based."""
-    if not task_dir or not base_name:
+def metrics_path(directory, base_name):
+    if not directory or not base_name:
         return None
-
-    canonical = os.path.join(task_dir, canonical_metrics_name(base_name))
-    if os.path.exists(canonical):
-        return canonical
-
-    if analysis_meta:
-        recorded = analysis_meta.get("metrics_file")
-        if recorded:
-            candidate = os.path.join(task_dir, recorded)
-            if os.path.exists(candidate):
-                return candidate
-
-    if plate_meta:
-        legacy_base = (
-            f"{plate_meta.get('plate_id', '')}_"
-            f"{plate_meta.get('condition', '')}_"
-            f"{plate_meta.get('timepoint', '')}"
-        )
-        legacy = os.path.join(task_dir, canonical_metrics_name(legacy_base))
-        if os.path.exists(legacy):
-            return legacy
-
-    for fname in os.listdir(task_dir) if os.path.isdir(task_dir) else []:
-        if fname.endswith("_Metrics.json") and base_name in fname:
-            return os.path.join(task_dir, fname)
-    return None
+    path = os.path.join(directory, canonical_metrics_name(base_name))
+    return path if os.path.exists(path) else None
 
 
-def find_topology_file(task_dir, base_name, plate_meta=None, analysis_meta=None):
-    if not task_dir or not base_name:
+def topology_path(directory, base_name):
+    if not directory or not base_name:
         return None
-
-    canonical = os.path.join(task_dir, canonical_topology_name(base_name))
-    if os.path.exists(canonical):
-        return canonical
-
-    if analysis_meta:
-        recorded = analysis_meta.get("topology_file")
-        if recorded:
-            candidate = os.path.join(task_dir, recorded)
-            if os.path.exists(candidate):
-                return candidate
-
-    if plate_meta:
-        legacy_base = (
-            f"{plate_meta.get('plate_id', '')}_"
-            f"{plate_meta.get('condition', '')}_"
-            f"{plate_meta.get('timepoint', '')}"
-        )
-        legacy = os.path.join(task_dir, canonical_topology_name(legacy_base))
-        if os.path.exists(legacy):
-            return legacy
-
-    for fname in os.listdir(task_dir) if os.path.isdir(task_dir) else []:
-        if fname.endswith("_Topology.rsml") and base_name in fname:
-            return os.path.join(task_dir, fname)
-    return None
+    path = os.path.join(directory, canonical_topology_name(base_name))
+    return path if os.path.exists(path) else None
 
 
-def infer_analysis_status(annotation_status, task_dir, base_name, plate_meta=None, analysis_meta=None):
-    ann = normalize_annotation_status(annotation_status)
-    if ann != "completed":
-        return "not_applicable"
-    if find_metrics_file(task_dir, base_name, plate_meta, analysis_meta):
-        return "analyzed"
-    return "not_analyzed"
-
-
+# --- Directory browse peek ---
 PEEK_BYTES = 4096
+_PEEK_CACHE_VERSION = 2
 _file_peek_cache = {}
 
 
@@ -144,15 +93,15 @@ def _peek_cache_get(json_path):
     except OSError:
         return None
     cached = _file_peek_cache.get(json_path)
-    if cached and cached[0] == mtime:
-        return cached[1]
+    if cached and cached[0] == mtime and cached[1] == _PEEK_CACHE_VERSION:
+        return cached[2]
     return None
 
 
 def _peek_cache_set(json_path, summary):
     try:
         mtime = os.path.getmtime(json_path)
-        _file_peek_cache[json_path] = (mtime, summary)
+        _file_peek_cache[json_path] = (mtime, _PEEK_CACHE_VERSION, summary)
     except OSError:
         pass
 
@@ -169,22 +118,44 @@ def _detect_annotation_from_compact(compact):
     return "in_progress"
 
 
-def _parse_plant_count_from_compact(compact):
-    match = re.search(r'"plant_count"\s*:\s*(\d+)', compact)
+def _count_bytes_marker_in_file(json_path, marker):
+    """Count occurrences of a byte marker without loading the full file into memory."""
+    if not marker:
+        return 0
+    overlap = max(len(marker) - 1, 0)
+    tail = b""
+    count = 0
+    try:
+        with open(json_path, "rb") as f:
+            while True:
+                chunk = f.read(1024 * 1024)
+                if not chunk:
+                    break
+                data = tail + chunk
+                count += data.count(marker)
+                tail = data[-overlap:] if overlap else b""
+    except OSError:
+        return 0
+    return count
+
+
+def _parse_plant_count(json_path):
+    """Fast plant count: summary field from header, else count mask markers in file."""
+    try:
+        with open(json_path, "rb") as f:
+            head = f.read(PEEK_BYTES)
+    except OSError:
+        return 0
+
+    compact_head = head.replace(b" ", b"").replace(b"\n", b"")
+    match = re.search(rb'"plant_count"\s*:\s*(\d+)', compact_head)
     if match:
         return int(match.group(1))
-    return compact.count('"category_id":1')
 
-
-def _fast_analysis_status(annotation_status, metrics_dir, base_name):
-    ann = normalize_annotation_status(annotation_status)
-    if ann != "completed":
-        return "not_applicable"
-    if not metrics_dir:
-        return "not_analyzed"
-    if os.path.exists(os.path.join(metrics_dir, canonical_metrics_name(base_name))):
-        return "analyzed"
-    return "not_analyzed"
+    rle_count = _count_bytes_marker_in_file(json_path, b'"instance_rle"')
+    if rle_count:
+        return rle_count
+    return _count_bytes_marker_in_file(json_path, b'"segmentation"')
 
 
 def peek_task_summary(json_path, task_dir, base_name, out_dir=None, probe_analysis=False):
@@ -207,7 +178,7 @@ def peek_task_summary(json_path, task_dir, base_name, out_dir=None, probe_analys
                 chunk = f.read(PEEK_BYTES)
             compact = chunk.replace(" ", "").replace("\n", "")
             result["annotation_status"] = _detect_annotation_from_compact(compact)
-            result["plant_count"] = _parse_plant_count_from_compact(compact)
+            result["plant_count"] = _parse_plant_count(json_path)
             _peek_cache_set(json_path, {
                 "annotation_status": result["annotation_status"],
                 "plant_count": result["plant_count"],
@@ -217,45 +188,17 @@ def peek_task_summary(json_path, task_dir, base_name, out_dir=None, probe_analys
 
     if probe_analysis:
         metrics_dir = out_dir if out_dir is not None else task_dir
-        result["analysis_status"] = _fast_analysis_status(
-            result["annotation_status"], metrics_dir, base_name
-        )
+        ann = normalize_annotation_status(result["annotation_status"])
+        if ann != "completed":
+            result["analysis_status"] = "not_applicable"
+        elif metrics_path(metrics_dir, base_name):
+            result["analysis_status"] = "analyzed"
+        else:
+            result["analysis_status"] = "not_analyzed"
     return result
 
 
-def read_task_summary(json_path, task_dir, base_name):
-    """Structured read for load/restore paths (not directory browsing)."""
-    result = {
-        "annotation_status": "missing",
-        "plant_count": 0,
-        "plate_meta": {},
-    }
-    if not os.path.exists(json_path):
-        return result
-
-    try:
-        with open(json_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except (json.JSONDecodeError, OSError, ValueError):
-        return result
-
-    summary = data.get("summary") or {}
-    ann_raw = summary.get("annotation_status") or data.get("status")
-    result["annotation_status"] = normalize_annotation_status(ann_raw)
-    result["plant_count"] = int(
-        summary.get("plant_count")
-        or len(data.get("annotations", []))
-        or 0
-    )
-    result["plate_meta"] = data.get("plate_meta") or {}
-    return result
-
-HIGH_CONTRAST_COLORS = [
-    (255, 0, 0),    (0, 255, 0),    (0, 0, 255),    (255, 255, 0),
-    (255, 0, 255),  (0, 255, 255),  (255, 165, 0),  (128, 0, 128),
-    (0, 255, 127),  (255, 20, 147), (139, 69, 19),  (75, 0, 130)
-]
-
+# --- RLE codec ---
 def encode_rle(mask):
     """Vectorized RLE encoding using NumPy."""
     pixels = mask.ravel()
@@ -299,10 +242,10 @@ def decode_rle(rle_data):
     
     return pixels.reshape((h, w))
 
-# ==========================================
-# HYBRID DATA MODEL (Pure Python API)
-# ==========================================
+# --- PlantImageModel ---
 class PlantImageModel:
+    """In-memory plant masks, annotation I/O, and editing tools. Analysis exports are separate files."""
+
     def __init__(self):
         self.image_path = None
         self.raw_image = None       
@@ -319,7 +262,6 @@ class PlantImageModel:
         self.class_patches = {}
         self.plants_meta = {}
         self.plate_meta = {}
-        self.analysis_meta = {}
         self.class_colors = {
             0: (0, 0, 0, 0),        
             1: (255, 0, 0, 255),    
@@ -330,42 +272,44 @@ class PlantImageModel:
             6: (255, 0, 255, 255)   
         }
 
-        # --- NEW: Global Selection State ---
         self.selected_uids = set()
         self.active_uid = None
-        
-        # --- NEW: Split Callbacks ---
-        self._data_callbacks = []       # For mask changes (paint, split, etc.)
-        self._selection_callbacks = []  # For UI selection changes
-        self.callbacks_muted = False 
+
+        self._data_callbacks = []
+        self._selection_callbacks = []
+        self.callbacks_muted = False
 
     def register_data_callback(self, callback):
         self._data_callbacks.append(callback)
-        
+
     def register_selection_callback(self, callback):
         self._selection_callbacks.append(callback)
 
     def _notify_data_changed(self):
-        if self.callbacks_muted: return
-        for callback in self._data_callbacks: callback()
-        
-    def _notify_selection_changed(self):
-        if self.callbacks_muted: return
-        for callback in self._selection_callbacks: callback()
+        if self.callbacks_muted:
+            return
+        for callback in self._data_callbacks:
+            callback()
 
-    # (Optional helper to safely update selection)
+    def _notify_selection_changed(self):
+        if self.callbacks_muted:
+            return
+        for callback in self._selection_callbacks:
+            callback()
+
     def set_selection(self, uids):
         self.selected_uids = set(uids)
         self.active_uid = list(self.selected_uids)[0] if len(self.selected_uids) == 1 else None
         self._notify_selection_changed()
 
+    # --- Task metadata ---
     def set_task_metadata(self, plants_meta=None, plate_meta=None):
         """Inject per-plant and plate metadata before save."""
         if plants_meta is not None:
             self.plants_meta = {
                 int(uid): {
                     "genotype": meta.get("genotype", ""),
-                    "plant_num": str(meta.get("plant_num", uid)),
+                    "plant_num": str(meta.get("plant_num", "")).strip() or str(uid),
                 }
                 for uid, meta in plants_meta.items()
             }
@@ -376,30 +320,25 @@ class PlantImageModel:
         return {
             uid: {
                 "genotype": meta.get("genotype", ""),
-                "plant_num": str(meta.get("plant_num", uid)),
+                "plant_num": str(meta.get("plant_num", "")).strip() or str(uid),
             }
             for uid, meta in self.plants_meta.items()
         }
 
+    def sync_plant_numbers_to_uids(self, force=False):
+        """Default Plant # to UID; force=True overwrites user edits (auto renumber)."""
+        for uid in self.masks:
+            if force:
+                entry = self.plants_meta.setdefault(uid, {"genotype": "", "plant_num": str(uid)})
+                entry["plant_num"] = str(uid)
+                continue
+            if uid not in self.plants_meta:
+                self.plants_meta[uid] = {"genotype": "", "plant_num": str(uid)}
+            elif not str(self.plants_meta[uid].get("plant_num", "")).strip():
+                self.plants_meta[uid]["plant_num"] = str(uid)
+
     def get_plate_meta(self):
         return dict(self.plate_meta)
-
-    def get_analysis_meta(self):
-        return dict(self.analysis_meta)
-
-    def update_analysis_meta(self, base_name, plants_analyzed, out_dir=None):
-        """Session-only analysis tracking; not written to annotation JSON."""
-        metrics_file = canonical_metrics_name(base_name)
-        topology_file = canonical_topology_name(base_name)
-        self.analysis_meta = {
-            "status": "analyzed",
-            "metrics_file": metrics_file,
-            "topology_file": topology_file,
-            "exported_at": datetime.now(timezone.utc).isoformat(),
-            "plants_analyzed": int(plants_analyzed),
-        }
-        if out_dir:
-            self.analysis_meta["output_dir"] = out_dir
 
     def invalidate_peek_cache(self, json_path=None):
         """Clear browse peek cache after annotation save."""
@@ -408,13 +347,17 @@ class PlantImageModel:
         else:
             _file_peek_cache.clear()
 
+    # --- UID remapping ---
     def _remap_plants_meta(self, mapping):
         if not mapping or not self.plants_meta:
             return
         remapped = {}
         for old_uid, meta in self.plants_meta.items():
             new_uid = mapping.get(old_uid, old_uid)
-            remapped[new_uid] = meta
+            remapped[new_uid] = {
+                "genotype": meta.get("genotype", ""),
+                "plant_num": str(meta.get("plant_num", "")).strip() or str(new_uid),
+            }
         self.plants_meta = remapped
 
     def _remap_uid_collections(self, mapping):
@@ -445,8 +388,7 @@ class PlantImageModel:
         self.history.clear()
         self._remap_plants_meta(mapping)
 
-    # --- FILE SYSTEM & IO (Completely Isolated) ---
-    
+    # --- Directory scan ---
     def scan_directory(self, folder_path, output_dir=None, fixed_output=False):
         """Scans a directory and returns a formatted list of dicts for the GUI without exposing OS/JSON ops."""
         contents = []
@@ -553,8 +495,8 @@ class PlantImageModel:
 
         return contents
 
+    # --- Load / save ---
     def load_task(self, task_path, base_name):
-        # --- NEW: Sanitize base_name to strip accidental extensions ---
         if base_name.lower().endswith(('.png', '.jpg', '.jpeg')):
             base_name = os.path.splitext(base_name)[0]
             
@@ -572,9 +514,8 @@ class PlantImageModel:
         self.class_patches.clear()
         self.plants_meta.clear()
         self.plate_meta.clear()
-        self.analysis_meta.clear()
         
-        # 2. LOAD NEW DATA
+        # Load new data
         self.status = "pending"
         self.image_path = None
         
@@ -603,7 +544,7 @@ class PlantImageModel:
         else:
             self._load_instances_from_nifti(nii_path, (h, w))
 
-        # --- NEW: Filter out spurious instances (width < 3 or height < 3) ---
+        # Filter out spurious instances (width < 3 or height < 3)
         uids_to_remove = []
         for uid, mask in self.masks.items():
             coords = cv2.findNonZero(mask)
@@ -623,11 +564,13 @@ class PlantImageModel:
         self.max_id = max(self.masks.keys()) if self.masks else 0
         self.regenerate_metadata()
         self.sort_instances_spatially(row_tolerance=250)
+        self.sync_plant_numbers_to_uids(force=False)
         
         # 3. Warm up class patches for faster GUI response
         for uid in self.masks.keys():
             self._get_class_patch(uid)
 
+    # --- Mask validation & spatial sort ---
     def clean_and_validate_masks(self):
         needs_metadata_update = False
         
@@ -716,6 +659,7 @@ class PlantImageModel:
         self._remap_uid_collections(mapping)
         return mapping
         
+    # --- Load / save (write) ---
     def save_current_task(self, task_path, base_name, mark_finished=False):
         """Writes current mask data to disk. Completely insulates GUI from JSON/NIfTI."""
         if not self.masks: return False
@@ -725,13 +669,19 @@ class PlantImageModel:
         if not is_valid:
             raise ValueError(f"UID {bad_uid} consists of more than one connected component.\nPlease use the paint tool to connect the pieces, or the split tool to separate them into different IDs.")
 
-        # 2. REINDEX PLANTS AND GET THE MAPPING
-        mapping = self.reindex_instances()
+        # 2. Spatially order UIDs (left-to-right rows); preserve user plant numbers
+        mapping = self.sort_instances_spatially(row_tolerance=250)
+        self.sync_plant_numbers_to_uids(force=False)
 
         # 3. PROCEED WITH SAVING
-        self.status = "completed" if mark_finished else "in_progress"
+        # Never auto-downgrade a completed annotation on a progress (mark_finished=False)
+        # save, e.g. a metadata-only edit must not flip completed back to in_progress.
+        if mark_finished:
+            self.status = "completed"
+        elif normalize_annotation_status(self.status) != "completed":
+            self.status = "in_progress"
         
-        data = self._export_coco()
+        data = self._build_annotation_document()
         json_path = os.path.join(task_path, f"{base_name}.json")
         tmp_path = json_path + ".tmp"
         with open(tmp_path, 'w', encoding='utf-8') as f:
@@ -752,8 +702,7 @@ class PlantImageModel:
         # Return the mapping dictionary so the GUI knows how to update itself!
         return mapping
 
-    # --- INTERNAL LOAD/SAVE HELPERS ---
-    
+    # --- Annotation JSON helpers ---
     def _load_mask_from_nifti(self, nii_path, shape):
         try:
             data = np.squeeze(np.asanyarray(nib.load(nii_path).dataobj))
@@ -781,12 +730,13 @@ class PlantImageModel:
             with open(json_path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
 
-            self.status = normalize_annotation_status(data.get("status", "in_progress"))
+            summary = data.get("summary") or {}
+            ann_raw = summary.get("annotation_status") or data.get("status", "in_progress")
+            self.status = normalize_annotation_status(ann_raw)
             if self.status == "missing":
                 self.status = "in_progress"
 
             self.plate_meta = data.get("plate_meta") or {}
-            # analysis_meta in legacy JSON is ignored; analysis lives in export files only
             self.plants_meta = {}
 
             for ann in data.get('annotations', []):
@@ -803,8 +753,11 @@ class PlantImageModel:
                 self.masks[uid] = mask
 
                 genotype = ann.get("genotype", "")
-                plant_num = str(ann.get("plant_num", uid))
-                self.plants_meta[uid] = {"genotype": genotype, "plant_num": plant_num}
+                saved_num = str(ann.get("plant_num", "")).strip()
+                self.plants_meta[uid] = {
+                    "genotype": genotype,
+                    "plant_num": saved_num,
+                }
 
                 ys, xs = np.where(mask)
                 if len(xs) > 0 and "semantic_rle" in ann:
@@ -814,7 +767,7 @@ class PlantImageModel:
         except Exception as e:
             print(f"JSON Error: {e}")
 
-    def _export_coco(self):
+    def _build_annotation_document(self):
         ann_status = normalize_annotation_status(self.status)
         if ann_status == "missing":
             ann_status = "in_progress"
@@ -825,7 +778,6 @@ class PlantImageModel:
                 "annotation_status": ann_status,
                 "plant_count": len(self.masks),
             },
-            "info": {"status": ann_status},
             "status": ann_status,
             "plate_meta": dict(self.plate_meta),
             "images": [{
@@ -843,25 +795,19 @@ class PlantImageModel:
             if np.sum(mask) == 0:
                 continue
 
-            polys = [
-                c.flatten().tolist()
-                for c in cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)[0]
-                if c.shape[0] >= 3
-            ]
-
             ys, xs = np.where(mask)
             if len(xs) == 0:
                 continue
 
             patch, _, _ = self._get_class_patch(uid)
             plant_meta = self.plants_meta.get(uid, {})
+            plant_num = str(plant_meta.get("plant_num", "")).strip() or str(uid)
             output["annotations"].append({
                 "id": int(uid),
                 "image_id": 1,
                 "category_id": 1,
                 "genotype": plant_meta.get("genotype", ""),
-                "plant_num": str(plant_meta.get("plant_num", uid)),
-                "segmentation": polys,
+                "plant_num": plant_num,
                 "instance_rle": encode_rle(mask),
                 "semantic_rle": encode_rle(patch),
                 "area": float(np.sum(mask)),
@@ -875,8 +821,7 @@ class PlantImageModel:
         output["summary"]["plant_count"] = len(output["annotations"])
         return output
 
-    # --- GUI-FRIENDLY RENDER EXPORTS ---
-    
+    # --- GUI render exports ---
     def _pack_for_gui(self, array, is_rgba=True):
         """Converts NumPy array to a GUI-safe tuple (bytes, width, height, bytes_per_line)."""
         if array is None: return None
@@ -1015,8 +960,7 @@ class PlantImageModel:
                 
         return self._pack_for_gui(full_rgba)
 
-    # --- METADATA & DATA MANAGEMENT ---
-    
+    # --- Instance metadata ---
     def get_id_at(self, x, y):
         for uid in sorted(self.masks.keys(), reverse=True):
             mask = self.masks[uid]
@@ -1053,7 +997,7 @@ class PlantImageModel:
                     self.color_map[uid] = HIGH_CONTRAST_COLORS[uid % len(HIGH_CONTRAST_COLORS)]
         self._notify_data_changed()
 
-    # --- TOOLS (Operating on Specific Masks) ---
+    # --- Editing tools ---
     def prepare_new_uid(self):
         return self.max_id + 1
 
@@ -1064,15 +1008,13 @@ class PlantImageModel:
         h, w = self.raw_image.shape[:2]
         self.masks[uid] = np.zeros((h, w), dtype=np.uint8)
         self.max_id = max(self.max_id, uid)
-        
+        self.color_map[uid] = HIGH_CONTRAST_COLORS[uid % len(HIGH_CONTRAST_COLORS)]
+
         self.apply_stroke(uid, first_points, brush_size, is_erase=False, record_undo=False)
         
-        self.color_map[uid] = HIGH_CONTRAST_COLORS[uid % len(HIGH_CONTRAST_COLORS)]
         self.update_metadata_for_uid(uid)
         
         self.dirty = True
-        self._notify_data_changed() 
-
     def merge_instances(self, ids):
         """Creates a brand new UID for the merged result and deletes the originals."""
         if len(ids) < 2: return None
@@ -1224,8 +1166,6 @@ class PlantImageModel:
         self.dirty = True
         self._notify_data_changed()
 
-    # --- STROKE RENDERER ---
-    
     def apply_stroke(self, uid, points, brush_size, is_erase=False, record_undo=True):
         if not points or uid not in self.masks: return
         
@@ -1389,7 +1329,7 @@ class PlantImageModel:
             
         return final_map
 
-    # --- FULLY OPTIMIZED UNDO/STATE ---
+    # --- Undo ---
     def save_state(self, target_uids):
         """Saves only the affected masks, plus the exact max_id at this moment."""
         if isinstance(target_uids, int):

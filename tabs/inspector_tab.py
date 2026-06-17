@@ -218,7 +218,7 @@ class PhenomicsInspectorTab(QWidget):
         # ==========================================
         # 2. MANUSCRIPT METRICS REPORT READOUT
         # ==========================================
-        report = f"--- CHRONOROOT ID: {uid} ---\n"
+        report = f"--- REPORT ID: {uid} ---\n"
         report += f"Genotype: {data.get('genotype', 'N/A')}\n"
         report += f"Plant #:  {data.get('plant_num', 'N/A')}\n\n"
         

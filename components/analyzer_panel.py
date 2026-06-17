@@ -22,6 +22,7 @@ class PhenomicsControlPanel(QWidget):
     overlay_labels_changed = pyqtSignal()
 
     metadata_dirty_changed = pyqtSignal()
+    auto_renumber_requested = pyqtSignal()
 
     def __init__(self, global_config, config_file=None):
         super().__init__()
@@ -40,7 +41,7 @@ class PhenomicsControlPanel(QWidget):
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(8)
 
-        layout.addWidget(QLabel("<b>Plate Metadata & Calibration:</b>"))
+        layout.addWidget(QLabel("<b>Plate Metadata &amp; Calibration:</b>"))
         form = QFormLayout()
 
         self.in_plate_id = QLineEdit("Plate_01")
@@ -97,6 +98,13 @@ class PhenomicsControlPanel(QWidget):
         self.btn_manage_genos.setToolTip("Add, edit, or remove genotypes in the saved list.")
         self.btn_manage_genos.clicked.connect(self.manage_genotypes_requested.emit)
         id_header.addWidget(self.btn_manage_genos)
+        self.btn_auto_renumber = QPushButton("Auto Renumber")
+        self.btn_auto_renumber.setToolTip(
+            "Set every Plant # to match its spatial UID (left-to-right). "
+            "Use when defaults are wrong; manual edits are kept until you click this."
+        )
+        self.btn_auto_renumber.clicked.connect(self.auto_renumber_requested.emit)
+        id_header.addWidget(self.btn_auto_renumber)
         layout.addLayout(id_header)
 
         self.lbl_bulk_hint = QLabel(
@@ -344,7 +352,7 @@ class PhenomicsControlPanel(QWidget):
             num_item = self.table_plants.item(row, 2)
             metadata[uid] = {
                 "genotype": self._genotype_from_combo(combo),
-                "plant_num": num_item.text() if num_item else str(row + 1),
+                "plant_num": num_item.text().strip() if num_item and num_item.text().strip() else str(uid),
             }
         return metadata
 
@@ -397,7 +405,10 @@ class PhenomicsControlPanel(QWidget):
         for old_uid, meta in metadata.items():
             new_uid = uid_mapping.get(old_uid)
             if new_uid is not None:
-                remapped[new_uid] = meta
+                remapped[new_uid] = {
+                    "genotype": meta.get("genotype", ""),
+                    "plant_num": str(meta.get("plant_num", "")).strip() or str(new_uid),
+                }
         return remapped
 
     def clear_table(self):
@@ -463,10 +474,13 @@ class PhenomicsControlPanel(QWidget):
         plants_meta = []
         for row in range(self.table_plants.rowCount()):
             combo = self.table_plants.cellWidget(row, 1)
+            num_item = self.table_plants.item(row, 2)
             plants_meta.append({
                 "uid": self.table_plants.item(row, 0).data(Qt.UserRole),
                 "genotype": self._genotype_from_combo(combo),
-                "plant_num": self.table_plants.item(row, 2).text(),
+                "plant_num": num_item.text().strip() if num_item and num_item.text().strip() else str(
+                    self.table_plants.item(row, 0).data(Qt.UserRole)
+                ),
             })
 
         self.measure_requested.emit(plants_meta, cm_per_px)
@@ -513,12 +527,31 @@ class PhenomicsControlPanel(QWidget):
             combo.currentIndexChanged.connect(self.metadata_dirty_changed.emit)
             self.table_plants.setCellWidget(row, 1, combo)
 
-            plant_num = saved.get("plant_num", str(row + 1))
+            plant_num = str(saved.get("plant_num", "")).strip() or str(uid)
             self.table_plants.setItem(row, 2, QTableWidgetItem(plant_num))
 
         self.table_plants.blockSignals(False)
         self._last_bulk_row_selection = set()
         self.btn_export.setEnabled(False)
+        self.update_overlay_labels()
+
+    def apply_plant_numbers(self, plants_metadata):
+        """Refresh Plant # column from model metadata (e.g. after auto renumber)."""
+        self.table_plants.blockSignals(True)
+        for row in range(self.table_plants.rowCount()):
+            uid_item = self.table_plants.item(row, 0)
+            if not uid_item:
+                continue
+            uid = uid_item.data(Qt.UserRole)
+            meta = plants_metadata.get(uid, {})
+            plant_num = str(meta.get("plant_num", "")).strip() or str(uid)
+            num_item = self.table_plants.item(row, 2)
+            if num_item is None:
+                num_item = QTableWidgetItem(plant_num)
+                self.table_plants.setItem(row, 2, num_item)
+            else:
+                num_item.setText(plant_num)
+        self.table_plants.blockSignals(False)
         self.update_overlay_labels()
 
     def refresh_genotype_combos(self, genotypes, select_genotype=None):
@@ -557,7 +590,7 @@ class PhenomicsControlPanel(QWidget):
             num_item = self.table_plants.item(row, 2)
 
             genotype = self._genotype_from_combo(combo)
-            plant_num = num_item.text() if num_item else str(row + 1)
+            plant_num = num_item.text().strip() if num_item and num_item.text().strip() else str(uid)
             geno_num = str(genotypes.index(genotype) + 1) if genotype in genotypes else "?"
 
             label_data[uid] = {

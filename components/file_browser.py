@@ -10,6 +10,11 @@ from PyQt5.QtCore import Qt, pyqtSignal
 from core.model import annotation_status_display, analysis_status_display, normalize_annotation_status
 
 
+def qt_display_text(text):
+    """Escape '&' for Qt widgets that treat it as a keyboard mnemonic marker."""
+    return str(text).replace("&", "&&")
+
+
 # ==========================================
 # CUSTOM LIST ITEM WIDGETS
 # ==========================================
@@ -50,7 +55,7 @@ class FolderStatsWidget(QWidget):
         )
         icon_label.setPixmap(icon.pixmap(16, 16))
 
-        name_label = QLabel(text)
+        name_label = QLabel(qt_display_text(text))
         name_label.setStyleSheet("font-weight: bold;" if is_folder else "")
 
         top_row.addWidget(icon_label)
@@ -73,10 +78,7 @@ class FolderStatsWidget(QWidget):
             ))
 
             if completed > 0:
-                anal_txt = (
-                    f"Analysis — Analyzed: {analyzed} | Ready: {not_analyzed} | "
-                    f"Completed tasks: {completed}"
-                )
+                anal_txt = f"Analysis — Analyzed: {analyzed} | Ready: {not_analyzed}"
                 lbl_anal = QLabel(anal_txt)
                 lbl_anal.setStyleSheet("color: #666; font-size: 10px;")
                 layout.addWidget(lbl_anal)
@@ -124,7 +126,7 @@ class FileStatsWidget(QWidget):
         icon_label = QLabel()
         icon_label.setPixmap(_annotation_icon(display).pixmap(16, 16))
         top_row.addWidget(icon_label)
-        top_row.addWidget(QLabel(name))
+        top_row.addWidget(QLabel(qt_display_text(name)))
         top_row.addStretch()
         layout.addLayout(top_row)
 
@@ -141,12 +143,7 @@ class DualRowFileStatsWidget(QWidget):
         super().__init__()
         ann_display = annotation_status_display(annotation_status)
         anal_display = analysis_status_display(analysis_status)
-        if analysis_status == "analyzed" and plants_analyzed is not None:
-            anal_line = f"Analysis: {anal_display} | Plants: {plants_analyzed}"
-        elif analysis_status == "not_analyzed":
-            anal_line = f"Analysis: {anal_display} | Plants: {plant_count}"
-        else:
-            anal_line = f"Analysis: {anal_display}"
+        anal_line = f"Analysis: {anal_display}"
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(5, 5, 5, 5)
@@ -156,7 +153,7 @@ class DualRowFileStatsWidget(QWidget):
         icon_label = QLabel()
         icon_label.setPixmap(_annotation_icon(ann_display).pixmap(16, 16))
         top_row.addWidget(icon_label)
-        top_row.addWidget(QLabel(name))
+        top_row.addWidget(QLabel(qt_display_text(name)))
         top_row.addStretch()
         layout.addLayout(top_row)
 
@@ -555,6 +552,7 @@ class UnifiedFileBrowser(QWidget):
                     "type": "file",
                     "path": item["path"],
                     "status": item.get("status", "Pending"),
+                    "annotation_status": item.get("annotation_status"),
                 })
 
                 plant_count = item.get("plant_count", 0)
@@ -584,7 +582,7 @@ class UnifiedFileBrowser(QWidget):
         for item in contents:
             if item["type"] == "dir":
                 icon = QApplication.style().standardIcon(QStyle.SP_DirIcon)
-                list_item = QListWidgetItem(icon, item["name"])
+                list_item = QListWidgetItem(icon, qt_display_text(item["name"]))
                 list_item.setData(Qt.UserRole, {"type": "dir", "path": item["path"]})
                 self.task_list.addItem(list_item)
 
@@ -594,6 +592,7 @@ class UnifiedFileBrowser(QWidget):
                     "type": "file",
                     "path": item["path"],
                     "status": item.get("status", "Pending"),
+                    "annotation_status": item.get("annotation_status"),
                 })
                 widget = AnalyzerFileStatsWidget(
                     item["name"],
@@ -615,11 +614,4 @@ class UnifiedFileBrowser(QWidget):
     def on_item_clicked(self, item):
         data = item.data(Qt.UserRole)
         if data["type"] == "file":
-            ann = normalize_annotation_status(data.get("status") or data.get("annotation_status"))
-            if ann != "completed":
-                QMessageBox.warning(
-                    self, "Skip",
-                    "This file has not been completed in the Annotation Suite yet."
-                )
-                return
             self.file_selected.emit(data)

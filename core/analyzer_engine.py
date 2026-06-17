@@ -152,6 +152,23 @@ def _plant_match_key(plant):
     )
 
 
+def _normalize_restored_plant(plant):
+    """Convert JSON-serialized measurement fields back to in-memory types."""
+    sp = plant.get("semantic_patch")
+    if isinstance(sp, list):
+        plant["semantic_patch"] = np.array(sp, dtype=np.uint8)
+
+    csc = plant.get("colored_skel_crop")
+    if isinstance(csc, list):
+        plant["colored_skel_crop"] = np.array(csc, dtype=np.uint8)
+
+    co = plant.get("crop_offset")
+    if isinstance(co, (list, tuple)) and len(co) >= 2:
+        plant["crop_offset"] = (int(co[0]), int(co[1]))
+
+    return plant
+
+
 def load_measurements_from_metrics_json(metrics_path, current_uids, plants_metadata=None):
     """
     Load a prior metrics export into an in-memory measurements_cache dict.
@@ -175,7 +192,7 @@ def load_measurements_from_metrics_json(metrics_path, current_uids, plants_metad
     for plant in plants:
         saved_uid = plant.get("uid")
         if saved_uid is not None and int(saved_uid) in uid_set:
-            by_uid[int(saved_uid)] = dict(plant)
+            by_uid[int(saved_uid)] = _normalize_restored_plant(dict(plant))
             continue
         unmatched.append(plant)
 
@@ -186,24 +203,36 @@ def load_measurements_from_metrics_json(metrics_path, current_uids, plants_metad
         }
         for plant in unmatched:
             key = _plant_match_key(plant)
+            new_uid = None
             if key in meta_by_key:
                 new_uid = int(meta_by_key[key])
-                if new_uid in by_uid:
-                    warnings.append(
-                        f"Duplicate match for plant #{plant.get('plant_num')} ({plant.get('genotype')})."
-                    )
-                    continue
-                remapped = dict(plant)
-                remapped["uid"] = new_uid
-                by_uid[new_uid] = remapped
-                warnings.append(
-                    f"Remapped plant #{plant.get('plant_num')} ({plant.get('genotype')}) "
-                    f"from UID {plant.get('uid')} to UID {new_uid}."
-                )
             else:
+                # Legacy exports: plant_num often matched the spatial UID index.
+                try:
+                    pn_uid = int(str(plant.get("plant_num", "")).strip())
+                except (TypeError, ValueError):
+                    pn_uid = None
+                if pn_uid is not None and pn_uid in uid_set:
+                    new_uid = pn_uid
+
+            if new_uid is None:
                 warnings.append(
                     f"Could not match plant #{plant.get('plant_num')} ({plant.get('genotype')}) "
                     f"to current annotations."
+                )
+                continue
+            if new_uid in by_uid:
+                warnings.append(
+                    f"Duplicate match for plant #{plant.get('plant_num')} ({plant.get('genotype')})."
+                )
+                continue
+            remapped = _normalize_restored_plant(dict(plant))
+            remapped["uid"] = new_uid
+            by_uid[new_uid] = remapped
+            if plant.get("uid") != new_uid:
+                warnings.append(
+                    f"Remapped plant #{plant.get('plant_num')} ({plant.get('genotype')}) "
+                    f"from UID {plant.get('uid')} to UID {new_uid}."
                 )
 
     missing_uids = uid_set - set(by_uid.keys())
@@ -242,9 +271,8 @@ def export_rsml_and_json(out_dir, base_name, plate_meta, measurements_dict):
     for uid, data in measurements_dict.items():
         # Strip heavy memory objects before JSON dump
         json_safe_data = {k: v for k, v in data.items() if k not in [
-            "rsml_xml", "metadata_xml", "main_pts", "lateral_pts_list", 
-            "colored_skel_crop", "crop_offset", "main_root_colors", "graph_edges"
-        ]} 
+            "rsml_xml", "metadata_xml", "main_pts", "lateral_pts_list",
+        ]}
         export_data["plants"].append(json_safe_data)
         
         # Plug the individual plant into the Master Scene
