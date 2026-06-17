@@ -420,8 +420,8 @@ class ChronoRootAnnotationSuite(QMainWindow):
         if hasattr(self.workspaces.canvas_review, "distance_measured"):
             self.workspaces.canvas_review.distance_measured.connect(self.on_distance_measured)
 
-        self.workspaces.inspector_tab.run_analysis_requested.connect(
-            self.panel_phenomics._on_measure_clicked
+        self.workspaces.inspector_tab.go_to_metadata_requested.connect(
+            self._go_to_plant_metadata
         )
 
         self.workspaces.report_file_panel.open_requested.connect(
@@ -521,6 +521,11 @@ class ChronoRootAnnotationSuite(QMainWindow):
             self.config["output_root"] = self.current_task_path
         elif mode == "fixed":
             self.config["output_root"] = self.browser.out_dir
+
+    def _go_to_plant_metadata(self):
+        self.control_tabs.setCurrentIndex(1)
+        if self.splitter.sizes()[1] == 0 and not self._focus_mode_active:
+            self.splitter.setSizes([300, 350, 950])
 
     def _on_workspace_changed(self, index):
         if index in [0, 1, 2, 3]:
@@ -683,7 +688,7 @@ class ChronoRootAnnotationSuite(QMainWindow):
         self.panel_phenomics.btn_measure_tool.setChecked(True)
         self.workspaces.canvas_review.set_calibrating(True)
         self.workspaces.canvas_review.set_mode("RULER")
-        self.panel_phenomics.btn_measure_tool.setText("Stop Measuring")
+        self.panel_phenomics.btn_measure_tool.setText("Stop measuring")
         self.workspaces.setCurrentIndex(0)
         QMessageBox.information(
             self, "Calibration Mode",
@@ -695,13 +700,13 @@ class ChronoRootAnnotationSuite(QMainWindow):
             self.is_calibrating = False
             self.workspaces.canvas_review.set_calibrating(False)
             self.workspaces.canvas_review.set_mode("RULER")
-            self.panel_phenomics.btn_measure_tool.setText("Stop Measuring")
+            self.panel_phenomics.btn_measure_tool.setText("Stop measuring")
             self.workspaces.setCurrentIndex(0)
         else:
             self.is_calibrating = False
             self.workspaces.canvas_review.set_calibrating(False)
             self.workspaces.canvas_review.set_mode("SELECT")
-            self.panel_phenomics.btn_measure_tool.setText("Test Distance Tool")
+            self.panel_phenomics.btn_measure_tool.setText("Check scale on image")
 
     def validate_and_update_ruler(self):
         self.panel_phenomics.validate_calib_field()
@@ -714,7 +719,7 @@ class ChronoRootAnnotationSuite(QMainWindow):
         self.panel_phenomics.btn_measure_tool.setChecked(False)
         self.workspaces.canvas_review.set_calibrating(False)
         self.workspaces.canvas_review.set_mode("SELECT")
-        self.panel_phenomics.btn_measure_tool.setText("Test Distance Tool")
+        self.panel_phenomics.btn_measure_tool.setText("Check scale on image")
 
         text_val, ok = QInputDialog.getText(
             self, "Calibration Setup",
@@ -845,8 +850,8 @@ class ChronoRootAnnotationSuite(QMainWindow):
             QMessageBox.warning(
                 self,
                 "Source Image Not Found",
-                "Could not resolve the original image for this metrics file.\n"
-                f"Metrics: {metrics_path}",
+                "Could not resolve the original image for this exported plate.\n"
+                f"File: {metrics_path}",
             )
             return
         self._pending_open_annotation_tab = True
@@ -868,7 +873,7 @@ class ChronoRootAnnotationSuite(QMainWindow):
         self.global_model.set_selection([])
         self.panel_review.force_mode("SELECT")
 
-        self.show_loading(f"Loading {self.current_base_name}...\n(Parsing masks and NIfTI data)")
+        self.show_loading(f"Loading {self.current_base_name}...\n(Loading plate data…)")
         worker = ModelWorker(
             self.global_model.load_task, self.current_task_path, self.current_base_name
         )
@@ -922,6 +927,8 @@ class ChronoRootAnnotationSuite(QMainWindow):
         self.workspaces.canvas_review.refresh_canvas()
         self.update_canvas_ruler()
         self.workspaces.setCurrentIndex(0)
+
+        self.workspaces.canvas_review.update_info_label()
 
     def _offer_analysis_restore(self):
         metrics_path = self._resolve_metrics_path()
@@ -978,13 +985,13 @@ class ChronoRootAnnotationSuite(QMainWindow):
                 self.global_model.get_plants_metadata(),
             )
         except (OSError, json.JSONDecodeError, ValueError) as exc:
-            QMessageBox.warning(self, "Restore Failed", f"Could not load metrics file:\n{exc}")
+            QMessageBox.warning(self, "Restore Failed", f"Could not load analysis data:\n{exc}")
             return
 
         if not restored:
             QMessageBox.warning(
                 self, "Restore Failed",
-                "No measurements could be matched to the current annotation UIDs."
+                "No measurements could be matched to the current plants."
             )
             return
 
@@ -996,7 +1003,7 @@ class ChronoRootAnnotationSuite(QMainWindow):
             QMessageBox.information(
                 self, "Analysis Restored with Warnings",
                 "Measurements were restored, but some plants could not be matched "
-                "exactly by UID and were remapped by plant number/genotype:\n\n"
+                "exactly and were remapped by plant number/genotype:\n\n"
                 + "\n".join(f"• {w}" for w in warnings[:12])
                 + ("\n• …" if len(warnings) > 12 else "")
             )
@@ -1012,7 +1019,7 @@ class ChronoRootAnnotationSuite(QMainWindow):
         )
 
         self.global_model.callbacks_muted = True
-        self.show_loading("Saving progress...\n(Flattening multi-class masks and generating NIfTI)")
+        self.show_loading("Saving progress...\n(Saving masks…)")
         self._pending_mark_finished = mark_finished
 
         worker = ModelWorker(
@@ -1029,6 +1036,8 @@ class ChronoRootAnnotationSuite(QMainWindow):
     def _on_save_finished(self, mapping):
         self.hide_loading()
         self.global_model.callbacks_muted = False
+        was_finish = self._pending_mark_finished
+        self._pending_mark_finished = False
         worker = self.sender()
         if worker in self.active_workers:
             self.active_workers.remove(worker)
@@ -1072,17 +1081,23 @@ class ChronoRootAnnotationSuite(QMainWindow):
             self._pending_export_plate_meta = None
             self._run_export_worker(plate_meta)
 
+        if was_finish and mapping is not None:
+            QMessageBox.information(
+                self,
+                "Annotation Complete",
+                "This plate is marked completed.",
+            )
+
     # --- Analysis Engine ---
     def run_measurements(self, plants_meta, cm_per_px):
         if normalize_annotation_status(self.global_model.status) != "completed":
             QMessageBox.warning(
                 self, "Finish Annotation First",
-                "This plate's annotation is not marked Completed.\n\n"
-                "Finish the annotation (Save & Finish) before measuring, so the "
-                "analysis is always derived from a completed, saved annotation.",
+                "This plate is not marked Completed yet.\n\n"
+                "Click Finish Annotation before measuring.",
             )
             return
-        self.show_loading("Measuring Morphometrics & Tracing RSML...")
+        self.show_loading("Measuring traits…")
         worker = ModelWorker(extract_plate_metrics, self.global_model, plants_meta, cm_per_px)
         self.active_workers.add(worker)
         worker.finished.connect(self._on_measure_finished)
@@ -1141,9 +1156,8 @@ class ChronoRootAnnotationSuite(QMainWindow):
         if normalize_annotation_status(self.global_model.status) != "completed":
             QMessageBox.warning(
                 self, "Finish Annotation First",
-                "This plate's annotation is not marked Completed.\n\n"
-                "Finish the annotation (Save & Finish) before exporting, so the "
-                "annotation and analysis files always describe the same snapshot.",
+                "This plate is not marked Completed yet.\n\n"
+                "Click Finish Annotation before exporting.",
             )
             return
 
@@ -1186,7 +1200,7 @@ class ChronoRootAnnotationSuite(QMainWindow):
         )
         plate_meta["original_image"] = original_img_name
 
-        self.show_loading("Exporting JSON and RSML...")
+        self.show_loading("Exporting analysis…")
         worker = ModelWorker(
             export_rsml_and_json,
             out_dir,

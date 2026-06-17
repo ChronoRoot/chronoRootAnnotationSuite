@@ -8,6 +8,8 @@ from PyQt5.QtCore import Qt, pyqtSignal, QRectF
 from PyQt5.QtGui import (QImage, QPixmap, QPainter, QPainterPath, QPen, QColor, 
                          QBrush, QIcon, QFont)
 
+from components.ui_help import HELP_ANNOTATION, show_help
+
 # ==========================================
 # HELPER: DATA TO GUI TRANSLATION
 # ==========================================
@@ -566,22 +568,34 @@ class ReviewCanvasTab(QWidget):
         
         if mode == "SELECT":
             if active:
-                self.lbl_info.setText(f"SELECTION MODE: Plant ID {active} Selected. (Shift+Click to add more)")
+                self.lbl_info.setText(
+                    f"Plant {active} selected. Shift+click to add more plants."
+                )
             elif len(selected) > 1:
                 ids_str = ", ".join(str(i) for i in sorted(selected))
-                self.lbl_info.setText(f"SELECTION MODE: {len(selected)} Plants Selected (IDs: {ids_str}).")
+                self.lbl_info.setText(f"{len(selected)} plants selected ({ids_str}).")
             else:
-                self.lbl_info.setText("SELECTION MODE: No plant selected. Click plants on the canvas or in the list to select.")
-        elif mode == "GLOBAL": 
-            self.lbl_info.setText("GLOBAL VIEW: Showing all Semantic Classes across the image.")
+                self.lbl_info.setText(
+                    "No plant selected. Click a plant on the canvas or in the list."
+                )
+        elif mode == "GLOBAL":
+            self.lbl_info.setText("Review all labels — every plant and root part on the plate.")
         elif mode == "PAINT":
-            self.lbl_info.setText(f"SHAPE PAINT [Plant ID {active}]: Left-Click to Paint | Right-Click to Erase.")
+            self.lbl_info.setText(
+                f"Plant {active} — Outline: left = add, right = erase."
+            )
         elif mode == "SEMANTIC":
-            self.lbl_info.setText(f"MULTI-CLASS [Plant ID {active}]: Paint specific biology classes.")
+            self.lbl_info.setText(
+                f"Plant {active} — Paint root part labels (Main Root, Lateral Root, etc.)."
+            )
         elif mode == "SPLIT":
-            self.lbl_info.setText(f"SPLIT MODE [Plant ID {active}]: Draw a red line across the plant to cut it.")
+            self.lbl_info.setText(
+                f"Plant {active} — Draw a red line across the plant to cut; double-click to finish."
+            )
         elif mode == "RULER":
-            self.lbl_info.setText("RULER MODE: Click and drag to measure distance. Set calibration on the left to convert to cm.")
+            self.lbl_info.setText(
+                "Ruler: click and drag to measure. Set calibration in Plant Metadata for cm."
+            )
 
     def zoom_to_plant(self, uid):
         if uid in self.model.bboxes:
@@ -682,29 +696,40 @@ class ReviewToolPanel(QWidget):
     def init_ui(self):
         sl = QVBoxLayout(self)
         sl.setContentsMargins(5, 5, 5, 5)
+
+        tools_header = QHBoxLayout()
+        self.lbl_workflow_hint = QLabel(
+            "<span style='color:#555; font-size:11px;'>"
+            "Select a plant in the list, then use the tools below.</span>"
+        )
+        tools_header.addWidget(self.lbl_workflow_hint)
+        tools_header.addStretch()
+        self.btn_ann_help = QPushButton("Help")
+        self.btn_ann_help.setToolTip("Open annotation workflow help")
+        self.btn_ann_help.clicked.connect(
+            lambda: show_help(self, "Annotation Help", HELP_ANNOTATION)
+        )
+        tools_header.addWidget(self.btn_ann_help)
+        sl.addLayout(tools_header)
         
         row_actions = QHBoxLayout()
         self.btn_unselect = QPushButton("Clear Selection")
+        self.btn_unselect.setToolTip("Clear the current plant selection.")
         self.btn_unselect.clicked.connect(lambda: self.model.set_selection([]))
         
         self.btn_bbox = QPushButton("Bounding Boxes")
         self.btn_bbox.setCheckable(True)
         self.btn_bbox.setChecked(True)
+        self.btn_bbox.setToolTip("Show or hide bounding boxes around each plant.")
         self.btn_bbox.clicked.connect(lambda: self.canvas_tab.set_show_bboxes(self.btn_bbox.isChecked()))
-        
-        # --- NEW: Checkbox toggle for Metadata Labels ---
-        self.btn_labels = QPushButton("Plant Labels")
-        self.btn_labels.setCheckable(True)
-        self.btn_labels.setChecked(True)
-        self.btn_labels.clicked.connect(lambda: self.canvas_tab.set_show_labels(self.btn_labels.isChecked()))
         
         row_actions.addWidget(self.btn_unselect)
         row_actions.addWidget(self.btn_bbox)
-        row_actions.addWidget(self.btn_labels)
         sl.addLayout(row_actions)
         
-        self.btn_global = QPushButton("Global Multi-Class View")
+        self.btn_global = QPushButton("Review all labels")
         self.btn_global.setCheckable(True)
+        self.btn_global.setToolTip("Show every plant and root part label on the plate at once.")
         self.btn_global.clicked.connect(lambda: self.toggle_mode("GLOBAL"))
         sl.addWidget(self.btn_global)
         
@@ -712,29 +737,37 @@ class ReviewToolPanel(QWidget):
         
         self.btn_paint = QPushButton("Shape Paint")
         self.btn_paint.setCheckable(True)
+        self.btn_paint.setToolTip("Paint or erase the plant outline (left = add, right = erase).")
         self.btn_paint.clicked.connect(lambda: self.toggle_mode("PAINT"))
         sl.addWidget(self.btn_paint)
 
         self.btn_split = QPushButton("Split (Knife)")
         self.btn_split.setCheckable(True)
+        self.btn_split.setToolTip("Draw a line across fused plants; double-click to cut.")
         self.btn_split.clicked.connect(lambda: self.toggle_mode("SPLIT"))
         sl.addWidget(self.btn_split)
 
-        self.btn_split_parts = QPushButton("Split Separated Parts")
+        self.btn_split_parts = QPushButton("Split disconnected fragments")
+        self.btn_split_parts.setToolTip(
+            "Split one plant ID into separate IDs for each disconnected mask piece."
+        )
         self.btn_split_parts.clicked.connect(self.action_split_parts)
         sl.addWidget(self.btn_split_parts)
 
         self.btn_undo = QPushButton("Undo Last Action")
+        self.btn_undo.setToolTip("Undo the last paint, split, or merge action.")
         self.btn_undo.clicked.connect(self.model.undo)
         sl.addWidget(self.btn_undo)
         
-        self.btn_semantic = QPushButton("Multi-Class Paint") 
+        self.btn_semantic = QPushButton("Multi-Class Paint")
         self.btn_semantic.setCheckable(True)
+        self.btn_semantic.setToolTip("Assign Main Root, Lateral Root, Hypocotyl, and other root part labels.")
         self.btn_semantic.clicked.connect(lambda: self.toggle_mode("SEMANTIC"))
         sl.addWidget(self.btn_semantic)
 
         self.list_classes = QListWidget()
         self.list_classes.setFixedHeight(120)
+        self.list_classes.setToolTip("Select which root part label to paint.")
         self.populate_class_palette()
         self.list_classes.setVisible(False)
         self.list_classes.itemSelectionChanged.connect(self.on_class_selected)
@@ -744,6 +777,7 @@ class ReviewToolPanel(QWidget):
         size_layout = QHBoxLayout()
         self.slider_size = QSlider(Qt.Horizontal)
         self.slider_size.setRange(1, 30); self.slider_size.setValue(5)
+        self.slider_size.setToolTip("Width of the paint and erase brush.")
         self.lbl_size_val = QLabel("5px") 
         self.lbl_size_val.setFixedWidth(40)
         self.slider_size.valueChanged.connect(self.update_brush_size) 
@@ -755,6 +789,7 @@ class ReviewToolPanel(QWidget):
         op_layout = QHBoxLayout()
         self.slider_opacity = QSlider(Qt.Horizontal)
         self.slider_opacity.setRange(0, 100); self.slider_opacity.setValue(40)
+        self.slider_opacity.setToolTip("Transparency of painted masks over the raw image.")
         self.lbl_op_val = QLabel("40%")
         self.lbl_op_val.setFixedWidth(40)
         self.slider_opacity.valueChanged.connect(lambda v: self.lbl_op_val.setText(f"{v}%"))
@@ -833,4 +868,4 @@ class ReviewToolPanel(QWidget):
             self.force_mode("SELECT")
             self.canvas_tab.lbl_info.setText("Separated parts split successfully.")
         else:
-            QMessageBox.information(self, "Split Parts", "No disconnected parts found in this plant.")
+            QMessageBox.information(self, "Split disconnected fragments", "No disconnected parts found in this plant.")

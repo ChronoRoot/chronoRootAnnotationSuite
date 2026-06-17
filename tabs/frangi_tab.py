@@ -4,7 +4,9 @@ from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QGridLayout,
                              QPushButton, QLabel, QSpinBox, QDoubleSpinBox, 
                              QCheckBox, QComboBox, QFormLayout, QStyleOption, QStyle, QSizePolicy,
                              QListWidget, QListWidgetItem,
-                             QScrollArea, QFrame)
+                             QScrollArea, QFrame, QHBoxLayout)
+
+from components.ui_help import HELP_FRANGI, show_help
 from PyQt5.QtGui import QImage, QPixmap, QColor, QPainter
 from PyQt5.QtCore import Qt, QTimer
 
@@ -78,7 +80,9 @@ class FrangiCanvasTab(QWidget):
     def init_ui(self):
         layout = QVBoxLayout(self)
         
-        self.info_label = QLabel("Select a plant from the list to begin refinement.")
+        self.info_label = QLabel(
+            "Select a plant. Compare panels. Apply if the refinement looks better."
+        )
         self.info_label.setAlignment(Qt.AlignCenter)
         self.info_label.setStyleSheet("font-size: 16px; font-weight: bold; margin: 5px; background-color: #eee; padding: 5px;")
         layout.addWidget(self.info_label)
@@ -91,10 +95,10 @@ class FrangiCanvasTab(QWidget):
         self.img_label_proposed = AspectRatioLabel()
         self.images = [self.img_label_orig, self.img_label_old, self.img_label_vesselness, self.img_label_proposed]
 
-        lbl_orig_title = QLabel("1. Processed Grayscale")
-        lbl_old_title = QLabel("2. Current Segmentation")
-        lbl_vesselness_title = QLabel("3. Raw Vesselness Heatmap")
-        lbl_proposed_title = QLabel("4. Proposed Refinement")
+        lbl_orig_title = QLabel("Processed Grayscale")
+        lbl_old_title = QLabel("Current Segmentation")
+        lbl_vesselness_title = QLabel("Root-strength map")
+        lbl_proposed_title = QLabel("Proposed Refinement")
         self.titles = [lbl_orig_title, lbl_old_title, lbl_vesselness_title, lbl_proposed_title]
         
         for t in self.titles:
@@ -131,11 +135,13 @@ class FrangiCanvasTab(QWidget):
 
     def on_selection_changed(self):
         if not self.model.active_uid:
-            self.info_label.setText("No plant selected. Select a plant from the sidebar.")
+            self.info_label.setText("No plant selected. Select a plant from the plant list.")
             self.clear_to_black()
             return
             
-        self.info_label.setText(f"Processing Plant UID: {self.model.active_uid}")
+        self.info_label.setText(
+            f"Plant {self.model.active_uid} — compare panels, then Apply to this plant if needed."
+        )
         if self.isVisible(): self.generate_and_display_proposal()
 
     def showEvent(self, event):
@@ -420,6 +426,15 @@ class FrangiToolPanel(QWidget):
         scroll_content = QWidget()
         layout = QVBoxLayout(scroll_content) # This layout holds the actual parameters
         layout.setContentsMargins(5, 5, 5, 5)
+
+        frangi_header = QHBoxLayout()
+        frangi_header.addWidget(QLabel("<b>Centerline cleanup (optional)</b>"))
+        frangi_header.addStretch()
+        btn_help = QPushButton("Help")
+        btn_help.setToolTip("Open centerline cleanup help")
+        btn_help.clicked.connect(lambda: show_help(self, "Centerline Help", HELP_FRANGI))
+        frangi_header.addWidget(btn_help)
+        layout.addLayout(frangi_header)
         
         # --- Form Layout for Numeric Parameters ---
         form = QFormLayout()
@@ -439,6 +454,13 @@ class FrangiToolPanel(QWidget):
         self.sp_f_high = make_dspin(self.canvas_tab.p_strong_conf, 0.0, 1.0)
         self.sp_thick = make_spin(self.canvas_tab.p_final_thick, 1, 10)
         
+        self.sp_search.setToolTip("How far to search for faint root signal (pixels).")
+        self.sp_bridge.setToolTip("Bridge small gaps in faint roots (pixels).")
+        self.sp_min_part.setToolTip("Ignore specks smaller than this size (pixels).")
+        self.sp_f_low.setToolTip("Sensitivity for faint root tissue (lower = more inclusive).")
+        self.sp_f_high.setToolTip("Confidence for solid root core (higher = stricter).")
+        self.sp_thick.setToolTip("Final mask thickness after centerline correction.")
+        
         form.addRow("Search Range (px):", self.sp_search)
         form.addRow("Bridge Gaps (px):", self.sp_bridge)
         form.addRow("Ignore Specks < (px):", self.sp_min_part)
@@ -450,14 +472,17 @@ class FrangiToolPanel(QWidget):
         # --- Checkboxes ---
         self.chk_correction = QCheckBox("Apply Centerline Correction")
         self.chk_correction.setChecked(self.canvas_tab.p_centerline_correction)
+        self.chk_correction.setToolTip("Thin and center the mask along the root midline.")
         layout.addWidget(self.chk_correction)
 
         self.chk_dark = QCheckBox("Dark Roots")
         self.chk_dark.setChecked(self.canvas_tab.p_roots_dark)
+        self.chk_dark.setToolTip("Enable if roots appear darker than the agar background.")
         layout.addWidget(self.chk_dark)
         
         self.chk_disconnected = QCheckBox("Allow Disconnected Parts")
         self.chk_disconnected.setChecked(self.canvas_tab.p_allow_disconnected)
+        self.chk_disconnected.setToolTip("Keep separate root fragments instead of merging them.")
         layout.addWidget(self.chk_disconnected)
 
         # --- Dropdowns ---
@@ -518,7 +543,11 @@ class FrangiToolPanel(QWidget):
         main_layout.addWidget(scroll_area) # Add scrolling content to main layout
 
         # --- Accept Button (Sticky at the bottom, outside the scroll area) ---
-        self.btn_accept = QPushButton("Accept Refinement")
+        self.btn_accept = QPushButton("Apply to this plant")
+        self.btn_accept.setToolTip(
+            "Apply the proposed refinement to this plant. "
+            "Use Save Progress or Finish Annotation to save to disk."
+        )
         self.btn_accept.setStyleSheet("background-color: #cceeff; font-weight: bold; color: black; padding: 15px; font-size: 14px;")
         self.btn_accept.clicked.connect(self.canvas_tab.accept_proposal)
         

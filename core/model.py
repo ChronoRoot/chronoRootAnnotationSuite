@@ -667,7 +667,10 @@ class PlantImageModel:
         # 1. CLEANUP AND VALIDATE
         is_valid, bad_uid = self.clean_and_validate_masks()
         if not is_valid:
-            raise ValueError(f"UID {bad_uid} consists of more than one connected component.\nPlease use the paint tool to connect the pieces, or the split tool to separate them into different IDs.")
+            raise ValueError(
+                f"Plant {bad_uid} has disconnected pieces.\n"
+                "Connect them in Annotation with Shape Paint, or split into separate plants."
+            )
 
         # 2. Spatially order UIDs (left-to-right rows); preserve user plant numbers
         mapping = self.sort_instances_spatially(row_tolerance=250)

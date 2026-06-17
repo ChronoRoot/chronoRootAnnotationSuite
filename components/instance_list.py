@@ -30,7 +30,7 @@ class InstanceListPanel(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setAlignment(Qt.AlignTop)
 
-        self.lbl_instance_count = QLabel("<b>PLANT INSTANCES (0 Total):</b>")
+        self.lbl_instance_count = QLabel("<b>Plants (0 total):</b>")
         layout.addWidget(self.lbl_instance_count)
 
         self.list_instances = QTreeWidget()
@@ -65,11 +65,13 @@ class InstanceListPanel(QWidget):
         self.apply_tooltips()
 
     def apply_tooltips(self):
-        self.btn_new.setToolTip("Create a new plant instance and enter paint mode.")
-        self.btn_merge.setToolTip("Merge the currently selected plant instances into one.")
-        self.btn_del.setToolTip("Delete the selected plant instance(s).")
+        self.btn_new.setToolTip("Create a new plant and enter paint mode.")
+        self.btn_merge.setToolTip(
+            "Select 2+ plants with Shift+click in the list, then merge into one plant."
+        )
+        self.btn_del.setToolTip("Delete the selected plant(s).")
         self.list_instances.setToolTip(
-            "Select plant instances to edit. Multi-selection is only available in the Annotation tab."
+            "Select plants to edit. Multi-selection is only available in the Annotation tab."
         )
 
     def _is_annotation_tab_active(self):
@@ -78,7 +80,7 @@ class InstanceListPanel(QWidget):
         return True
 
     def populate_list(self):
-        self.lbl_instance_count.setText(f"<b>PLANT INSTANCES ({len(self.model.masks)} Total):</b>")
+        self.lbl_instance_count.setText(f"<b>Plants ({len(self.model.masks)} total):</b>")
 
         current_uids = set(self.model.masks.keys())
         existing_uids = {
@@ -149,8 +151,8 @@ class InstanceListPanel(QWidget):
             QMessageBox.warning(
                 self,
                 "Multi-Selection Disabled",
-                "Multi-selection is only supported in the 'Annotation Tool' tab.\n\n"
-                "Please switch tabs to select multiple plants."
+                "Multi-selection is only supported on the Annotation tab.\n\n"
+                "Please switch to that tab to select multiple plants."
             )
 
             self.list_instances.blockSignals(True)
@@ -175,7 +177,7 @@ class InstanceListPanel(QWidget):
         if not self._is_annotation_tab_active():
             QMessageBox.warning(
                 self, "Action Restricted",
-                "Please switch to the 'Annotation Tool' tab to create new plants."
+                "Please switch to the Annotation tab to create new plants."
             )
             return
 
@@ -190,7 +192,7 @@ class InstanceListPanel(QWidget):
         if not self._is_annotation_tab_active():
             QMessageBox.warning(
                 self, "Action Restricted",
-                "Please switch to the 'Annotation Tool' tab to merge plants."
+                "Please switch to the Annotation tab to merge plants."
             )
             return
 

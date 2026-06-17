@@ -9,6 +9,8 @@ from PyQt5.QtGui import QImage, QPixmap, QPainter, QColor, QPen
 from PyQt5.QtCore import Qt, QSize, QRect, pyqtSignal
 from PyQt5.QtSvg import QSvgGenerator
 
+from components.ui_help import HELP_INSPECTOR, show_help
+
 class AspectRatioLabel(QWidget):
     def __init__(self):
         super().__init__()
@@ -35,6 +37,7 @@ class AspectRatioLabel(QWidget):
 
 class PhenomicsInspectorTab(QWidget):
     run_analysis_requested = pyqtSignal()
+    go_to_metadata_requested = pyqtSignal()
 
     def __init__(self):
         super().__init__()
@@ -56,20 +59,21 @@ class PhenomicsInspectorTab(QWidget):
         empty_layout = QVBoxLayout(self.empty_page)
         empty_layout.addStretch()
         self.lbl_empty = QLabel(
-            "<b>No plant analysis available yet.</b><br><br>"
-            "Assign genotypes in Plant Metadata, verify plants on the Review canvas, "
-            "then run analysis to inspect morphometrics here."
+            "<b>No measurements yet.</b><br><br>"
+            "Open <b>Plant Metadata</b>, set scale and genotypes, "
+            "then click <b>Measure</b>."
         )
         self.lbl_empty.setWordWrap(True)
         self.lbl_empty.setAlignment(Qt.AlignCenter)
         self.lbl_empty.setStyleSheet("color: #555; font-size: 14px; padding: 24px;")
         empty_layout.addWidget(self.lbl_empty)
 
-        self.btn_run_analysis = QPushButton("Run Analysis")
+        self.btn_run_analysis = QPushButton("Go to Plant Metadata")
+        self.btn_run_analysis.setToolTip("Open Plant Metadata to set scale, genotypes, and run Measure.")
         self.btn_run_analysis.setStyleSheet(
             "background-color: #007bff; color: white; font-weight: bold; padding: 12px;"
         )
-        self.btn_run_analysis.clicked.connect(self.run_analysis_requested.emit)
+        self.btn_run_analysis.clicked.connect(self.go_to_metadata_requested.emit)
         empty_layout.addWidget(self.btn_run_analysis, alignment=Qt.AlignCenter)
         empty_layout.addStretch()
 
@@ -87,16 +91,30 @@ class PhenomicsInspectorTab(QWidget):
         # RIGHT PANEL: Controls
         # ==========================================
         right_layout = QVBoxLayout()
+
+        insp_header = QHBoxLayout()
+        insp_header.addWidget(QLabel("<b>Phenomics review</b>"))
+        insp_header.addStretch()
+        btn_help = QPushButton("Help")
+        btn_help.setToolTip("Open inspector help")
+        btn_help.clicked.connect(lambda: show_help(self, "Inspector Help", HELP_INSPECTOR))
+        insp_header.addWidget(btn_help)
+        right_layout.addLayout(insp_header)
         
         # --- Group 1: Core Visualization ---
-        group_view = QGroupBox("1. Root Representation")
+        group_view = QGroupBox("Root Representation")
         vbox_view = QVBoxLayout()
         
-        self.rad_view_model = QRadioButton("Manual/Model Semantic Mask")
-        self.rad_view_graph_mask = QRadioButton("Graph-Validated Mask (Pixels)")
-        self.rad_view_hard_graph = QRadioButton("Hard Topological Graph (Lines)")
-        self.rad_view_rsml = QRadioButton("Live RSML Overlay") # Renamed
-        self.rad_view_none = QRadioButton("Raw Image Only")
+        self.rad_view_model = QRadioButton("Colored root parts (annotation)")
+        self.rad_view_model.setToolTip("Semantic labels painted in Annotation.")
+        self.rad_view_graph_mask = QRadioButton("Tracing-based mask")
+        self.rad_view_graph_mask.setToolTip("Mask pixels validated by the root tracing graph.")
+        self.rad_view_hard_graph = QRadioButton("Root skeleton (lines)")
+        self.rad_view_hard_graph.setToolTip("Topological graph as line overlay only.")
+        self.rad_view_rsml = QRadioButton("Architecture preview")
+        self.rad_view_rsml.setToolTip("Architecture overlay from tracing.")
+        self.rad_view_none = QRadioButton("Raw image only")
+        self.rad_view_none.setToolTip("Scanner image without overlays.")
         self.rad_view_model.setChecked(True)
 
         self.view_group = QButtonGroup()
@@ -109,11 +127,12 @@ class PhenomicsInspectorTab(QWidget):
         right_layout.addWidget(group_view)
 
         # --- Group 2: Features & Angles ---
-        group_angles = QGroupBox("2. Biological Features")
+        group_angles = QGroupBox("Biological Features")
         vbox_ang = QVBoxLayout()
         
         self.rad_ang_none = QRadioButton("Hide Angles")
-        self.rad_ang_emergence = QRadioButton("Emergence Angles (2mm)")
+        self.rad_ang_emergence = QRadioButton("Lateral emergence angle (2 mm)")
+        self.rad_ang_emergence.setToolTip("Angle where lateral roots emerge from the main root.")
         self.rad_ang_tip = QRadioButton("Overall Tip Angles")
         self.rad_ang_none.setChecked(True)
 
@@ -132,7 +151,7 @@ class PhenomicsInspectorTab(QWidget):
         right_layout.addWidget(group_angles)
 
         # --- Group 3: Rendering Settings ---
-        group_settings = QGroupBox("3. Render Settings")
+        group_settings = QGroupBox("Render Settings")
         form_set = QFormLayout()
         self.spin_width = QSpinBox()
         self.spin_width.setRange(1, 10)
@@ -150,6 +169,7 @@ class PhenomicsInspectorTab(QWidget):
         
         # --- Export Button ---
         self.btn_export_svg = QPushButton("Export Editable Vector (.SVG)")
+        self.btn_export_svg.setToolTip("Export the current inspector view as an SVG figure.")
         self.btn_export_svg.setStyleSheet("background-color: #007bff; color: white; font-weight: bold; padding: 10px;")
         self.btn_export_svg.clicked.connect(self.export_to_svg)
         right_layout.addWidget(self.btn_export_svg)

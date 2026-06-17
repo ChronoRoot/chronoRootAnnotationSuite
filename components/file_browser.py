@@ -8,6 +8,7 @@ from PyQt5.QtGui import QPainter, QColor
 from PyQt5.QtCore import Qt, pyqtSignal
 
 from core.model import annotation_status_display, analysis_status_display, normalize_annotation_status
+from components.ui_help import HELP_WORKFLOW, show_help
 
 
 def qt_display_text(text):
@@ -65,7 +66,7 @@ class FolderStatsWidget(QWidget):
 
         if is_folder and total > 0:
             ann_txt = (
-                f"Annotation — Missing: {missing} | Active: {in_progress} | "
+                f"To annotate: {missing} | In progress: {in_progress} | "
                 f"Done: {completed} | Total: {total}"
             )
             lbl_ann = QLabel(ann_txt)
@@ -203,7 +204,17 @@ class UnifiedFileBrowser(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
 
-        layout.addWidget(QLabel("<b>Project Root (Input):</b>"))
+        browser_header = QHBoxLayout()
+        browser_header.addWidget(QLabel("<b>Dataset folder:</b>"))
+        browser_header.addStretch()
+        self.btn_browser_help = QPushButton("Help")
+        self.btn_browser_help.setToolTip("Open plate workflow help")
+        self.btn_browser_help.clicked.connect(
+            lambda: show_help(self, "Workflow Help", HELP_WORKFLOW)
+        )
+        browser_header.addWidget(self.btn_browser_help)
+        layout.addLayout(browser_header)
+
         in_layout = QHBoxLayout()
         self.lbl_in_path = QLineEdit(self.in_dir)
         self.lbl_in_path.setReadOnly(True)
@@ -276,15 +287,14 @@ class UnifiedFileBrowser(QWidget):
             self.btn_finish = None
 
     def apply_tooltips(self):
-        self.btn_browse_in.setToolTip("Browse system to select a different input database folder.")
+        self.btn_browse_in.setToolTip("Browse to select your experiment dataset folder.")
         self.btn_browse_out.setToolTip("Browse system to select a different output folder.")
         self.btn_up.setToolTip("Navigate up one directory level.")
         self.btn_refresh.setToolTip("Reload the folder contents from disk.")
         self.task_list.setToolTip(
-            "<b>File Browser</b><br>• <i>Double-click folders</i> to navigate.<br>"
-            "• <i>Click files</i> to load them into the annotation canvas."
+            "Double-click folders to navigate. Click an image to open it in Annotation."
         )
-        self.lbl_in_path.setToolTip("Fixed project root directory. Browse here to change the dataset root.")
+        self.lbl_in_path.setToolTip("Top-level dataset folder. Browse here to change it.")
         self.lbl_current_dir.setToolTip("Current folder being browsed within the project root.")
         self.lbl_out_path.setToolTip("Fixed output directory when not storing with input images.")
         self.chk_output_with_input.setToolTip(
@@ -293,13 +303,11 @@ class UnifiedFileBrowser(QWidget):
         )
         if self.btn_save_progress:
             self.btn_save_progress.setToolTip(
-                "<b>Save Progress</b><br>Saves your current mask data to a JSON file. "
-                "Use this if you want to take a break and resume later."
+                "<b>Save Progress</b><br>Save current edits. Resume later from the same plate."
             )
         if self.btn_finish:
             self.btn_finish.setToolTip(
-                "<b>Finish Annotation</b><br>Saves the data and permanently bakes the result "
-                "into a final NIfTI file for training. Marks the file as Completed in the browser."
+                "<b>Finish Annotation</b><br>Mark this plate completed and write final masks."
             )
 
     def request_refresh(self, force_refresh=True):
@@ -310,7 +318,7 @@ class UnifiedFileBrowser(QWidget):
         self.refresh_requested.emit(self.current_dir)
 
     def change_input_dir(self):
-        d = QFileDialog.getExistingDirectory(self, "Select Input Folder", self.in_dir)
+        d = QFileDialog.getExistingDirectory(self, "Select Dataset Folder", self.in_dir)
         if not d:
             return
 

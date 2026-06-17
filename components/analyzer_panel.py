@@ -6,6 +6,7 @@ from PyQt5.QtGui import QRegularExpressionValidator
 from PyQt5.QtCore import Qt, pyqtSignal, QRegularExpression, QItemSelectionModel, QTimer
 
 from components.genotype_manager import GenotypeHelper, GenotypeManagerDialog
+from components.ui_help import HELP_METADATA, show_help
 
 BULK_ENTER_NEW_LABEL = "Enter new genotype…"
 BULK_ENTER_NEW_ROLE = "enter_new_genotype"
@@ -41,7 +42,15 @@ class PhenomicsControlPanel(QWidget):
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(8)
 
-        layout.addWidget(QLabel("<b>Plate Metadata &amp; Calibration:</b>"))
+        meta_header = QHBoxLayout()
+        meta_header.addWidget(QLabel("<b>Plate information &amp; scale</b>"))
+        meta_header.addStretch()
+        btn_help = QPushButton("Help")
+        btn_help.setToolTip("Open measurement and metadata help")
+        btn_help.clicked.connect(lambda: show_help(self, "Metadata Help", HELP_METADATA))
+        meta_header.addWidget(btn_help)
+        layout.addLayout(meta_header)
+
         form = QFormLayout()
 
         self.in_plate_id = QLineEdit("Plate_01")
@@ -57,6 +66,10 @@ class PhenomicsControlPanel(QWidget):
             "Scanner DPI", "Known Image Height (cm)", "Known Image Width (cm)", "Custom Ratio (px/cm)"
         ])
         self.cb_calibration.setCurrentText(self.config.get("calib_mode", "Scanner DPI"))
+        self.cb_calibration.setToolTip(
+            "How pixel size is converted to cm. Use Scanner DPI from your scanner documentation, "
+            "or measure a known distance on the plate."
+        )
         self.cb_calibration.currentIndexChanged.connect(self.calibration_changed.emit)
 
         self.in_calib_val = QLineEdit(self.config.get("calib_val", "600"))
@@ -68,6 +81,9 @@ class PhenomicsControlPanel(QWidget):
         calib_layout.addWidget(self.in_calib_val)
 
         self.btn_set_calib = QPushButton("Set via Measurement")
+        self.btn_set_calib.setToolTip(
+            "Draw a line on the image for a known real-world distance to set scale."
+        )
         self.btn_set_calib.clicked.connect(self.set_calib_ruler_requested.emit)
         calib_layout.addWidget(self.btn_set_calib)
 
@@ -78,7 +94,8 @@ class PhenomicsControlPanel(QWidget):
         form.addRow("Value:", calib_layout)
         layout.addLayout(form)
 
-        self.btn_measure_tool = QPushButton("Test Distance Tool")
+        self.btn_measure_tool = QPushButton("Check scale on image")
+        self.btn_measure_tool.setToolTip("Test the ruler on the image without changing calibration.")
         self.btn_measure_tool.setCheckable(True)
         self.btn_measure_tool.setStyleSheet("background-color: #ffc107; color: black; font-weight: bold;")
         self.btn_measure_tool.toggled.connect(self._on_test_ruler_toggled)
@@ -100,8 +117,8 @@ class PhenomicsControlPanel(QWidget):
         id_header.addWidget(self.btn_manage_genos)
         self.btn_auto_renumber = QPushButton("Auto Renumber")
         self.btn_auto_renumber.setToolTip(
-            "Set every Plant # to match its spatial UID (left-to-right). "
-            "Use when defaults are wrong; manual edits are kept until you click this."
+            "Set every Plant # to match left-to-right order on the plate. "
+            "Manual edits are kept until you click this."
         )
         self.btn_auto_renumber.clicked.connect(self.auto_renumber_requested.emit)
         id_header.addWidget(self.btn_auto_renumber)
@@ -126,6 +143,7 @@ class PhenomicsControlPanel(QWidget):
         self.cb_bulk_genotype.activated.connect(self._on_bulk_genotype_activated)
 
         self.btn_apply_bulk = QPushButton("Apply")
+        self.btn_apply_bulk.setToolTip("Apply the selected genotype to highlighted table rows.")
         self.btn_apply_bulk.setMinimumWidth(72)
         self.btn_apply_bulk.clicked.connect(self._apply_bulk_genotype_to_selection)
 
@@ -137,7 +155,7 @@ class PhenomicsControlPanel(QWidget):
         layout.addSpacing(4)
 
         self.table_plants = QTableWidget(0, 3)
-        self.table_plants.setHorizontalHeaderLabels(["ID", "Genotype", "Plant #"])
+        self.table_plants.setHorizontalHeaderLabels(["Plant", "Genotype", "Plant #"])
         self.table_plants.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.table_plants.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
         self.table_plants.setSelectionMode(QTableWidget.ExtendedSelection)
@@ -147,12 +165,18 @@ class PhenomicsControlPanel(QWidget):
         layout.addWidget(self.table_plants)
 
         btn_layout = QHBoxLayout()
-        self.btn_measure = QPushButton("1. Measure")
+        self.btn_measure = QPushButton("Measure")
+        self.btn_measure.setToolTip(
+            "Compute traits for this plate. Finish Annotation first."
+        )
         self.btn_measure.setStyleSheet("background-color: #007bff; color: white; font-weight: bold; padding: 10px;")
         self.btn_measure.clicked.connect(self._on_measure_clicked)
         self.btn_measure.setEnabled(False)
 
-        self.btn_export = QPushButton("2. Export")
+        self.btn_export = QPushButton("Export")
+        self.btn_export.setToolTip(
+            "Write trait outputs for this plate."
+        )
         self.btn_export.setStyleSheet("background-color: #28a745; color: white; font-weight: bold; padding: 10px;")
         self.btn_export.clicked.connect(self._on_export_clicked)
         self.btn_export.setEnabled(False)
@@ -179,7 +203,7 @@ class PhenomicsControlPanel(QWidget):
             )
 
     def _on_test_ruler_toggled(self, checked):
-        self.btn_measure_tool.setText("Stop Measuring" if checked else "Test Distance Tool")
+        self.btn_measure_tool.setText("Stop measuring" if checked else "Check scale on image")
         self.test_ruler_toggled.emit(checked)
 
     def _on_table_selection(self):

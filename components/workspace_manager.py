@@ -22,24 +22,24 @@ class WorkspaceManager(QTabWidget):
     def init_workspaces(self):
         # 1. Pixel Annotation
         self.canvas_review = ReviewCanvasTab(self.model)
-        self.addTab(self.canvas_review, "1. Annotation")
+        self.addTab(self.canvas_review, "Annotation")
         
         # 2. Skeleton Refinement
         self.canvas_frangi = FrangiCanvasTab(self.model)
-        self.addTab(self.canvas_frangi, "2. Centerline Refinement")
+        self.addTab(self.canvas_frangi, "Centerline Cleanup")
         
         # 3. Topology Graphing
         self.canvas_graph = GraphCanvasTab(self.model)
-        self.addTab(self.canvas_graph, "3. Topology Graph")
+        self.addTab(self.canvas_graph, "Root Tracing Check")
         
         # 4. Phenomics Inspector
         self.inspector_tab = PhenomicsInspectorTab()
-        self.addTab(self.inspector_tab, "4. Phenomics Inspector")
+        self.addTab(self.inspector_tab, "Phenomics Inspector")
         
         # 5. Batch Reports
         self.report_file_panel = ReportFileListPanel(self.main_window)
         self.report_tab = ComparisonReportTab(self.main_window, self.report_file_panel)
-        self.addTab(self.report_tab, "5. Batch Reports")
+        self.addTab(self.report_tab, "Batch Reports")
 
         self.about_tab = AboutTab()
         self.addTab(self.about_tab, "About")

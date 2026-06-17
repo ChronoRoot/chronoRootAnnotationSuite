@@ -6,9 +6,11 @@ from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QPushButton,
                              QLabel, QSpinBox, QFrame, QFormLayout, 
                              QComboBox, QGridLayout, QStyleOption, QStyle,
                              QListWidget, QListWidgetItem,
-                             QScrollArea, QFrame)
+                             QScrollArea, QHBoxLayout)
 from PyQt5.QtGui import QImage, QPixmap, QColor, QPainter
 from PyQt5.QtCore import Qt, pyqtSignal
+
+from components.ui_help import HELP_GRAPH, show_help
 
 # Import the isolated builder
 from core.root_graph_builder import extract_skeleton, createGraph, graphInit
@@ -98,7 +100,9 @@ class GraphCanvasTab(QWidget):
     def init_ui(self):
         layout = QVBoxLayout(self)
         
-        self.info_label = QLabel("Select a plant from the list to begin graph extraction.")
+        self.info_label = QLabel(
+            "Check each plant before Finish. Confirm skeleton and main-root path look correct."
+        )
         self.info_label.setAlignment(Qt.AlignCenter)
         self.info_label.setStyleSheet("font-size: 16px; font-weight: bold; margin: 5px; background-color: #eee; padding: 5px;")
         layout.addWidget(self.info_label)
@@ -107,11 +111,11 @@ class GraphCanvasTab(QWidget):
         grid.setSpacing(5)
         
         titles = [
-            "1. RGB Image", 
-            "2. Original Semantic", 
-            "3. Skeleton Overlay", 
-            "4. Recolored Preview", 
-            "5. Interactive Graph"
+            "RGB Image",
+            "Root part labels",
+            "Skeleton Overlay",
+            "Recolored Preview",
+            "Interactive Graph"
         ]
         
         for col, title in enumerate(titles):
@@ -140,6 +144,15 @@ class GraphCanvasTab(QWidget):
         
         self.clear_to_black()
 
+    def clear_graph_panels(self):
+        black_pixmap = QPixmap(100, 100)
+        black_pixmap.fill(QColor("black"))
+        self.lbl_skel.setPixmap(black_pixmap)
+        self.lbl_preview.setPixmap(black_pixmap)
+        self.lbl_graph.setPixmap(black_pixmap)
+        self.current_graph = None
+        self.colored_skeleton = None
+
     def clear_to_black(self):
         black_pixmap = QPixmap(100, 100)
         black_pixmap.fill(QColor("black"))
@@ -150,6 +163,13 @@ class GraphCanvasTab(QWidget):
         self.lbl_graph.setPixmap(black_pixmap)
         self.current_graph = None
         self.colored_skeleton = None
+
+    def _mask_is_disconnected(self, mask):
+        bin_mask = (mask > 0).astype(np.uint8)
+        if np.sum(bin_mask) == 0:
+            return False
+        num_features, _ = cv2.connectedComponents(bin_mask, connectivity=8)
+        return num_features > 2
 
     def reset_user_nodes(self):
         self.user_start_node = None
@@ -163,12 +183,12 @@ class GraphCanvasTab(QWidget):
 
     def on_selection_changed(self):
         if not self.model.active_uid:
-            self.info_label.setText("No plant selected. Select a plant from the sidebar.")
+            self.info_label.setText("No plant selected. Select a plant from the plant list.")
             self.clear_to_black()
             return
-            
-        self.info_label.setText(f"Processing Plant UID: {self.model.active_uid}")
-        if self.isVisible(): self.generate_pipeline()
+
+        if self.isVisible():
+            self.generate_pipeline()
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -214,6 +234,14 @@ class GraphCanvasTab(QWidget):
             self.last_prune_val = self.p_prune
         
         mask = self.model.masks[uid]
+        if self._mask_is_disconnected(mask):
+            self.info_label.setText(
+                "Disconnected mask — merge or connect pieces in Annotation, "
+                "or use Split disconnected fragments."
+            )
+            self.clear_graph_panels()
+            return
+
         patch_data = self.model._get_class_patch(uid)
         if not patch_data: 
             self.clear_to_black()
@@ -279,7 +307,10 @@ class GraphCanvasTab(QWidget):
         self.lbl_skel.setPixmap(self.numpy_to_qpixmap(skel_vis))
         
         if not is_valid:
-            self.clear_to_black()
+            self.info_label.setText(
+                "Cannot trace this plant. Check Main Root and Lateral Root labels in Annotation."
+            )
+            self.clear_graph_panels()
             return
             
         self.mc_skel_bin = np.zeros((img_h, img_w), dtype=np.uint8)
@@ -418,6 +449,18 @@ class GraphCanvasTab(QWidget):
             
         self.lbl_preview.setPixmap(self.numpy_to_qpixmap(preview_vis))
 
+        uid = self.model.active_uid
+        if self.user_start_node or self.user_end_node:
+            self.info_label.setText(
+                f"Plant {uid} — custom start/end nodes applied. "
+                "Save root tracing when the path looks correct."
+            )
+        else:
+            self.info_label.setText(
+                f"Plant {uid} — if the main-root path looks wrong, set Start/End nodes below "
+                "or adjust labels in Annotation."
+            )
+
     def _calculate_recolored_segmentation(self):
         final_mc_skel = np.zeros_like(self.colored_skeleton)
         
@@ -548,6 +591,20 @@ class GraphToolPanel(QWidget):
         scroll_content = QWidget()
         layout = QVBoxLayout(scroll_content)
         layout.setContentsMargins(5, 5, 5, 5)
+
+        graph_header = QHBoxLayout()
+        graph_header.addWidget(QLabel("<b>Root tracing check</b>"))
+        graph_header.addStretch()
+        btn_help = QPushButton("Help")
+        btn_help.setToolTip("Open root tracing check help")
+        btn_help.clicked.connect(lambda: show_help(self, "Tracing Help", HELP_GRAPH))
+        graph_header.addWidget(btn_help)
+        layout.addLayout(graph_header)
+
+        layout.addWidget(QLabel(
+            "<span style='color:#555; font-size:11px;'>"
+            "Legend: Green = start, Blue = end, Yellow = waypoint</span>"
+        ))
         
         layout.addWidget(QLabel("<b>Graph Settings:</b>"))
         
@@ -560,7 +617,10 @@ class GraphToolPanel(QWidget):
         self.sp_thick = QSpinBox()
         self.sp_thick.setRange(1, 10)
         self.sp_thick.setValue(self.canvas_tab.p_thick)
+        self.sp_thick.setToolTip("Thickness used when applying graph colors to the mask.")
         self.sp_thick.valueChanged.connect(self.push_params)
+
+        self.sp_prune.setToolTip("Remove short skeleton spurs (higher = more pruning).")
         
         form.addRow("Prune Iterations:", self.sp_prune)
         form.addRow("Dilation Base Thick:", self.sp_thick)
@@ -574,10 +634,12 @@ class GraphToolPanel(QWidget):
         
         self.cb_mode = QComboBox()
         self.cb_mode.addItems(["Set Start Node (Green)", "Set End Node (Blue)", "Toggle Waypoint (Yellow)"])
+        self.cb_mode.setToolTip("Click the interactive graph to place start, end, or waypoint nodes.")
         self.cb_mode.currentIndexChanged.connect(self.update_mode)
         layout.addWidget(self.cb_mode)
         
         self.btn_reset_nodes = QPushButton("Reset Nodes to Auto")
+        self.btn_reset_nodes.setToolTip("Clear manual nodes and use automatic start/end detection.")
         self.btn_reset_nodes.clicked.connect(self.canvas_tab.reset_user_nodes)
         layout.addWidget(self.btn_reset_nodes)
 
@@ -610,7 +672,8 @@ class GraphToolPanel(QWidget):
         main_layout.addWidget(scroll_area)
 
         # --- Apply Button (Sticky at the bottom) ---
-        self.btn_apply_mask = QPushButton("Apply Graph Colors")
+        self.btn_apply_mask = QPushButton("Save root tracing for this plant")
+        self.btn_apply_mask.setToolTip("Commit the traced main/lateral colors to this plant's mask.")
         self.btn_apply_mask.setStyleSheet("background-color: #d4edda; font-weight: bold; color: #155724; padding: 15px; font-size: 14px;")
         self.btn_apply_mask.clicked.connect(self.canvas_tab.apply_graph_colors)
         

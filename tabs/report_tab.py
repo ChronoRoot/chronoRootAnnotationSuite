@@ -22,6 +22,7 @@ from matplotlib.backends.backend_qt5agg import NavigationToolbar2QT as Navigatio
 from core import convex_hull
 from core import statistics as stats_module
 from components.file_browser import qt_display_text
+from components.ui_help import HELP_BATCH, show_help
 
 METRIC_MAPPING = {
     "mr_length_mm": "Main Root Length (mm)",
@@ -66,20 +67,6 @@ ERROR_BAR_MAP = {
 }
 
 TEST_OPTIONS = ["auto", "mannwhitney", "kruskal", "anova"]
-
-REPORT_HELP_TEXT = """<b>Batch Report Guide</b><br><br>
-<b>Workflow:</b> Load plates → tune the plot → review statistics → <i>Add to Report</i> → repeat → <i>Generate Report</i>.<br><br>
-<b>Compare / Within / And within:</b><br>
-Example: Compare <i>genotype</i>, within each <i>timepoint</i>, and within each <i>condition</i>
-tests whether genotypes differ at every timepoint, separately for each condition.<br><br>
-<b>Statistical tests:</b><br>
-• <b>Automatic</b> — Mann-Whitney U for 2 groups; Kruskal-Wallis + pairwise Mann-Whitney for 3+.<br>
-• <b>Mann-Whitney U</b> — non-parametric; best for 2 independent groups.<br>
-• <b>Kruskal-Wallis</b> — non-parametric; needs 3+ groups (2 groups use Mann-Whitney).<br>
-• <b>One-way ANOVA</b> — parametric; needs 3+ groups and roughly normal data.<br><br>
-<b>Empty results?</b> Usually only one genotype/condition in a stratum, too few plants, or missing metric values.
-"""
-
 
 def natural_sort_key(s):
     return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', str(s))]
@@ -461,7 +448,7 @@ class ReportFileListPanel(QWidget):
     def _open_selected_task(self):
         path = self._selected_file_path()
         if not path:
-            QMessageBox.warning(self, "No File", "Select a metrics file to open.")
+            QMessageBox.warning(self, "No File", "Select an exported plate to open.")
             return
         self.open_requested.emit(path)
 
@@ -589,6 +576,13 @@ class ComparisonReportTab(QWidget):
         self.btn_focus_plot.clicked.connect(self._toggle_focus_mode)
         header_row.addWidget(self.btn_focus_plot)
         controls_layout.addLayout(header_row)
+
+        self.lbl_batch_workflow = QLabel(
+            "Check plates → Load Selected Data → tune plot → Add to Report → Generate"
+        )
+        self.lbl_batch_workflow.setWordWrap(True)
+        self.lbl_batch_workflow.setStyleSheet("color: #555; font-size: 11px; padding: 2px 0;")
+        controls_layout.addWidget(self.lbl_batch_workflow)
 
         plot_group = QGroupBox("Plot")
         plot_form = QFormLayout(plot_group)
@@ -726,7 +720,7 @@ class ComparisonReportTab(QWidget):
         empty_layout = QVBoxLayout(self.empty_canvas_page)
         self.lbl_empty_plot = QLabel(
             "<b>No data loaded.</b><br><br>"
-            "Select metrics files in the middle panel and click "
+            "Check exported plates in the middle panel and click "
             "<i>Load Selected Data</i>."
         )
         self.lbl_empty_plot.setWordWrap(True)
@@ -793,7 +787,7 @@ class ComparisonReportTab(QWidget):
             self.cb_stat_test.setItemData(i, tip, Qt.ToolTipRole)
 
     def _show_report_help(self):
-        QMessageBox.information(self, "Report Help", REPORT_HELP_TEXT)
+        show_help(self, "Report Help", HELP_BATCH)
 
     def _toggle_focus_mode(self):
         if hasattr(self.main_window, "toggle_focus_mode"):
@@ -950,7 +944,7 @@ class ComparisonReportTab(QWidget):
         if not selected_paths:
             QMessageBox.warning(
                 self, "Selection Empty",
-                "Please check at least one metrics file to include.",
+                "Please check at least one exported plate to include.",
             )
             return
 
