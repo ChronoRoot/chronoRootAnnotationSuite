@@ -175,7 +175,7 @@ class PhenomicsControlPanel(QWidget):
 
         self.btn_export = QPushButton("Export")
         self.btn_export.setToolTip(
-            "Write trait outputs for this plate."
+            "Write trait outputs for this plate. Unfinished plates will be prompted to finish annotation first."
         )
         self.btn_export.setStyleSheet("background-color: #28a745; color: white; font-weight: bold; padding: 10px;")
         self.btn_export.clicked.connect(self._on_export_clicked)

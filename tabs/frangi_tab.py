@@ -74,6 +74,9 @@ class FrangiCanvasTab(QWidget):
         self.p_strong_conf = 0.20 
         self.p_min_part = 5
         self.p_final_thick = 1
+        self.p_min_sigma = 1     
+        self.p_max_sigma = 10    
+        self.p_sigma_step = 2    
         
         self.p_roots_dark = False
         self.p_allow_disconnected = False
@@ -291,7 +294,8 @@ class FrangiCanvasTab(QWidget):
             search_mask = target_mask_crop.copy().astype(np.uint8)
         
         if self.p_centerline_correction:
-            vesselness = frangi(gray_crop, black_ridges=self.p_roots_dark, sigmas=(1, 10, 1))
+            frangi_scales = np.arange(self.p_min_sigma, self.p_max_sigma + 1, self.p_sigma_step)
+            vesselness = frangi(gray_crop, black_ridges=self.p_roots_dark, sigmas=frangi_scales)
             vesselness[search_mask == 0] = 0 
             vesselness_clipped = np.clip(vesselness, 0.0, 0.5)
             vesselness_norm = vesselness_clipped / 0.5
@@ -491,6 +495,27 @@ class FrangiToolPanel(QWidget):
         mode_grid.addWidget(self.chk_correction, 0, 0)
         mode_grid.addWidget(self.chk_dark, 0, 1)
         mode_grid.addWidget(self.chk_disconnected, 1, 0, 1, 2)
+        
+        spins_hor = QHBoxLayout()
+        spins_hor.setContentsMargins(0, 0, 0, 0)
+        
+        self.sp_min_sigma = make_spin(self.canvas_tab.p_min_sigma, 1, 40)
+        self.sp_min_sigma.setToolTip("Minimum root radius (pixels).\nRaise this in high resolution images.")
+        
+        self.sp_max_sigma = make_spin(self.canvas_tab.p_max_sigma, 2, 80)
+        self.sp_max_sigma.setToolTip("Maximum root radius to detect (in pixels).\nIncrease this for high-resolution images or very thick roots.")
+        
+        # 1. Remove the grid coordinates (3, 0) from the QHBoxLayout additions
+        spins_hor.addWidget(QLabel("Min Root Radius:"))
+        spins_hor.addStretch()
+        spins_hor.addWidget(self.sp_min_sigma)
+        spins_hor.addStretch()
+        spins_hor.addWidget(QLabel("Max Root Radius:"))
+        spins_hor.addStretch()
+        spins_hor.addWidget(self.sp_max_sigma)
+        
+        mode_grid.addLayout(spins_hor, 3, 0, 1, 2)
+        
         main_layout.addLayout(mode_grid)
         main_layout.addWidget(separator())
 
@@ -601,6 +626,8 @@ class FrangiToolPanel(QWidget):
         self.cb_clahe.currentIndexChanged.connect(self.push_params)
         self.cb_smooth.currentIndexChanged.connect(self.push_params)
         self.chk_correction.stateChanged.connect(self.push_params)
+        self.sp_min_sigma.valueChanged.connect(self.push_params)
+        self.sp_max_sigma.valueChanged.connect(self.push_params) 
 
         # --- Bottom Stretch & Button ---
         main_layout.addStretch(1)
@@ -630,7 +657,9 @@ class FrangiToolPanel(QWidget):
         self.canvas_tab.p_channel_mode = self.cb_channel.currentText()
         self.canvas_tab.p_clahe_mode = self.cb_clahe.currentText()
         self.canvas_tab.p_smooth_mode = self.cb_smooth.currentText()
-        
+        self.canvas_tab.p_min_sigma = self.sp_min_sigma.value()
+        self.canvas_tab.p_max_sigma = self.sp_max_sigma.value()
+                
         targets = [cid for cid, chk in self.class_checkboxes.items() if chk.isChecked()]
         self.canvas_tab.p_target_classes = targets
         

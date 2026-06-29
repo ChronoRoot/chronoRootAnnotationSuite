@@ -109,18 +109,16 @@ class PhenomicsInspectorTab(QWidget):
         
         self.rad_view_model = QRadioButton("Colored root parts (annotation)")
         self.rad_view_model.setToolTip("Semantic labels painted in Annotation.")
-        self.rad_view_graph_mask = QRadioButton("Tracing-based mask")
+        self.rad_view_graph_mask = QRadioButton("Colored skeleton")
         self.rad_view_graph_mask.setToolTip("Mask pixels validated by the root tracing graph.")
-        self.rad_view_hard_graph = QRadioButton("Root skeleton (lines)")
-        self.rad_view_hard_graph.setToolTip("Topological graph as line overlay only.")
-        self.rad_view_rsml = QRadioButton("Architecture preview")
-        self.rad_view_rsml.setToolTip("Architecture overlay from tracing.")
+        self.rad_view_rsml = QRadioButton("RSML architecture preview")
+        self.rad_view_rsml.setToolTip("RSML architecture overlay.")
         self.rad_view_none = QRadioButton("Raw image only")
         self.rad_view_none.setToolTip("Scanner image without overlays.")
         self.rad_view_model.setChecked(True)
 
         self.view_group = QButtonGroup()
-        for rad in [self.rad_view_model, self.rad_view_graph_mask, self.rad_view_hard_graph, self.rad_view_rsml, self.rad_view_none]:
+        for rad in [self.rad_view_model, self.rad_view_graph_mask, self.rad_view_rsml, self.rad_view_none]:
             self.view_group.addButton(rad)
             rad.toggled.connect(self._trigger_redraw)
             vbox_view.addWidget(rad)
@@ -361,13 +359,7 @@ class PhenomicsInspectorTab(QWidget):
                     if 0 <= px < w_img and 0 <= py < h_img:
                         padded_rgb[py, px] = color
 
-        # --- MODE 3: HARD TOPOLOGICAL GRAPH ---
-        elif self.rad_view_hard_graph.isChecked() and "graph_edges" in viz:
-            for u, v, r_type in viz["graph_edges"]:
-                col = (255, 0, 0) if r_type == 1 else (0, 255, 0)
-                cv2.line(padded_rgb, self._get_shifted_coord(u, x1, y1, pad_ruler), self._get_shifted_coord(v, x1, y1, pad_ruler), col, line_w)
-
-        # --- MODE 4: LIVE RSML OVERLAY ---
+        # --- MODE 3: LIVE RSML OVERLAY ---
         elif self.rad_view_rsml.isChecked() and self.loaded_rsml_roots:
             # Array is pushed to QImage.Format_RGB888, so we use pure RGB tuples!
             order_colors = {
@@ -454,15 +446,8 @@ class PhenomicsInspectorTab(QWidget):
         
         line_w = self.spin_width.value()
 
-        if self.rad_view_hard_graph.isChecked() and "graph_edges" in viz:
-            for u, v, r_type in viz["graph_edges"]:
-                color = QColor(255, 0, 0) if r_type == 1 else QColor(0, 255, 0)
-                painter.setPen(QPen(color, line_w))
-                p1, p2 = self._get_shifted_coord(u, x1, y1, pad_ruler), self._get_shifted_coord(v, x1, y1, pad_ruler)
-                painter.drawLine(p1[0], p1[1], p2[0], p2[1])
-
         # LIVE RSML SVG Export
-        elif self.rad_view_rsml.isChecked() and self.loaded_rsml_roots:
+        if self.rad_view_rsml.isChecked() and self.loaded_rsml_roots:
             q_colors = {
                 0: QColor(255, 0, 0),
                 1: QColor(0, 255, 0),

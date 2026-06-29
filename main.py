@@ -163,6 +163,8 @@ class ChronoRootAnnotationSuite(QMainWindow):
                 cid for cid, chk in self.panel_frangi.class_checkboxes.items() if chk.isChecked()
             ]
             cfg["frangi"] = {
+                "min_sigma": self.panel_frangi.sp_min_sigma.value(),
+                "max_sigma": self.panel_frangi.sp_max_sigma.value(),
                 "search_range": self.panel_frangi.sp_search.value(),
                 "bridge_gaps": self.panel_frangi.sp_bridge.value(),
                 "min_part": self.panel_frangi.sp_min_part.value(),
@@ -463,6 +465,9 @@ class ChronoRootAnnotationSuite(QMainWindow):
     def _inject_canvas_configs(self):
         f_cfg = self.config.get("frangi", {})
         frangi = self.workspaces.canvas_frangi
+        frangi.p_min_sigma = f_cfg.get("min_sigma", 1)
+        frangi.p_max_sigma = f_cfg.get("max_sigma", 5)
+        frangi.p_sigma_step = f_cfg.get("sigma_step", 2)
         frangi.p_search_range = f_cfg.get("search_range", 0)
         frangi.p_bridge_gaps = f_cfg.get("bridge_gaps", 1)
         frangi.p_min_part = f_cfg.get("min_part", 5)
@@ -489,7 +494,7 @@ class ChronoRootAnnotationSuite(QMainWindow):
         self.browser.refresh_requested.connect(self.scan_directory)
         self.browser.file_selected.connect(self.load_file)
         self.browser.save_progress_requested.connect(lambda: self.save_task(mark_finished=False))
-        self.browser.finish_annotation_requested.connect(lambda: self.save_task(mark_finished=True))
+        self.browser.finish_annotation_requested.connect(self._on_finish_annotation_requested)
         self.browser.input_dir_changed.connect(self._on_input_dir_changed)
         self.browser.output_dir_changed.connect(self._on_output_dir_changed)
         self.browser.output_mode_changed.connect(self._on_output_mode_changed)
@@ -1141,6 +1146,9 @@ class ChronoRootAnnotationSuite(QMainWindow):
                 + ("\n• …" if len(warnings) > 12 else "")
             )
 
+    def _on_finish_annotation_requested(self):
+        self.save_task(mark_finished=True)
+
     def save_task(self, mark_finished=False):
         if not self.global_model.masks:
             return
@@ -1169,7 +1177,6 @@ class ChronoRootAnnotationSuite(QMainWindow):
     def _on_save_finished(self, mapping):
         self.hide_loading()
         self.global_model.callbacks_muted = False
-        was_finish = self._pending_mark_finished
         self._pending_mark_finished = False
         worker = self.sender()
         if worker in self.active_workers:
@@ -1226,13 +1233,6 @@ class ChronoRootAnnotationSuite(QMainWindow):
                 for uid, meta in self.panel_phenomics.capture_metadata().items()
             ]
             self._start_measure_worker(plants_meta, cm_per_px)
-
-        if was_finish and mapping is not None:
-            QMessageBox.information(
-                self,
-                "Annotation Complete",
-                "This plate is marked completed.",
-            )
 
     # --- Analysis Engine ---
     def run_measurements(self, plants_meta, cm_per_px):
@@ -1318,21 +1318,31 @@ class ChronoRootAnnotationSuite(QMainWindow):
         if not self.measurements_cache:
             return
 
-        if normalize_annotation_status(self.global_model.status) != "completed":
-            QMessageBox.warning(
-                self, "Finish Annotation First",
-                "This plate is not marked Completed yet.\n\n"
-                "Click Finish Annotation before exporting.",
-            )
-            return
-
-        out_dir = self.browser.get_effective_output_dir(self.current_task_path)
-        os.makedirs(out_dir, exist_ok=True)
         cm_per_px = plate_meta.get("scale_cm_px")
         if cm_per_px is None:
             QMessageBox.warning(self, "Error", "Invalid Calibration Value.")
             return
 
+        is_completed = normalize_annotation_status(self.global_model.status) == "completed"
+        mark_finished = False
+        if not is_completed:
+            finish_box = QMessageBox(
+                QMessageBox.Question,
+                "Finish Annotation",
+                "We need to finish annotation before exporting.",
+                QMessageBox.NoButton,
+                self,
+            )
+            finish_btn = finish_box.addButton("Finish annotation", QMessageBox.AcceptRole)
+            finish_box.addButton(QMessageBox.Cancel)
+            finish_box.setDefaultButton(finish_btn)
+            finish_box.exec_()
+            if finish_box.clickedButton() != finish_btn:
+                return
+            mark_finished = True
+
+        out_dir = self.browser.get_effective_output_dir(self.current_task_path)
+        os.makedirs(out_dir, exist_ok=True)
         export_base_name = self.current_base_name
         json_check_path = os.path.join(out_dir, f"{export_base_name}_Metrics.json")
         rsml_check_path = os.path.join(out_dir, f"{export_base_name}_Topology.rsml")
@@ -1348,10 +1358,14 @@ class ChronoRootAnnotationSuite(QMainWindow):
             if reply == QMessageBox.No:
                 return
 
-        # Re-save the annotation (masks + plate/plant metadata) as a completed
-        # snapshot first, then re-run analysis and export in _on_save_finished.
-        self._pending_export_plate_meta = plate_meta
-        self.save_task(mark_finished=True)
+        self._start_export_pipeline(plate_meta, mark_finished=mark_finished)
+
+    def _start_export_pipeline(self, plate_meta, mark_finished=False):
+        if mark_finished or self._is_task_dirty():
+            self._pending_export_plate_meta = plate_meta
+            self.save_task(mark_finished=mark_finished)
+        else:
+            self._run_export_worker(plate_meta)
 
     def _run_export_worker(self, plate_meta):
         out_dir = self.browser.get_effective_output_dir(self.current_task_path)
