@@ -21,9 +21,11 @@ from core.model import (
     normalize_annotation_status,
 )
 from core.analyzer_engine import (
+    analyze_single_plant,
     extract_plate_metrics,
     export_rsml_and_json,
     load_measurements_from_metrics_json,
+    scalar_metrics_dict,
 )
 
 from components.file_browser import UnifiedFileBrowser
@@ -80,6 +82,7 @@ class ChronoRootAnnotationSuite(QMainWindow):
         self._pending_open_annotation_tab = False
         self._pending_mark_finished = False
         self._pending_export_plate_meta = None
+        self._pending_measure = None
         self._is_closing = False
         self._selection_sync_guard = False
         self._focus_mode_active = False
@@ -600,6 +603,18 @@ class ChronoRootAnnotationSuite(QMainWindow):
 
     def _on_metadata_dirty(self):
         self.metadata_dirty = True
+        if self.measurements_cache and self.global_model.active_uid:
+            uid = self.global_model.active_uid
+            if uid in self.measurements_cache:
+                captured = self.panel_phenomics.capture_metadata()
+                plant_meta = captured.get(
+                    uid, self.global_model.get_plants_metadata().get(uid, {})
+                )
+                self.workspaces.inspector_tab.refresh_plant_metadata(
+                    plant_meta,
+                    self.measurements_cache[uid],
+                    uid,
+                )
 
     def _on_auto_renumber_plants(self):
         if not self.global_model.masks:
@@ -1163,6 +1178,7 @@ class ChronoRootAnnotationSuite(QMainWindow):
 
         if mapping is None:
             self._pending_export_plate_meta = None
+            self._pending_measure = None
             return
 
         new_selection = [mapping[uid] for uid in self.global_model.selected_uids if uid in mapping]
@@ -1198,6 +1214,18 @@ class ChronoRootAnnotationSuite(QMainWindow):
             plate_meta = self._pending_export_plate_meta
             self._pending_export_plate_meta = None
             self._run_export_worker(plate_meta)
+        elif self._pending_measure is not None:
+            _, cm_per_px = self._pending_measure
+            self._pending_measure = None
+            plants_meta = [
+                {
+                    "uid": uid,
+                    "genotype": meta.get("genotype", "Unknown"),
+                    "plant_num": meta.get("plant_num", str(uid)),
+                }
+                for uid, meta in self.panel_phenomics.capture_metadata().items()
+            ]
+            self._start_measure_worker(plants_meta, cm_per_px)
 
         if was_finish and mapping is not None:
             QMessageBox.information(
@@ -1208,13 +1236,23 @@ class ChronoRootAnnotationSuite(QMainWindow):
 
     # --- Analysis Engine ---
     def run_measurements(self, plants_meta, cm_per_px):
-        if normalize_annotation_status(self.global_model.status) != "completed":
-            QMessageBox.warning(
-                self, "Finish Annotation First",
-                "This plate is not marked Completed yet.\n\n"
-                "Click Finish Annotation before measuring.",
+        if self._is_task_dirty():
+            reply = QMessageBox.question(
+                self,
+                "Unsaved Changes",
+                "We need to save before doing the measure.\n\n"
+                + self._save_prompt_message(),
+                QMessageBox.Save | QMessageBox.Cancel,
+                QMessageBox.Save,
             )
+            if reply == QMessageBox.Save:
+                self._pending_measure = (plants_meta, cm_per_px)
+                self.save_task(mark_finished=False)
+                return
             return
+        self._start_measure_worker(plants_meta, cm_per_px)
+
+    def _start_measure_worker(self, plants_meta, cm_per_px):
         self.show_loading("Measuring traits…")
         worker = ModelWorker(extract_plate_metrics, self.global_model, plants_meta, cm_per_px)
         self.active_workers.add(worker)
@@ -1229,7 +1267,7 @@ class ChronoRootAnnotationSuite(QMainWindow):
             self.active_workers.remove(worker)
             worker.deleteLater()
 
-        self.measurements_cache = results_dict
+        self.measurements_cache = scalar_metrics_dict(results_dict)
         self.panel_phenomics.btn_export.setEnabled(True)
         self.workspaces.setCurrentIndex(3)
         self.sync_inspector()
@@ -1247,13 +1285,12 @@ class ChronoRootAnnotationSuite(QMainWindow):
             return
 
         data = self.measurements_cache[uid]
-        if data.get("crop_offset") is None and uid in self.global_model.masks:
-            patch_data = self.global_model._get_class_patch(uid)
-            if patch_data:
-                _, x_off, y_off = patch_data
-                data = dict(data)
-                data["crop_offset"] = (x_off, y_off)
-                self.measurements_cache[uid] = data
+        captured = self.panel_phenomics.capture_metadata()
+        plant_meta = captured.get(
+            uid, self.global_model.get_plants_metadata().get(uid, {})
+        )
+        genotype = plant_meta.get("genotype") or data.get("genotype", "Unknown")
+        plant_num = plant_meta.get("plant_num") or data.get("plant_num", str(uid))
 
         bbox = self.global_model.bboxes.get(uid, (0, 0, 0, 0))
         shape = self.global_model.raw_image.shape if self.global_model.raw_image is not None else None
@@ -1263,8 +1300,18 @@ class ChronoRootAnnotationSuite(QMainWindow):
         else:
             self.panel_phenomics.current_cm_per_px = live_cm_per_px
 
+        viz_data = analyze_single_plant(
+            self.global_model, uid, genotype, plant_num, live_cm_per_px
+        )
+
         self.workspaces.inspector_tab.update_view(
-            uid, data, self.global_model.raw_image, bbox, live_cm_per_px
+            uid,
+            data,
+            self.global_model.raw_image,
+            bbox,
+            live_cm_per_px,
+            plant_meta=plant_meta,
+            viz_data=viz_data,
         )
 
     def run_export(self, plate_meta):
@@ -1302,8 +1349,7 @@ class ChronoRootAnnotationSuite(QMainWindow):
                 return
 
         # Re-save the annotation (masks + plate/plant metadata) as a completed
-        # snapshot first, then export Metrics/RSML in _on_save_finished. This keeps
-        # image.json and _Metrics.json describing the exact same state.
+        # snapshot first, then re-run analysis and export in _on_save_finished.
         self._pending_export_plate_meta = plate_meta
         self.save_task(mark_finished=True)
 
@@ -1318,25 +1364,41 @@ class ChronoRootAnnotationSuite(QMainWindow):
         )
         plate_meta["original_image"] = original_img_name
 
+        shape = self.global_model.raw_image.shape if self.global_model.raw_image is not None else None
+        cm_per_px = plate_meta.get("scale_cm_px")
+        if cm_per_px is None:
+            cm_per_px = self.panel_phenomics.get_cm_per_px(shape)
+        plants_meta = []
+        for row_meta in self.panel_phenomics.capture_metadata().items():
+            uid, meta = row_meta
+            plants_meta.append({
+                "uid": uid,
+                "genotype": meta.get("genotype", "Unknown"),
+                "plant_num": meta.get("plant_num", str(uid)),
+            })
+
         self.show_loading("Exporting analysis…")
-        worker = ModelWorker(
-            export_rsml_and_json,
-            out_dir,
-            export_base_name,
-            plate_meta,
-            self.measurements_cache,
-        )
+        worker = ModelWorker(self._export_analysis_bundle, out_dir, export_base_name, plate_meta, plants_meta, cm_per_px)
         self.active_workers.add(worker)
         worker.finished.connect(self._on_export_finished)
         worker.error.connect(self._on_thread_error)
         worker.start()
 
-    def _on_export_finished(self, _):
+    def _export_analysis_bundle(self, out_dir, export_base_name, plate_meta, plants_meta, cm_per_px):
+        full_results = extract_plate_metrics(self.global_model, plants_meta, cm_per_px)
+        export_rsml_and_json(out_dir, export_base_name, plate_meta, full_results)
+        return scalar_metrics_dict(full_results)
+
+    def _on_export_finished(self, scalar_results):
         self.hide_loading()
         worker = self.sender()
         if worker in self.active_workers:
             self.active_workers.remove(worker)
             worker.deleteLater()
+
+        if scalar_results:
+            self.measurements_cache = scalar_results
+            self.panel_phenomics.btn_export.setEnabled(True)
 
         out_dir = self.browser.get_effective_output_dir(self.current_task_path)
 
@@ -1365,6 +1427,7 @@ class ChronoRootAnnotationSuite(QMainWindow):
         self._is_closing = False
         self._pending_load_data = None
         self._pending_export_plate_meta = None
+        self._pending_measure = None
 
     # --- Genotype Management ---
     def open_genotype_manager(self):

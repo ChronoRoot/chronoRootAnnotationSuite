@@ -43,6 +43,8 @@ class PhenomicsInspectorTab(QWidget):
         super().__init__()
         self.current_uid = None
         self.current_data = None
+        self.current_viz = None
+        self.current_plant_meta = {}
         self.current_raw = None
         self.current_bbox = None
         self.current_cm_px = None
@@ -188,6 +190,8 @@ class PhenomicsInspectorTab(QWidget):
         self.loaded_rsml_roots = []
         self.current_uid = None
         self.current_data = None
+        self.current_viz = None
+        self.current_plant_meta = {}
 
     def show_content_state(self):
         self.stack.setCurrentIndex(1)
@@ -199,9 +203,44 @@ class PhenomicsInspectorTab(QWidget):
     def _get_shifted_coord(self, pt, x1, y1, pad_ruler):
         return (int(pt[0]) - x1 + pad_ruler, int(pt[1]) - y1)
     
-    def update_view(self, uid, data, raw_image, bbox, cm_per_px):
+    def refresh_plant_metadata(self, plant_meta, data, uid):
+        """Update genotype/plant number readout without recomputing graph visuals."""
+        self.current_plant_meta = plant_meta or {}
+        if not data:
+            return
+        display_genotype = self.current_plant_meta.get("genotype") or data.get("genotype", "N/A")
+        display_plant_num = self.current_plant_meta.get("plant_num") or data.get("plant_num", "N/A")
+
+        report = f"--- REPORT ID: {uid} ---\n"
+        report += f"Genotype: {display_genotype}\n"
+        report += f"Plant #:  {display_plant_num}\n\n"
+
+        report += "=== BASIC ARCHITECTURE ===\n"
+        report += f"Main Root Length (MR):       {data.get('mr_length_mm', 0.0):.2f} mm\n"
+        report += f"Lateral Root Length (LR):    {data.get('lr_length_mm', 0.0):.2f} mm\n"
+        report += f"Total Root Length (TR):      {data.get('tr_length_mm', 0.0):.2f} mm\n"
+        report += f"Number of Lateral Roots:     {data.get('lr_count', 0)} count\n"
+        report += f"Discrete LR Density:         {data.get('lr_density_cm', 0.0):.2f} LRs/cm\n"
+        report += f"Main Over Total Root (MR/TR): {data.get('mr_over_tr_ratio', 0.0):.2f}\n\n"
+
+        report += "=== SPATIAL DISTRIBUTION ===\n"
+        report += f"Convex Hull Area:            {data.get('hull_area_mm2', 0.0):.2f} mm²\n"
+        report += f"Convex Hull Width:           {data.get('hull_width_mm', 0.0):.2f} mm\n"
+        report += f"Convex Hull Height:          {data.get('hull_height_mm', 0.0):.2f} mm\n"
+        report += f"Root Density:                {data.get('root_density_mm_mm2', 0.0):.4f} mm/mm²\n"
+        report += f"Aspect Ratio (Height/Width): {data.get('aspect_ratio', 0.0):.2f}\n\n"
+
+        report += "=== ROOT ANGLES ===\n"
+        report += f"Mean Tip Angle:              {data.get('tip_angle_deg', 0.0):.1f}°\n"
+        report += f"Mean Emerg. Angle (2mm):     {data.get('emergence_angle_deg', 0.0):.1f}°\n"
+
+        self.txt_metrics.setText(report)
+
+    def update_view(self, uid, data, raw_image, bbox, cm_per_px, plant_meta=None, viz_data=None):
         self.current_uid, self.current_data, self.current_raw = uid, data, raw_image
         self.current_bbox, self.current_cm_px = bbox, cm_per_px
+        self.current_plant_meta = plant_meta or {}
+        self.current_viz = viz_data
         
         if not uid or not data:
             self.show_content_state()
@@ -216,8 +255,9 @@ class PhenomicsInspectorTab(QWidget):
         # 1. LIVE RSML PARSING (In-Memory)
         # ==========================================
         self.loaded_rsml_roots = []
-        if data.get("rsml_xml") is not None:
-            plant_xml = data["rsml_xml"]
+        rsml_source = viz_data or {}
+        if rsml_source.get("rsml_xml") is not None:
+            plant_xml = rsml_source["rsml_xml"]
             
             def parse_root_node(elem, current_order):
                 pts = []
@@ -238,30 +278,7 @@ class PhenomicsInspectorTab(QWidget):
         # ==========================================
         # 2. MANUSCRIPT METRICS REPORT READOUT
         # ==========================================
-        report = f"--- REPORT ID: {uid} ---\n"
-        report += f"Genotype: {data.get('genotype', 'N/A')}\n"
-        report += f"Plant #:  {data.get('plant_num', 'N/A')}\n\n"
-        
-        report += "=== BASIC ARCHITECTURE ===\n"
-        report += f"Main Root Length (MR):       {data.get('mr_length_mm', 0.0):.2f} mm\n"
-        report += f"Lateral Root Length (LR):    {data.get('lr_length_mm', 0.0):.2f} mm\n"
-        report += f"Total Root Length (TR):      {data.get('tr_length_mm', 0.0):.2f} mm\n"
-        report += f"Number of Lateral Roots:     {data.get('lr_count', 0)} count\n"
-        report += f"Discrete LR Density:         {data.get('lr_density_cm', 0.0):.2f} LRs/cm\n"
-        report += f"Main Over Total Root (MR/TR): {data.get('mr_over_tr_ratio', 0.0):.2f}\n\n"
-        
-        report += "=== SPATIAL DISTRIBUTION ===\n"
-        report += f"Convex Hull Area:            {data.get('hull_area_mm2', 0.0):.2f} mm²\n"
-        report += f"Convex Hull Width:           {data.get('hull_width_mm', 0.0):.2f} mm\n"
-        report += f"Convex Hull Height:          {data.get('hull_height_mm', 0.0):.2f} mm\n"
-        report += f"Root Density:                {data.get('root_density_mm_mm2', 0.0):.4f} mm/mm²\n"
-        report += f"Aspect Ratio (Height/Width): {data.get('aspect_ratio', 0.0):.2f}\n\n"
-        
-        report += "=== ROOT ANGLES ===\n"
-        report += f"Mean Tip Angle:              {data.get('tip_angle_deg', 0.0):.1f}°\n"
-        report += f"Mean Emerg. Angle (2mm):     {data.get('emergence_angle_deg', 0.0):.1f}°\n"
-        
-        self.txt_metrics.setText(report)
+        self.refresh_plant_metadata(self.current_plant_meta, data, uid)
         
         # Trigger the visual update
         self._render_current_state()
@@ -278,17 +295,20 @@ class PhenomicsInspectorTab(QWidget):
         x1, y1 = max(0, x-pad), max(0, y-pad)
         x2, y2 = min(self.current_raw.shape[1], x+w+pad), min(self.current_raw.shape[0], y+h+pad)
         
-        padded_rgb = self._generate_raster_canvas(self.current_data, self.current_raw, x1, y1, x2, y2, pad_ruler)
+        padded_rgb = self._generate_raster_canvas(
+            self.current_data, self.current_viz, self.current_raw, x1, y1, x2, y2, pad_ruler
+        )
         
         h_img, w_img, _ = padded_rgb.shape
         qimg = QImage(padded_rgb.data, w_img, h_img, 3 * w_img, QImage.Format_RGB888)
         self.lbl_inspector_img.setPixmap(QPixmap.fromImage(qimg))
 
-    def _generate_raster_canvas(self, data, raw_image, x1, y1, x2, y2, pad_ruler):
+    def _generate_raster_canvas(self, data, viz_data, raw_image, x1, y1, x2, y2, pad_ruler):
         crop_rgb = raw_image[y1:y2, x1:x2].copy()
         padded_rgb = cv2.copyMakeBorder(crop_rgb, 0, 0, pad_ruler, 0, cv2.BORDER_CONSTANT, value=(20, 20, 20))
         h_img, w_img, _ = padded_rgb.shape
-        cx_off, cy_off = data.get("crop_offset", (0,0))
+        viz = viz_data or {}
+        cx_off, cy_off = viz.get("crop_offset", (0, 0))
         line_w = self.spin_width.value()
         
         # --- RULER ---
@@ -300,8 +320,8 @@ class PhenomicsInspectorTab(QWidget):
                 cv2.putText(padded_rgb, f"{(tick_y-10)//cm_in_px}cm", (5, tick_y + 5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
 
         # --- MODE 1: MANUAL/MODEL SEMANTIC MASK ---
-        if self.rad_view_model.isChecked() and "semantic_patch" in data:
-            orig_patch = data["semantic_patch"]
+        if self.rad_view_model.isChecked() and "semantic_patch" in viz:
+            orig_patch = viz["semantic_patch"]
             dx, dy = cx_off - x1, cy_off - y1
             h_patch, w_patch = orig_patch.shape
             h_crop, w_crop = crop_rgb.shape[:2]
@@ -327,11 +347,11 @@ class PhenomicsInspectorTab(QWidget):
             padded_rgb[0:y2-y1, pad_ruler:pad_ruler+x2-x1] = crop_rgb
 
         # --- MODE 2: GRAPH VALIDATED MASK ---
-        elif self.rad_view_graph_mask.isChecked() and "colored_skel_crop" in data:
-            skel_crop = data["colored_skel_crop"]
+        elif self.rad_view_graph_mask.isChecked() and "colored_skel_crop" in viz:
+            skel_crop = viz["colored_skel_crop"]
             kernel = np.ones((line_w, line_w), np.uint8)
-            main_mask = cv2.dilate((np.isin(skel_crop, data["main_root_colors"])).astype(np.uint8), kernel)
-            lat_mask = cv2.dilate((~np.isin(skel_crop, data["main_root_colors"]) & (skel_crop > 0)).astype(np.uint8), kernel)
+            main_mask = cv2.dilate((np.isin(skel_crop, viz["main_root_colors"])).astype(np.uint8), kernel)
+            lat_mask = cv2.dilate((~np.isin(skel_crop, viz["main_root_colors"]) & (skel_crop > 0)).astype(np.uint8), kernel)
             
             for mask, color in [(main_mask, [255, 0, 0]), (lat_mask, [0, 255, 0])]:
                 s_ys, s_xs = np.where(mask > 0)
@@ -342,8 +362,8 @@ class PhenomicsInspectorTab(QWidget):
                         padded_rgb[py, px] = color
 
         # --- MODE 3: HARD TOPOLOGICAL GRAPH ---
-        elif self.rad_view_hard_graph.isChecked() and "graph_edges" in data:
-            for u, v, r_type in data["graph_edges"]:
+        elif self.rad_view_hard_graph.isChecked() and "graph_edges" in viz:
+            for u, v, r_type in viz["graph_edges"]:
                 col = (255, 0, 0) if r_type == 1 else (0, 255, 0)
                 cv2.line(padded_rgb, self._get_shifted_coord(u, x1, y1, pad_ruler), self._get_shifted_coord(v, x1, y1, pad_ruler), col, line_w)
 
@@ -375,10 +395,10 @@ class PhenomicsInspectorTab(QWidget):
             cv2.polylines(padded_rgb, [pts_arr], True, (255, 0, 255), 2)
 
         # --- ANGLES (With Text Geometry) ---
-        if not self.rad_ang_none.isChecked() and "lateral_pts_list" in data:
+        if not self.rad_ang_none.isChecked() and "lateral_pts_list" in viz:
             dist_px_2mm = max(1, int(0.2 / self.current_cm_px)) if self.current_cm_px else 5
             
-            for lat_pts in data["lateral_pts_list"]:
+            for lat_pts in viz["lateral_pts_list"]:
                 if len(lat_pts) < 2: continue
                 start = self._get_shifted_coord(lat_pts[0], x1, y1, pad_ruler)
                 
@@ -411,6 +431,7 @@ class PhenomicsInspectorTab(QWidget):
         if not path: return
         
         data = self.current_data
+        viz = self.current_viz or {}
         x, y, w, h = self.current_bbox
         pad, pad_ruler = 40, 80
         x1, y1 = max(0, x-pad), max(0, y-pad)
@@ -433,8 +454,8 @@ class PhenomicsInspectorTab(QWidget):
         
         line_w = self.spin_width.value()
 
-        if self.rad_view_hard_graph.isChecked() and "graph_edges" in data:
-            for u, v, r_type in data["graph_edges"]:
+        if self.rad_view_hard_graph.isChecked() and "graph_edges" in viz:
+            for u, v, r_type in viz["graph_edges"]:
                 color = QColor(255, 0, 0) if r_type == 1 else QColor(0, 255, 0)
                 painter.setPen(QPen(color, line_w))
                 p1, p2 = self._get_shifted_coord(u, x1, y1, pad_ruler), self._get_shifted_coord(v, x1, y1, pad_ruler)
@@ -469,10 +490,10 @@ class PhenomicsInspectorTab(QWidget):
                 p1, p2 = pts[i], pts[(i+1) % len(pts)]
                 painter.drawLine(p1[0], p1[1], p2[0], p2[1])
 
-        if not self.rad_ang_none.isChecked() and "lateral_pts_list" in data:
+        if not self.rad_ang_none.isChecked() and "lateral_pts_list" in viz:
             dist_px_2mm = max(1, int(0.2 / self.current_cm_px)) if self.current_cm_px else 5
             
-            for lat_pts in data["lateral_pts_list"]:
+            for lat_pts in viz["lateral_pts_list"]:
                 if len(lat_pts) < 2: continue
                 start = self._get_shifted_coord(lat_pts[0], x1, y1, pad_ruler)
                 

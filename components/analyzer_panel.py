@@ -167,7 +167,7 @@ class PhenomicsControlPanel(QWidget):
         btn_layout = QHBoxLayout()
         self.btn_measure = QPushButton("Measure")
         self.btn_measure.setToolTip(
-            "Compute traits for this plate. Finish Annotation first."
+            "Compute traits for this plate. Unsaved changes must be saved first."
         )
         self.btn_measure.setStyleSheet("background-color: #007bff; color: white; font-weight: bold; padding: 10px;")
         self.btn_measure.clicked.connect(self._on_measure_clicked)
@@ -337,6 +337,11 @@ class PhenomicsControlPanel(QWidget):
         if name not in genotypes:
             genotypes.append(name)
             self.config["saved_genotypes"] = genotypes
+            GenotypeHelper._persist_genotypes(
+                genotypes,
+                config_file=self.config_file,
+                config_dict=self.config,
+            )
             self.refresh_genotype_combos(genotypes, select_genotype=name)
         else:
             self._populate_bulk_genotype_combo(genotypes, select_text=name)
