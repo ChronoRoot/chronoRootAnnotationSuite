@@ -3,15 +3,95 @@ import cv2
 import networkx as nx
 from skimage.morphology import skeletonize
 
-# --- PRE-ALLOCATED KERNELS ---
-T_KERNELS = [np.array([[-1, 1, -1], [1, 1, 1], [0, 0, 0]]), np.array([[-1, 1, 0], [1, 1, 0], [-1, 1, 0]]), np.array([[0, 0, 0], [1, 1, 1], [-1, 1, -1]]), np.array([[0, 1, -1], [0, 1, 1], [0, 1, -1]]), np.array([[1, -1, -1], [1, 1, -1], [-1, 1, -1]]), np.array([[-1, 1, -1], [1, 1, -1], [1, -1, -1]]), np.array([[-1, -1, -1], [1, 1, -1], [-1, 1, 1]]), np.array([[-1, -1, -1], [-1, 1, 1], [1, 1, -1]]), np.array([[-1, 1, 1], [1, 1, -1], [-1, -1, -1]]), np.array([[1, 1, -1], [-1, 1, 1], [-1, -1, -1]]), np.array([[-1, -1, 1], [-1, 1, 1], [-1, 1, -1]]), np.array([[-1, 1, -1], [-1, 1, 1], [-1, -1, 1]]), np.array([[-1, 1, -1], [-1, 1, 1], [-1, -1, -1]]), np.array([[-1, -1, -1], [-1, 1, 1], [-1, 1, -1]]), np.array([[-1, 1, -1], [1, 1, -1], [-1, -1, -1]]), np.array([[-1, -1, -1], [1, 1, -1], [-1, 1, -1]])]
-EP_KERNELS = [np.array([[1, -1, -1], [-1, 1, -1], [-1, -1, -1]]), np.array([[-1, 1, -1], [-1, 1, -1], [-1, -1, -1]]), np.array([[-1, -1, 1], [-1, 1, -1], [-1, -1, -1]]), np.array([[-1, -1, -1], [1, 1, -1], [-1, -1, -1]]), np.array([[-1, -1, -1], [-1, 1, 1], [-1, -1, -1]]), np.array([[-1, -1, -1], [-1, 1, -1], [1, -1, -1]]), np.array([[-1, -1, -1], [-1, 1, -1], [-1, 1, -1]]), np.array([[-1, -1, -1], [-1, 1, -1], [-1, -1, 1]])]
-X_KERNELS = [np.array([[0, 1, 0], [1, 1, 1], [0, 1, 0]]), np.array([[1, 0, 1], [0, 1, 0], [1, 0, 1]])]
-T_BRANCH_KERNELS = [np.array([[2, 1, 2], [1, 1, 1], [2, 2, 2]]), np.array([[1, 2, 1], [2, 1, 2], [1, 2, 2]]), np.array([[2, 1, 2], [1, 1, 2], [2, 1, 2]]), np.array([[1, 2, 2], [2, 1, 2], [1, 2, 1]]), np.array([[2, 2, 2], [1, 1, 1], [2, 1, 2]]), np.array([[2, 2, 1], [2, 1, 2], [1, 2, 1]]), np.array([[2, 1, 2], [2, 1, 1], [2, 1, 2]]), np.array([[1, 2, 1], [2, 1, 2], [2, 2, 1]])]
-Y_KERNELS = [np.array([[1, 0, 1], [0, 1, 0], [2, 1, 2]]), np.array([[0, 1, 0], [1, 1, 2], [0, 2, 1]]), np.array([[1, 0, 2], [0, 1, 1], [1, 0, 2]]), np.array([[0, 2, 1], [1, 1, 2], [0, 1, 0]]), np.array([[2, 1, 2], [0, 1, 0], [1, 0, 1]])]
-_Y3 = np.array([[0, 2, 1], [1, 1, 2], [0, 1, 0]])
-_Y4 = np.array([[2, 1, 2], [0, 1, 0], [1, 0, 1]])
-Y_KERNELS.extend([np.rot90(_Y3), np.rot90(_Y4), np.rot90(np.rot90(_Y3))])
+
+# Kernels for trim()
+T_KERNELS = [
+    np.array([[-1, 1, -1], [1, 1, 1], [0, 0, 0]]),
+    np.array([[-1, 1, 0], [1, 1, 0], [-1, 1, 0]]),
+    np.array([[0, 0, 0], [1, 1, 1], [-1, 1, -1]]),
+    np.array([[0, 1, -1], [0, 1, 1], [0, 1, -1]]),
+    np.array([[1, -1, -1], [1, 1, -1], [-1, 1, -1]]),
+    np.array([[-1, 1, -1], [1, 1, -1], [1, -1, -1]]),
+    np.array([[-1, -1, -1], [1, 1, -1], [-1, 1, 1]]),
+    np.array([[-1, -1, -1], [-1, 1, 1], [1, 1, -1]]),
+    np.array([[-1, 1, 1], [1, 1, -1], [-1, -1, -1]]),
+    np.array([[1, 1, -1], [-1, 1, 1], [-1, -1, -1]]),
+    np.array([[-1, -1, 1], [-1, 1, 1], [-1, 1, -1]]),
+    np.array([[-1, 1, -1], [-1, 1, 1], [-1, -1, 1]]),
+    np.array([[-1, 1, -1], [-1, 1, 1], [-1, -1, -1]]),
+    np.array([[-1, -1, -1], [-1, 1, 1], [-1, 1, -1]]),
+    np.array([[-1, 1, -1], [1, 1, -1], [-1, -1, -1]]),
+    np.array([[-1, -1, -1], [1, 1, -1], [-1, 1, -1]])
+]
+
+# Kernels for endPoints() - Strict background
+EP_KERNELS = [
+    np.array([[1, -1, -1], [-1, 1, -1], [-1, -1, -1]]),
+    np.array([[-1, 1, -1], [-1, 1, -1], [-1, -1, -1]]),
+    np.array([[-1, -1, 1], [-1, 1, -1], [-1, -1, -1]]),
+    np.array([[-1, -1, -1], [1, 1, -1], [-1, -1, -1]]),
+    np.array([[-1, -1, -1], [-1, 1, 1], [-1, -1, -1]]),
+    np.array([[-1, -1, -1], [-1, 1, -1], [1, -1, -1]]),
+    np.array([[-1, -1, -1], [-1, 1, -1], [-1, 1, -1]]),
+    np.array([[-1, -1, -1], [-1, 1, -1], [-1, -1, 1]])
+]
+
+# Perfectly symmetrical relaxed kernels for pruning
+PRUNE_KERNELS = [
+    # Straight directions (Relaxed corners using 0)
+    np.array([[-1, -1, -1], [-1,  1, -1], [ 0,  1,  0]]), # UP
+    np.array([[ 0,  1,  0], [-1,  1, -1], [-1, -1, -1]]), # DOWN
+    np.array([[-1, -1,  0], [-1,  1,  1], [-1, -1,  0]]), # LEFT
+    np.array([[ 0, -1, -1], [ 1,  1, -1], [ 0, -1, -1]]), # RIGHT
+    
+    # Diagonal directions (Strict corners)
+    np.array([[-1, -1, -1], [-1,  1, -1], [ 1, -1, -1]]), # NE tip (Branch SW)
+    np.array([[-1, -1, -1], [-1,  1, -1], [-1, -1,  1]]), # NW tip (Branch SE) 
+    np.array([[ 1, -1, -1], [-1,  1, -1], [-1, -1, -1]]), # SE tip (Branch NW)
+    np.array([[-1, -1,  1], [-1,  1, -1], [-1, -1, -1]])  # SW tip (Branch NE)
+]
+
+# --- STRICT BRANCH POINT KERNELS ---
+
+# 1. Crosses (Strict corners to avoid matching solid blocks)
+X_KERNELS = [
+    np.array([[-1,  1, -1], 
+              [ 1,  1,  1], 
+              [-1,  1, -1]]), # + cross
+              
+    np.array([[ 1, -1,  1], 
+              [-1,  1, -1], 
+              [ 1, -1,  1]])  # x cross
+]
+
+# 2. T-Branches (Strictly block the 4th side so they never match a Cross)
+T_BASE_ORTHO = np.array([[-1,  1, -1], 
+                         [ 1,  1,  1], 
+                         [-1, -1, -1]]) # -1 at the bottom ensures this is ONLY a 'T'
+
+T_BASE_DIAG = np.array([[ 1, -1,  1], 
+                        [-1,  1, -1], 
+                        [ 1, -1, -1]]) # -1 at bottom-right ensures this is ONLY a 3-way diagonal
+
+T_BRANCH_KERNELS = []
+for i in range(4):
+    T_BRANCH_KERNELS.append(np.rot90(T_BASE_ORTHO, i))
+    T_BRANCH_KERNELS.append(np.rot90(T_BASE_DIAG, i))
+
+
+# 3. Y-Branches (Strictly block the negative space between forks)
+Y_BASE_1 = np.array([[ 1, -1,  1], 
+                     [-1,  1, -1], 
+                     [-1,  1, -1]]) 
+
+Y_BASE_2 = np.array([[-1,  1, -1], 
+                     [ 1,  1, -1], 
+                     [-1, -1,  1]])
+
+Y_KERNELS = []
+for i in range(4):
+    Y_KERNELS.append(np.rot90(Y_BASE_1, i))
+    Y_KERNELS.append(np.rot90(Y_BASE_2, i))
 
 def get_roi_bounding_box(mask, padding=5):
     points = cv2.findNonZero(mask)
@@ -24,6 +104,18 @@ def get_roi_bounding_box(mask, padding=5):
 
 def extract_skeleton(binary_mask, prune_iters=3):
     """Generates skeleton and topological points directly from a numpy array."""
+    
+    # Clean up mask with morphological operations 
+    morph_kernel_size = 3
+    morph_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (morph_kernel_size, morph_kernel_size))
+    binary_mask = cv2.dilate(binary_mask, morph_kernel)
+    binary_mask = cv2.erode(binary_mask, morph_kernel)
+    
+    morph_kernel_size = 3
+    morph_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (morph_kernel_size, morph_kernel_size))
+    binary_mask = cv2.erode(binary_mask, morph_kernel)
+    binary_mask = cv2.dilate(binary_mask, morph_kernel)
+    
     roi_slice, offset = get_roi_bounding_box(binary_mask)
     if roi_slice is None:
         return np.zeros_like(binary_mask), np.array([]), np.array([]), False
@@ -51,50 +143,74 @@ def extract_skeleton(binary_mask, prune_iters=3):
     is_valid = len(end_points) >= 2
     return full_skeleton, branch_points, end_points, is_valid
 
-def trim(ske):
+def trim(ske): ## Removes unwanted pixels from the skeleton
+    # Using pre-allocated global kernels
     bp = np.zeros_like(ske)
     for t in T_KERNELS:
         bp = cv2.morphologyEx(ske, cv2.MORPH_HITMISS, t)
         ske = cv2.subtract(ske, bp)
     return ske
 
-def prune(skel, num_it):
-    if num_it == 0: return skel
-    orig = skel.copy()
-    for _ in range(num_it):
+
+def prune(skel, num_it): 
+    ## Removes branches with length lower than num_it
+    orig = skel
+    
+    # 1. Pruning loop using the relaxed PRUNE_KERNELS
+    for i in range(0, num_it):
         current_skel = skel
-        for kernel in EP_KERNELS:
+        for kernel in PRUNE_KERNELS:
             hit = cv2.morphologyEx(current_skel, cv2.MORPH_HITMISS, kernel)
             current_skel = cv2.subtract(current_skel, hit)
         skel = current_skel
         
-    end = endPoints(skel)
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-    for _ in range(num_it):
+    # 2. Re-grow endpoints
+    end = endPoints(skel) # Still correctly uses EP_KERNELS under the hood
+    kernel_size = 3
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_size, kernel_size))
+    
+    for i in range(0, num_it):
         end = cv2.dilate(end, kernel)
         end = cv2.bitwise_and(end, orig)
+        
     return cv2.bitwise_or(end, skel)
+
 
 def endPoints(skel):
     ep = np.zeros_like(skel)
+    # Use global EP_KERNELS
     for kernel in EP_KERNELS:
         ep = cv2.add(ep, cv2.morphologyEx(skel, cv2.MORPH_HITMISS, kernel))
     return ep
 
+
 def skeleton_nodes(ske):
     branch = branchedPoints(ske)
     end = endPoints(ske)
+    
     bp = np.where(branch == 1)
-    bnodes = [[bp[1][i], bp[0][i]] for i in range(len(bp[0]))]
+    bnodes = []
+    for i in range(len(bp[0])):
+        bnodes.append([bp[1][i],bp[0][i]])
+    
     ep = np.where(end == 1)
-    enodes = [[ep[1][i], ep[0][i]] for i in range(len(ep[0]))]
+    enodes = []
+    for i in range(len(ep[0])):
+        enodes.append([ep[1][i],ep[0][i]])
+    
     return np.array(bnodes), np.array(enodes)
+
 
 def branchedPoints(skel):
     bp = np.zeros(skel.shape, dtype=int)
-    for x in X_KERNELS: bp = bp + cv2.morphologyEx(skel, cv2.MORPH_HITMISS, x)
-    for y in Y_KERNELS: bp = bp + cv2.morphologyEx(skel, cv2.MORPH_HITMISS, y)
-    for t in T_BRANCH_KERNELS: bp = bp + cv2.morphologyEx(skel, cv2.MORPH_HITMISS, t)
+    
+    for x in X_KERNELS:
+        bp = bp + cv2.morphologyEx(skel, cv2.MORPH_HITMISS, x)
+    for y in Y_KERNELS:
+        bp = bp + cv2.morphologyEx(skel, cv2.MORPH_HITMISS, y)
+    for t in T_BRANCH_KERNELS:
+        bp = bp + cv2.morphologyEx(skel, cv2.MORPH_HITMISS, t)
+        
     return bp
 
 # --- GRAPH BUILDER (State-Safe) ---

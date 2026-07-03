@@ -72,7 +72,7 @@ class GraphCanvasTab(QWidget):
         super().__init__()
         self.model = model
         
-        self.p_prune = 0
+        self.p_prune = 3
         self.p_thick = 1
         self.interaction_mode = "START" 
         

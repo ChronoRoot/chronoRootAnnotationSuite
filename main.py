@@ -511,7 +511,7 @@ class ChronoRootAnnotationSuite(QMainWindow):
 
         g_cfg = self.config.get("graph", {})
         graph = self.workspaces.canvas_graph
-        graph.p_prune = g_cfg.get("prune", 0)
+        graph.p_prune = g_cfg.get("prune", 3)
         graph.p_thick = g_cfg.get("thick", 1)
         graph.p_target_classes = g_cfg.get("target_classes", [1, 2])
 
