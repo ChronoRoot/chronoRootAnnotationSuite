@@ -13,7 +13,7 @@ LOGICAL_THICKNESS = 2
 MAX_HISTORY = 10
 SCHEMA_VERSION = 1
 
-ANNOTATION_STATUSES = ("missing", "in_progress", "completed")
+ANNOTATION_STATUSES = ("without_annotation", "pending", "in_progress", "completed")
 ANALYSIS_STATUSES = ("not_applicable", "not_analyzed", "analyzed")
 
 HIGH_CONTRAST_COLORS = [
@@ -27,20 +27,25 @@ HIGH_CONTRAST_COLORS = [
 def normalize_annotation_status(raw_status):
     """Map legacy/raw status strings to canonical annotation status."""
     if not raw_status:
-        return "missing"
+        return "without_annotation"
     s = str(raw_status).lower().strip()
     if s in ("completed", "complete", "done"):
         return "completed"
     if s in ("in_progress", "inprogress", "active", "progress"):
         return "in_progress"
-    if s in ("missing", "pending", "none", ""):
-        return "missing"
+    if s in ("without_annotation", "without annotation", "no_annotation"):
+        return "without_annotation"
+    if s in ("pending",):
+        return "pending"
+    if s in ("missing", "none", ""):
+        return "pending"
     return "in_progress"
 
 
 def annotation_status_display(status):
     mapping = {
-        "missing": "Missing",
+        "without_annotation": "Without Annotation",
+        "pending": "Pending",
         "in_progress": "In Progress",
         "completed": "Completed",
     }
@@ -81,7 +86,7 @@ def topology_path(directory, base_name):
 
 # --- Directory browse peek ---
 PEEK_BYTES = 4096
-_PEEK_CACHE_VERSION = 2
+_PEEK_CACHE_VERSION = 3
 _file_peek_cache = {}
 
 
@@ -112,7 +117,7 @@ def _detect_annotation_from_compact(compact):
     if '"annotation_status":"in_progress"' in compact:
         return "in_progress"
     if '"annotation_status":"missing"' in compact:
-        return "missing"
+        return "in_progress"
     if '"status":"in_progress"' in compact or '"status":"pending"' in compact:
         return "in_progress"
     return "in_progress"
@@ -160,12 +165,17 @@ def _parse_plant_count(json_path):
 
 def peek_task_summary(json_path, task_dir, base_name, out_dir=None, probe_analysis=False):
     """Fast header-only read for directory browsing. Never parses full JSON or NIfTI."""
+    nii_path = os.path.join(task_dir, base_name + ".nii.gz")
+    has_nii = os.path.exists(nii_path)
+    has_json = os.path.exists(json_path)
+
     result = {
-        "annotation_status": "missing",
+        "annotation_status": "without_annotation",
         "plant_count": 0,
         "analysis_status": "not_applicable",
     }
-    if not os.path.exists(json_path):
+    if not has_json:
+        result["annotation_status"] = "pending" if has_nii else "without_annotation"
         return result
 
     cached = _peek_cache_get(json_path)
@@ -431,7 +441,7 @@ class PlantImageModel:
             if not os.path.isdir(full_path):
                 continue
 
-            total = missing = in_progress = completed = 0
+            total = without_annotation = pending = in_progress = completed = 0
             analyzed = not_analyzed = 0
 
             for root, _, files in os.walk(full_path):
@@ -452,8 +462,10 @@ class PlantImageModel:
                         metrics_dir=effective_out if fixed_output else root,
                     )
                     ann = entry["annotation_status"]
-                    if ann == "missing":
-                        missing += 1
+                    if ann == "without_annotation":
+                        without_annotation += 1
+                    elif ann == "pending":
+                        pending += 1
                     elif ann == "completed":
                         completed += 1
                         if entry["analysis_status"] == "analyzed":
@@ -468,7 +480,8 @@ class PlantImageModel:
                 "name": item_name,
                 "path": full_path,
                 "total": total,
-                "missing": missing,
+                "without_annotation": without_annotation,
+                "pending": pending,
                 "in_progress": in_progress,
                 "completed": completed,
                 "analyzed": analyzed,
@@ -677,11 +690,9 @@ class PlantImageModel:
         self.sync_plant_numbers_to_uids(force=False)
 
         # 3. PROCEED WITH SAVING
-        # Never auto-downgrade a completed annotation on a progress (mark_finished=False)
-        # save, e.g. a metadata-only edit must not flip completed back to in_progress.
         if mark_finished:
             self.status = "completed"
-        elif normalize_annotation_status(self.status) != "completed":
+        else:
             self.status = "in_progress"
         
         data = self._build_annotation_document()
@@ -736,7 +747,7 @@ class PlantImageModel:
             summary = data.get("summary") or {}
             ann_raw = summary.get("annotation_status") or data.get("status", "in_progress")
             self.status = normalize_annotation_status(ann_raw)
-            if self.status == "missing":
+            if self.status in ("without_annotation", "pending"):
                 self.status = "in_progress"
 
             self.plate_meta = data.get("plate_meta") or {}
@@ -772,7 +783,7 @@ class PlantImageModel:
 
     def _build_annotation_document(self):
         ann_status = normalize_annotation_status(self.status)
-        if ann_status == "missing":
+        if ann_status in ("without_annotation", "pending"):
             ann_status = "in_progress"
 
         output = {

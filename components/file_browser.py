@@ -42,7 +42,7 @@ class SegmentedProgressBar(QWidget):
 
 
 class FolderStatsWidget(QWidget):
-    def __init__(self, text, total, missing, in_progress, completed,
+    def __init__(self, text, total, without_annotation, pending, in_progress, completed,
                  analyzed=0, not_analyzed=0, is_folder=True):
         super().__init__()
         layout = QVBoxLayout(self)
@@ -65,17 +65,23 @@ class FolderStatsWidget(QWidget):
         layout.addLayout(top_row)
 
         if is_folder and total > 0:
-            ann_txt = (
-                f"To annotate: {missing} | In progress: {in_progress} | "
-                f"Done: {completed} | Total: {total}"
-            )
+            if without_annotation != 0:
+                ann_txt = (
+                    f"Without: {without_annotation} | Pending: {pending} | "
+                    f"In progress: {in_progress} | Done: {completed} | Total: {total}"
+                )
+            else:
+                ann_txt = (
+                    f"Pending: {pending} | "
+                    f"In progress: {in_progress} | Done: {completed} | Total: {total}"
+                )
             lbl_ann = QLabel(ann_txt)
             lbl_ann.setStyleSheet("color: gray; font-size: 10px;")
             layout.addWidget(lbl_ann)
 
             layout.addWidget(SegmentedProgressBar(
-                [completed, in_progress, missing],
-                ["#28a745", "#ffc107", "#bdbdbd"],
+                [completed, in_progress, pending, without_annotation],
+                ["#28a745", "#ffc107", "#bdbdbd", "#bdbdbd"],
             ))
 
             if completed > 0:
@@ -94,6 +100,10 @@ def _annotation_row_style(display_status):
         return "color: #28a745; font-size: 10px; font-weight: bold;"
     if display_status == "In Progress":
         return "color: #d68910; font-size: 10px; font-weight: bold;"
+    if display_status == "Pending":
+        return "color: #999; font-size: 10px; font-weight: bold;"
+    if display_status == "Without Annotation":
+        return "color: #999; font-size: 10px;"
     return "color: gray; font-size: 10px;"
 
 
@@ -110,6 +120,10 @@ def _annotation_icon(display_status):
         return QApplication.style().standardIcon(QStyle.SP_DialogApplyButton)
     if display_status == "In Progress":
         return QApplication.style().standardIcon(QStyle.SP_FileIcon)
+    if display_status == "Pending":
+        return QApplication.style().standardIcon(QStyle.SP_DialogOpenButton)
+    if display_status == "Without Annotation":
+        return QApplication.style().standardIcon(QStyle.SP_MessageBoxWarning)
     return QApplication.style().standardIcon(QStyle.SP_MessageBoxWarning)
 
 
@@ -263,6 +277,13 @@ class UnifiedFileBrowser(QWidget):
         nav_layout.addWidget(self.btn_refresh)
         layout.addLayout(nav_layout)
 
+        self.chk_hide_non_annotated = QCheckBox("Hide non-annotated images")
+        self.chk_hide_non_annotated.setToolTip(
+            "Hide photo-only images that have neither a .json nor a .nii.gz file."
+        )
+        self.chk_hide_non_annotated.toggled.connect(self._on_hide_filter_toggled)
+        layout.addWidget(self.chk_hide_non_annotated)
+
         layout.addWidget(QLabel("CONTENTS:"))
         self.task_list = QListWidget()
         self.task_list.itemDoubleClicked.connect(self.on_item_double_clicked)
@@ -309,6 +330,13 @@ class UnifiedFileBrowser(QWidget):
             self.btn_finish.setToolTip(
                 "<b>Finish Annotation</b><br>Mark this plate completed and write final masks."
             )
+
+    def set_browser_controls_visible(self, expanded):
+        self.chk_hide_non_annotated.setVisible(expanded)
+
+    def _on_hide_filter_toggled(self, _checked):
+        if self.current_dir in self.folder_cache:
+            self.render_contents(self.folder_cache[self.current_dir], use_cache=False)
 
     def request_refresh(self, force_refresh=True):
         if force_refresh:
@@ -429,12 +457,14 @@ class UnifiedFileBrowser(QWidget):
         """Update cached file entry and propagate folder annotation/analysis aggregates."""
         file_dir = os.path.dirname(file_path)
 
-        delta_missing = delta_in_progress = delta_completed = 0
+        delta_without = delta_pending = delta_in_progress = delta_completed = 0
         delta_analyzed = delta_not_analyzed = 0
 
         def ann_key(display_or_raw):
+            if display_or_raw in ("Without Annotation", "without_annotation"):
+                return "without_annotation"
             if display_or_raw in ("Missing", "missing", "Pending", "pending"):
-                return "missing"
+                return "pending"
             if display_or_raw in ("Completed", "completed"):
                 return "completed"
             if display_or_raw in ("In Progress", "in_progress"):
@@ -476,20 +506,25 @@ class UnifiedFileBrowser(QWidget):
 
         if ann_changed:
             for bucket, delta_name in (
-                ("missing", "delta_missing"),
+                ("without_annotation", "delta_without"),
+                ("pending", "delta_pending"),
                 ("in_progress", "delta_in_progress"),
                 ("completed", "delta_completed"),
             ):
                 if old_ann == bucket:
-                    if bucket == "missing":
-                        delta_missing -= 1
+                    if bucket == "without_annotation":
+                        delta_without -= 1
+                    elif bucket == "pending":
+                        delta_pending -= 1
                     elif bucket == "in_progress":
                         delta_in_progress -= 1
                     elif bucket == "completed":
                         delta_completed -= 1
                 if new_ann == bucket:
-                    if bucket == "missing":
-                        delta_missing += 1
+                    if bucket == "without_annotation":
+                        delta_without += 1
+                    elif bucket == "pending":
+                        delta_pending += 1
                     elif bucket == "in_progress":
                         delta_in_progress += 1
                     elif bucket == "completed":
@@ -506,14 +541,15 @@ class UnifiedFileBrowser(QWidget):
             elif new_analysis == "not_analyzed":
                 delta_not_analyzed += 1
 
-        if any([delta_missing, delta_in_progress, delta_completed, delta_analyzed, delta_not_analyzed]):
+        if any([delta_without, delta_pending, delta_in_progress, delta_completed, delta_analyzed, delta_not_analyzed]):
             current_iter_dir = file_dir
             while True:
                 parent_dir = os.path.dirname(current_iter_dir)
                 if parent_dir in self.folder_cache:
                     for item in self.folder_cache[parent_dir]:
                         if item["type"] == "dir" and item["path"] == current_iter_dir:
-                            item["missing"] = item.get("missing", 0) + delta_missing
+                            item["without_annotation"] = item.get("without_annotation", 0) + delta_without
+                            item["pending"] = item.get("pending", 0) + delta_pending
                             item["in_progress"] = item.get("in_progress", 0) + delta_in_progress
                             item["completed"] = item.get("completed", 0) + delta_completed
                             item["analyzed"] = item.get("analyzed", 0) + delta_analyzed
@@ -543,7 +579,8 @@ class UnifiedFileBrowser(QWidget):
                 widget = FolderStatsWidget(
                     item["name"],
                     item["total"],
-                    item.get("missing", 0),
+                    item.get("without_annotation", 0),
+                    item.get("pending", 0),
                     item.get("in_progress", 0),
                     item.get("completed", 0),
                     analyzed=item.get("analyzed", 0),
@@ -555,6 +592,13 @@ class UnifiedFileBrowser(QWidget):
                 self.task_list.setItemWidget(list_item, widget)
 
             elif item["type"] == "file":
+                annotation_status = item.get("annotation_status") or item.get("status", "without_annotation")
+                if (
+                    self.chk_hide_non_annotated.isChecked()
+                    and normalize_annotation_status(annotation_status) == "without_annotation"
+                ):
+                    continue
+
                 list_item = QListWidgetItem()
                 list_item.setData(Qt.UserRole, {
                     "type": "file",
@@ -564,7 +608,6 @@ class UnifiedFileBrowser(QWidget):
                 })
 
                 plant_count = item.get("plant_count", 0)
-                annotation_status = item.get("annotation_status") or item.get("status", "missing")
                 analysis_status = item.get("analysis_status", "not_applicable")
 
                 if self.unified_file_stats:
@@ -604,7 +647,7 @@ class UnifiedFileBrowser(QWidget):
                 })
                 widget = AnalyzerFileStatsWidget(
                     item["name"],
-                    item.get("annotation_status") or item.get("status", "missing"),
+                    item.get("annotation_status") or item.get("status", "without_annotation"),
                     item.get("analysis_status", "not_applicable"),
                     item.get("plant_count", 0),
                 )

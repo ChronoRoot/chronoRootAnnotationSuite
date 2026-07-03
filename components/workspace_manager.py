@@ -25,7 +25,7 @@ class WorkspaceManager(QTabWidget):
         self.addTab(self.canvas_review, "Annotation")
         
         # 2. Skeleton Refinement
-        self.canvas_frangi = FrangiCanvasTab(self.model)
+        self.canvas_frangi = FrangiCanvasTab(self.model, self.main_window)
         self.addTab(self.canvas_frangi, "Centerline Cleanup")
         
         # 3. Topology Graphing

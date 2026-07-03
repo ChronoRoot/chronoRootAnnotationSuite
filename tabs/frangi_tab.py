@@ -7,7 +7,7 @@ from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QGridLayout,
 
 from components.ui_help import HELP_FRANGI, show_help
 from PyQt5.QtGui import QImage, QPixmap, QColor, QPainter
-from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal
 
 from skimage.filters import frangi, apply_hysteresis_threshold
 from core.root_graph_builder import extract_skeleton
@@ -26,6 +26,197 @@ def fixed_frangi(image, sigmas=range(1, 10, 1), **kwargs):
         filtered_max = np.maximum(filtered_max, current_result)
     
     return filtered_max
+
+
+def _build_filled_overlay_static(rgb_crop, binary_mask, multiclass_crop, class_colors):
+    overlay = np.zeros_like(rgb_crop)
+    for cid, color in class_colors.items():
+        if cid != 0:
+            overlay[(binary_mask > 0) & (multiclass_crop == cid)] = color[:3]
+    alpha = 0.6
+    out_image = rgb_crop.copy()
+    active = binary_mask > 0
+    for c in range(3):
+        out_image[active, c] = (rgb_crop[active, c] * (1 - alpha) + overlay[active, c] * alpha).astype(np.uint8)
+    return out_image
+
+
+def _calculate_mapping_static(
+    combined_mask, x1, y1, x2, y2, original_mask, current_cls_crop,
+    untouched_mask_crop, target_classes,
+):
+    full_mask = np.zeros_like(original_mask)
+    full_mask[y1:y2, x1:x2] = combined_mask
+
+    new_multiclass_crop = np.zeros_like(combined_mask)
+    new_multiclass_crop[untouched_mask_crop] = current_cls_crop[untouched_mask_crop]
+
+    refined_area = (combined_mask > 0) & (~untouched_mask_crop)
+    existing_targets = refined_area & np.isin(current_cls_crop, target_classes)
+    new_multiclass_crop[existing_targets] = current_cls_crop[existing_targets]
+
+    holes = refined_area & (new_multiclass_crop == 0)
+    if np.any(holes):
+        valid_targets = np.zeros_like(combined_mask)
+        valid_targets[existing_targets] = current_cls_crop[existing_targets]
+        if np.any(existing_targets):
+            _, indices = distance_transform_edt(~existing_targets, return_indices=True)
+            new_multiclass_crop[holes] = valid_targets[indices[0], indices[1]][holes]
+        else:
+            fallback = target_classes[0] if target_classes else 1
+            new_multiclass_crop[holes] = fallback
+
+    ys_c, xs_c = np.where(combined_mask)
+    if len(xs_c) > 0:
+        cx1, cy1 = int(xs_c.min()), int(ys_c.min())
+        cx2, cy2 = int(xs_c.max()), int(ys_c.max())
+        tight_patch = new_multiclass_crop[cy1:cy2 + 1, cx1:cx2 + 1]
+        return full_mask, tight_patch, x1 + cx1, y1 + cy1, new_multiclass_crop
+
+    return full_mask, None, 0, 0, new_multiclass_crop
+
+
+def compute_frangi_proposal(snapshot):
+    """Heavy Frangi pipeline; safe to run off the UI thread."""
+    gray_crop = snapshot["gray_crop"]
+    mask_crop = snapshot["mask_crop"]
+    current_cls_crop = snapshot["current_cls_crop"]
+    target_mask_crop = snapshot["target_mask_crop"]
+    untouched_mask_crop = snapshot["untouched_mask_crop"]
+    search_mask = snapshot["search_mask"]
+    original_mask = snapshot["original_mask"]
+    x1, y1, x2, y2 = snapshot["x1"], snapshot["y1"], snapshot["x2"], snapshot["y2"]
+    params = snapshot["params"]
+    class_colors = snapshot["class_colors"]
+
+    if params["centerline_correction"]:
+        frangi_scales = np.arange(
+            params["min_sigma"], params["max_sigma"] + 1, params["sigma_step"]
+        )
+        vesselness = fixed_frangi(gray_crop, black_ridges=params["roots_dark"], sigmas=frangi_scales)
+        vesselness[search_mask == 0] = 0
+    else:
+        vesselness = np.zeros(gray_crop.shape, dtype=np.float32)
+
+    vessel_8u = (vesselness * 255).astype(np.uint8)
+    heatmap_bgr = cv2.applyColorMap(vessel_8u, cv2.COLORMAP_JET)
+    heatmap_rgb_base = cv2.cvtColor(heatmap_bgr, cv2.COLOR_BGR2RGB)
+
+    ch, cw = heatmap_rgb_base.shape[:2]
+    pad_w = 40
+    heatmap_rgb = np.zeros((ch, cw + pad_w, 3), dtype=np.uint8)
+    heatmap_rgb[:, :cw] = heatmap_rgb_base
+
+    cb_w = 10
+    cb_h = max(1, min(150, ch - 4))
+    cb_x = cw + 5
+    cb_y = (ch - cb_h) // 2
+
+    grad = np.linspace(255, 0, cb_h, dtype=np.uint8).reshape(-1, 1)
+    grad_color = cv2.applyColorMap(np.tile(grad, (1, cb_w)), cv2.COLORMAP_JET)
+    grad_rgb = cv2.cvtColor(grad_color, cv2.COLOR_BGR2RGB)
+
+    heatmap_rgb[cb_y:cb_y + cb_h, cb_x:cb_x + cb_w] = grad_rgb
+    cv2.rectangle(heatmap_rgb, (cb_x, cb_y), (cb_x + cb_w, cb_y + cb_h), (255, 255, 255), 1)
+    cv2.putText(heatmap_rgb, "1.0", (cb_x + cb_w + 5, cb_y + 10), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 255), 1)
+    cv2.putText(heatmap_rgb, "0.0", (cb_x + cb_w + 5, cb_y + cb_h), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 255), 1)
+
+    kernel = np.ones((3, 3), np.uint8)
+    if params["centerline_correction"]:
+        binary_vessels = apply_hysteresis_threshold(
+            vesselness, params["faint_sens"], params["strong_conf"]
+        )
+        labeled_frangi, num_frangi = label(binary_vessels, structure=np.ones((3, 3)))
+        sizes = np.bincount(labeled_frangi.ravel())
+        sizes[0] = 0
+
+        core_fragments = np.zeros_like(binary_vessels, dtype=np.uint8)
+        for i in range(1, num_frangi + 1):
+            if sizes[i] >= params["min_part"]:
+                core_fragments[labeled_frangi == i] = 1
+
+        labeled_valid, num_valid = label(core_fragments, structure=np.ones((3, 3)))
+
+        if num_valid <= 1:
+            proposed_blob = core_fragments.copy()
+        else:
+            bridge_kernel = np.ones((3, 3), np.uint8)
+            seen_dilations = np.zeros_like(core_fragments)
+            bridge_seeds = np.zeros_like(core_fragments)
+
+            for i in range(1, num_valid + 1):
+                comp_mask = (labeled_valid == i).astype(np.uint8)
+                dilated_comp = cv2.dilate(comp_mask, bridge_kernel, iterations=params["bridge_gaps"])
+                intersection = cv2.bitwise_and(dilated_comp, seen_dilations)
+                bridge_seeds = cv2.bitwise_or(bridge_seeds, intersection)
+                seen_dilations = cv2.bitwise_or(seen_dilations, dilated_comp)
+
+            if np.sum(bridge_seeds) > 0:
+                local_bridges = cv2.dilate(bridge_seeds, bridge_kernel, iterations=params["bridge_gaps"])
+                local_bridges = cv2.bitwise_and(local_bridges, search_mask)
+                proposed_blob = cv2.bitwise_or(core_fragments, local_bridges)
+            else:
+                proposed_blob = core_fragments.copy()
+    else:
+        proposed_blob = target_mask_crop.copy().astype(np.uint8)
+
+    proposed_skeleton = extract_skeleton(proposed_blob)[0].astype(np.uint8)
+    proposed_mask_raw = cv2.dilate(proposed_skeleton, kernel, iterations=params["final_thick"])
+    combined_raw = cv2.bitwise_or(proposed_mask_raw, untouched_mask_crop.astype(np.uint8))
+
+    if not params["allow_disconnected"] and np.sum(combined_raw) > 0:
+        labeled_prop, num_prop = label(combined_raw, structure=np.ones((3, 3)))
+        if num_prop > 0:
+            prop_sizes = np.bincount(labeled_prop.ravel())
+            prop_sizes[0] = 0
+            combined_proposed_mask = (labeled_prop == prop_sizes.argmax()).astype(np.uint8)
+        else:
+            combined_proposed_mask = combined_raw
+    else:
+        combined_proposed_mask = combined_raw
+
+    proposed_full_mask, proposed_tight_patch, proposed_x, proposed_y, prop_mc = \
+        _calculate_mapping_static(
+            combined_proposed_mask, x1, y1, x2, y2, original_mask,
+            current_cls_crop, untouched_mask_crop, params["target_classes"],
+        )
+
+    old_mc = np.zeros_like(mask_crop)
+    old_mc[mask_crop > 0] = current_cls_crop[mask_crop > 0]
+    rgb_base_canvas = cv2.cvtColor(gray_crop, cv2.COLOR_GRAY2RGB)
+    rgb_old = _build_filled_overlay_static(rgb_base_canvas, mask_crop, old_mc, class_colors)
+    rgb_proposed = _build_filled_overlay_static(
+        rgb_base_canvas, combined_proposed_mask, prop_mc, class_colors
+    )
+
+    return {
+        "rgb_base_canvas": rgb_base_canvas,
+        "rgb_old": rgb_old,
+        "heatmap_rgb": heatmap_rgb,
+        "rgb_proposed": rgb_proposed,
+        "proposed_full_mask": proposed_full_mask,
+        "proposed_tight_patch": proposed_tight_patch,
+        "proposed_x": proposed_x,
+        "proposed_y": proposed_y,
+    }
+
+
+class FrangiWorker(QThread):
+    finished = pyqtSignal(int, object)
+    error = pyqtSignal(str)
+
+    def __init__(self, generation, snapshot):
+        super().__init__()
+        self.generation = generation
+        self.snapshot = snapshot
+
+    def run(self):
+        try:
+            result = compute_frangi_proposal(self.snapshot)
+            self.finished.emit(self.generation, result)
+        except Exception as e:
+            self.error.emit(str(e))
+
 
 class _NoWheelSpinBox(QSpinBox):
     def wheelEvent(self, event):
@@ -76,9 +267,18 @@ class AspectRatioLabel(QWidget):
 # ==========================================
 class FrangiCanvasTab(QWidget):
     """Handles the heavy processing and 4-grid visual display."""
-    def __init__(self, model):
+    FRANGI_LOADING_MSG = (
+        "Computing root-strength map…\n"
+        "If this takes too long, reduce the min/max root radius range or increase the radius step."
+    )
+
+    def __init__(self, model, main_window=None):
         super().__init__()
         self.model = model
+        self.main_window = main_window
+        self._frangi_worker = None
+        self._frangi_generation = 0
+        self._frangi_loading = False
         
         # Processing Parameters 
         self.p_search_range = 0
@@ -181,15 +381,9 @@ class FrangiCanvasTab(QWidget):
         self.on_selection_changed()
 
     def _build_filled_overlay(self, rgb_crop, binary_mask, multiclass_crop):
-        overlay = np.zeros_like(rgb_crop)
-        for cid, color in self.model.class_colors.items():
-            if cid != 0: overlay[(binary_mask > 0) & (multiclass_crop == cid)] = color[:3]
-        alpha = 0.6
-        out_image = rgb_crop.copy()
-        active = binary_mask > 0
-        for c in range(3):
-            out_image[active, c] = (rgb_crop[active, c] * (1 - alpha) + overlay[active, c] * alpha).astype(np.uint8)
-        return out_image
+        return _build_filled_overlay_static(
+            rgb_crop, binary_mask, multiclass_crop, self.model.class_colors
+        )
 
     def _get_current_multiclass_crop(self, x1, y1, x2, y2, uid):
         cls_crop = np.zeros((y2 - y1, x2 - x1), dtype=np.uint8)
@@ -212,199 +406,153 @@ class FrangiCanvasTab(QWidget):
         return cls_crop
 
     def _calculate_mapping(self, combined_mask, x1, y1, x2, y2, original_mask, current_cls_crop, untouched_mask_crop):
-        full_mask = np.zeros_like(original_mask)
-        full_mask[y1:y2, x1:x2] = combined_mask
-        
-        new_multiclass_crop = np.zeros_like(combined_mask)
-        
-        # 1. Restore untouched classes perfectly
-        new_multiclass_crop[untouched_mask_crop] = current_cls_crop[untouched_mask_crop]
-        
-        # 2. Handle targeted/refined regions
-        refined_area = (combined_mask > 0) & (~untouched_mask_crop)
-        existing_targets = refined_area & np.isin(current_cls_crop, self.p_target_classes)
-        
-        # Copy the existing target classes back in
-        new_multiclass_crop[existing_targets] = current_cls_crop[existing_targets]
-        
-        # 3. Handle newly expanded pixels (Frangi expansion)
-        holes = refined_area & (new_multiclass_crop == 0)
-        if np.any(holes):
-            valid_targets = np.zeros_like(combined_mask)
-            valid_targets[existing_targets] = current_cls_crop[existing_targets]
-            
-            if np.any(existing_targets):
-                # Pull the nearest target class for newly expanded pixels
-                _, indices = distance_transform_edt(~existing_targets, return_indices=True)
-                new_multiclass_crop[holes] = valid_targets[indices[0], indices[1]][holes]
-            else:
-                # Fallback if no target classes existed originally (rare)
-                fallback = self.p_target_classes[0] if self.p_target_classes else 1
-                new_multiclass_crop[holes] = fallback
-                
-        # 4. Extract tight bounding box
-        ys_c, xs_c = np.where(combined_mask)
-        if len(xs_c) > 0:
-            cx1, cy1 = int(xs_c.min()), int(ys_c.min())
-            cx2, cy2 = int(xs_c.max()), int(ys_c.max())
-            tight_patch = new_multiclass_crop[cy1:cy2+1, cx1:cx2+1]
-            return full_mask, tight_patch, x1 + cx1, y1 + cy1, new_multiclass_crop
-            
-        return full_mask, None, 0, 0, new_multiclass_crop
-    
+        return _calculate_mapping_static(
+            combined_mask, x1, y1, x2, y2, original_mask,
+            current_cls_crop, untouched_mask_crop, self.p_target_classes,
+        )
+
+    def _params_snapshot(self):
+        return {
+            "search_range": self.p_search_range,
+            "bridge_gaps": self.p_bridge_gaps,
+            "faint_sens": self.p_faint_sens,
+            "strong_conf": self.p_strong_conf,
+            "min_part": self.p_min_part,
+            "final_thick": self.p_final_thick,
+            "min_sigma": self.p_min_sigma,
+            "max_sigma": self.p_max_sigma,
+            "sigma_step": self.p_sigma_step,
+            "roots_dark": self.p_roots_dark,
+            "allow_disconnected": self.p_allow_disconnected,
+            "centerline_correction": self.p_centerline_correction,
+            "target_classes": list(self.p_target_classes),
+        }
+
+    def _hide_frangi_loading(self):
+        if self._frangi_loading and self.main_window:
+            self.main_window.hide_loading()
+        self._frangi_loading = False
+
+    def _on_frangi_finished(self, generation, result):
+        if generation != self._frangi_generation:
+            return
+        self._hide_frangi_loading()
+        worker = self.sender()
+        if worker is self._frangi_worker:
+            self._frangi_worker = None
+            worker.deleteLater()
+        self._apply_proposal_result(result)
+
+    def _on_frangi_error(self, message):
+        self._hide_frangi_loading()
+        worker = self.sender()
+        if worker is self._frangi_worker:
+            self._frangi_worker = None
+            worker.deleteLater()
+        if self.main_window:
+            self.main_window._on_thread_error(message)
+
+    def _apply_proposal_result(self, result):
+        self.proposed_full_mask = result["proposed_full_mask"]
+        self.proposed_tight_patch = result["proposed_tight_patch"]
+        self.proposed_x = result["proposed_x"]
+        self.proposed_y = result["proposed_y"]
+        self.img_label_orig.setPixmap(self.numpy_to_qpixmap(result["rgb_base_canvas"]))
+        self.img_label_old.setPixmap(self.numpy_to_qpixmap(result["rgb_old"]))
+        self.img_label_vesselness.setPixmap(self.numpy_to_qpixmap(result["heatmap_rgb"]))
+        self.img_label_proposed.setPixmap(self.numpy_to_qpixmap(result["rgb_proposed"]))
+
     def generate_and_display_proposal(self):
         uid = self.model.active_uid
         raw_image = self.model.raw_image
-        
-        if uid is None or uid not in self.model.masks or raw_image is None: 
+
+        if uid is None or uid not in self.model.masks or raw_image is None:
             self.clear_to_black()
             return
-            
+
         original_mask = self.model.masks[uid]
-        x, y, w, h = self.model.bboxes.get(uid, (0,0,0,0))
-        if w == 0 or h == 0: 
+        x, y, w, h = self.model.bboxes.get(uid, (0, 0, 0, 0))
+        if w == 0 or h == 0:
             self.clear_to_black()
             return
-            
+
         self.set_display_mode(is_tall=(h > w * 1.2))
-            
-        pad = 15 
+
+        pad = 15
         x1, y1 = max(0, x - pad), max(0, y - pad)
         x2, y2 = min(raw_image.shape[1], x + w + pad), min(raw_image.shape[0], y + h + pad)
-        
-        img_crop_rgb = raw_image[y1:y2, x1:x2]
-        mask_crop = original_mask[y1:y2, x1:x2]
 
-        R = img_crop_rgb[:,:,0].astype(np.float32)
-        G = img_crop_rgb[:,:,1].astype(np.float32)
-        B = img_crop_rgb[:,:,2].astype(np.float32)
+        img_crop_rgb = raw_image[y1:y2, x1:x2].copy()
+        mask_crop = original_mask[y1:y2, x1:x2].copy()
 
-        if "Red-Blue" in self.p_channel_mode: gray_crop = ((R + B) / 2.0).astype(np.uint8)
-        elif "Standard" in self.p_channel_mode: gray_crop = cv2.cvtColor(img_crop_rgb, cv2.COLOR_RGB2GRAY)
-        elif "Red" in self.p_channel_mode: gray_crop = R.astype(np.uint8)
-        elif "Green" in self.p_channel_mode: gray_crop = G.astype(np.uint8)
-        else: gray_crop = B.astype(np.uint8)
+        R = img_crop_rgb[:, :, 0].astype(np.float32)
+        G = img_crop_rgb[:, :, 1].astype(np.float32)
+        B = img_crop_rgb[:, :, 2].astype(np.float32)
+
+        if "Red-Blue" in self.p_channel_mode:
+            gray_crop = ((R + B) / 2.0).astype(np.uint8)
+        elif "Standard" in self.p_channel_mode:
+            gray_crop = cv2.cvtColor(img_crop_rgb, cv2.COLOR_RGB2GRAY)
+        elif "Red" in self.p_channel_mode:
+            gray_crop = R.astype(np.uint8)
+        elif "Green" in self.p_channel_mode:
+            gray_crop = G.astype(np.uint8)
+        else:
+            gray_crop = B.astype(np.uint8)
 
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-        if self.p_clahe_mode == "Before Smoothing": gray_crop = clahe.apply(gray_crop)
+        if self.p_clahe_mode == "Before Smoothing":
+            gray_crop = clahe.apply(gray_crop)
 
-        if self.p_smooth_mode == "Light": gray_crop = cv2.bilateralFilter(gray_crop, d=3, sigmaColor=20, sigmaSpace=20)
-        elif self.p_smooth_mode == "Medium": gray_crop = cv2.bilateralFilter(gray_crop, d=5, sigmaColor=25, sigmaSpace=25)
-        elif self.p_smooth_mode == "High": gray_crop = cv2.bilateralFilter(gray_crop, d=7, sigmaColor=35, sigmaSpace=35)
+        if self.p_smooth_mode == "Light":
+            gray_crop = cv2.bilateralFilter(gray_crop, d=3, sigmaColor=20, sigmaSpace=20)
+        elif self.p_smooth_mode == "Medium":
+            gray_crop = cv2.bilateralFilter(gray_crop, d=5, sigmaColor=25, sigmaSpace=25)
+        elif self.p_smooth_mode == "High":
+            gray_crop = cv2.bilateralFilter(gray_crop, d=7, sigmaColor=35, sigmaSpace=35)
 
-        if self.p_clahe_mode == "After Smoothing": gray_crop = clahe.apply(gray_crop)
-            
+        if self.p_clahe_mode == "After Smoothing":
+            gray_crop = clahe.apply(gray_crop)
+
         current_cls_crop = self._get_current_multiclass_crop(x1, y1, x2, y2, uid)
-        
-        # --- NEW: Isolate target classes and untouched classes ---
         target_mask_crop = (mask_crop > 0) & np.isin(current_cls_crop, self.p_target_classes)
         untouched_mask_crop = (mask_crop > 0) & (~np.isin(current_cls_crop, self.p_target_classes))
-        
+
         kernel = np.ones((3, 3), np.uint8)
-        if self.p_search_range > 0: 
+        if self.p_search_range > 0:
             search_mask = cv2.dilate(target_mask_crop.astype(np.uint8), kernel, iterations=self.p_search_range)
-        else: 
+        else:
             search_mask = target_mask_crop.copy().astype(np.uint8)
-        
-        if self.p_centerline_correction:
-            frangi_scales = np.arange(self.p_min_sigma, self.p_max_sigma + 1, self.p_sigma_step)
-            vesselness = fixed_frangi(gray_crop, black_ridges=self.p_roots_dark, sigmas=frangi_scales)
-            vesselness[search_mask == 0] = 0 
-        else:
-            # If disabled, pass a dummy zero-array so the heatmap renders blank/blue safely
-            vesselness = np.zeros(gray_crop.shape, dtype=np.float32)
 
-        vessel_8u = (vesselness * 255).astype(np.uint8)
-        heatmap_bgr = cv2.applyColorMap(vessel_8u, cv2.COLORMAP_JET)
-        heatmap_rgb_base = cv2.cvtColor(heatmap_bgr, cv2.COLOR_BGR2RGB)
-        
-        ch, cw = heatmap_rgb_base.shape[:2]
-        pad_w = 40
-        heatmap_rgb = np.zeros((ch, cw + pad_w, 3), dtype=np.uint8)
-        heatmap_rgb[:, :cw] = heatmap_rgb_base
-        
-        cb_w = 10
-        cb_h = max(1, min(150, ch - 4)) 
-        cb_x = cw + 5
-        cb_y = (ch - cb_h) // 2 
+        snapshot = {
+            "gray_crop": gray_crop,
+            "mask_crop": mask_crop,
+            "current_cls_crop": current_cls_crop,
+            "target_mask_crop": target_mask_crop,
+            "untouched_mask_crop": untouched_mask_crop,
+            "search_mask": search_mask,
+            "original_mask": original_mask.copy(),
+            "x1": x1, "y1": y1, "x2": x2, "y2": y2,
+            "params": self._params_snapshot(),
+            "class_colors": dict(self.model.class_colors),
+        }
 
-        grad = np.linspace(255, 0, cb_h, dtype=np.uint8).reshape(-1, 1)
-        grad_color = cv2.applyColorMap(np.tile(grad, (1, cb_w)), cv2.COLORMAP_JET)
-        grad_rgb = cv2.cvtColor(grad_color, cv2.COLOR_BGR2RGB)
-        
-        heatmap_rgb[cb_y:cb_y+cb_h, cb_x:cb_x+cb_w] = grad_rgb
-        cv2.rectangle(heatmap_rgb, (cb_x, cb_y), (cb_x+cb_w, cb_y+cb_h), (255, 255, 255), 1)
-        
-        cv2.putText(heatmap_rgb, "1.0", (cb_x + cb_w + 5, cb_y + 10), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 255), 1)
-        cv2.putText(heatmap_rgb, "0.0", (cb_x + cb_w + 5, cb_y + cb_h), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 255), 1)
-        
-        if self.p_centerline_correction:
-            binary_vessels = apply_hysteresis_threshold(vesselness, self.p_faint_sens, self.p_strong_conf)
-            labeled_frangi, num_frangi = label(binary_vessels, structure=np.ones((3,3)))
-            sizes = np.bincount(labeled_frangi.ravel()); sizes[0] = 0
-            
-            core_fragments = np.zeros_like(binary_vessels, dtype=np.uint8)
-            for i in range(1, num_frangi + 1):
-                if sizes[i] >= self.p_min_part: core_fragments[labeled_frangi == i] = 1
-                    
-            labeled_valid, num_valid = label(core_fragments, structure=np.ones((3,3)))
+        if self.main_window is None:
+            self._apply_proposal_result(compute_frangi_proposal(snapshot))
+            return
 
-            if num_valid <= 1: 
-                proposed_blob = core_fragments.copy()
-            else:
-                bridge_kernel = np.ones((3, 3), np.uint8)
-                seen_dilations = np.zeros_like(core_fragments)
-                bridge_seeds = np.zeros_like(core_fragments)
-                
-                for i in range(1, num_valid + 1):
-                    comp_mask = (labeled_valid == i).astype(np.uint8)
-                    dilated_comp = cv2.dilate(comp_mask, bridge_kernel, iterations=self.p_bridge_gaps)
-                    intersection = cv2.bitwise_and(dilated_comp, seen_dilations)
-                    bridge_seeds = cv2.bitwise_or(bridge_seeds, intersection)
-                    seen_dilations = cv2.bitwise_or(seen_dilations, dilated_comp)
-                    
-                if np.sum(bridge_seeds) > 0:
-                    local_bridges = cv2.dilate(bridge_seeds, bridge_kernel, iterations=self.p_bridge_gaps)
-                    local_bridges = cv2.bitwise_and(local_bridges, search_mask) 
-                    proposed_blob = cv2.bitwise_or(core_fragments, local_bridges)
-                else: 
-                    proposed_blob = core_fragments.copy()
-        else:
-            # If disabled, enforce strict uniform width ONLY on the targeted classes
-            proposed_blob = target_mask_crop.copy().astype(np.uint8)
-                
-        proposed_skeleton = extract_skeleton(proposed_blob)[0].astype(np.uint8)
-        proposed_mask_raw = cv2.dilate(proposed_skeleton, kernel, iterations=self.p_final_thick)
-        
-        # --- Merge with untouched aerial parts before component analysis ---
-        combined_raw = cv2.bitwise_or(proposed_mask_raw, untouched_mask_crop.astype(np.uint8))
-        
-        if not self.p_allow_disconnected and np.sum(combined_raw) > 0:
-            labeled_prop, num_prop = label(combined_raw, structure=np.ones((3,3)))
-            if num_prop > 0:
-                prop_sizes = np.bincount(labeled_prop.ravel()); prop_sizes[0] = 0
-                combined_proposed_mask = (labeled_prop == prop_sizes.argmax()).astype(np.uint8)
-            else: 
-                combined_proposed_mask = combined_raw
-        else: 
-            combined_proposed_mask = combined_raw
+        self._frangi_generation += 1
+        generation = self._frangi_generation
 
-        # Notice we are passing untouched_mask_crop into the mapping function now
-        self.proposed_full_mask, self.proposed_tight_patch, self.proposed_x, self.proposed_y, prop_mc = \
-            self._calculate_mapping(combined_proposed_mask, x1, y1, x2, y2, original_mask, current_cls_crop, untouched_mask_crop)
-            
-        old_mc = np.zeros_like(mask_crop)
-        old_mc[mask_crop > 0] = current_cls_crop[mask_crop > 0]
+        if self.p_centerline_correction and not self._frangi_loading:
+            self.main_window.show_loading(self.FRANGI_LOADING_MSG)
+            self._frangi_loading = True
 
-        rgb_base_canvas = cv2.cvtColor(gray_crop, cv2.COLOR_GRAY2RGB) 
-
-        rgb_old = self._build_filled_overlay(rgb_base_canvas, mask_crop, old_mc)
-        rgb_proposed = self._build_filled_overlay(rgb_base_canvas, combined_proposed_mask, prop_mc)
-        
-        self.img_label_orig.setPixmap(self.numpy_to_qpixmap(rgb_base_canvas))
-        self.img_label_old.setPixmap(self.numpy_to_qpixmap(rgb_old))
-        self.img_label_vesselness.setPixmap(self.numpy_to_qpixmap(heatmap_rgb))
-        self.img_label_proposed.setPixmap(self.numpy_to_qpixmap(rgb_proposed))
+        worker = FrangiWorker(generation, snapshot)
+        self._frangi_worker = worker
+        worker.finished.connect(self._on_frangi_finished)
+        worker.error.connect(self._on_frangi_error)
+        worker.start()
 
     def accept_proposal(self):
         uid = self.model.active_uid
@@ -506,69 +654,68 @@ class FrangiToolPanel(QWidget):
         mode_grid.addWidget(self.chk_correction, 0, 0)
         mode_grid.addWidget(self.chk_dark, 0, 1)
         mode_grid.addWidget(self.chk_disconnected, 1, 0, 1, 2)
-        
-        spins_hor = QHBoxLayout()
-        spins_hor.setContentsMargins(0, 0, 0, 0)
-        
-        self.sp_min_sigma = make_spin(self.canvas_tab.p_min_sigma, 1, 40)
-        self.sp_min_sigma.setToolTip("Minimum root radius (pixels).\nRaise this in high resolution images.")
-        
-        self.sp_max_sigma = make_spin(self.canvas_tab.p_max_sigma, 2, 80)
-        self.sp_max_sigma.setToolTip("Maximum root radius to detect (in pixels).\nIncrease this for high-resolution images or very thick roots.")
-        
-        # 1. Remove the grid coordinates (3, 0) from the QHBoxLayout additions
-        spins_hor.addWidget(QLabel("Min Root Radius:"))
-        spins_hor.addStretch()
-        spins_hor.addWidget(self.sp_min_sigma)
-        spins_hor.addStretch()
-        spins_hor.addWidget(QLabel("Max Root Radius:"))
-        spins_hor.addStretch()
-        spins_hor.addWidget(self.sp_max_sigma)
-        
-        mode_grid.addLayout(spins_hor, 3, 0, 1, 2)
-        
         main_layout.addLayout(mode_grid)
-        main_layout.addWidget(separator())
 
-        # --- Section 2: Structure & Thresholds (Expanded Labels & Tooltips) ---
-        main_layout.addWidget(QLabel("<b>Thresholds</b>"))
         param_grid = QGridLayout()
         param_grid.setContentsMargins(0, 0, 0, 0)
-        param_grid.setHorizontalSpacing(8) 
+        param_grid.setHorizontalSpacing(8)
         param_grid.setVerticalSpacing(2)
-        
+
+        self.sp_min_sigma = make_spin(self.canvas_tab.p_min_sigma, 1, 40)
+        self.sp_min_sigma.setToolTip("Minimum root radius (pixels).\nRaise this in high resolution images.")
+        self.sp_max_sigma = make_spin(self.canvas_tab.p_max_sigma, 2, 80)
+        self.sp_max_sigma.setToolTip(
+            "Maximum root radius to detect (in pixels).\n"
+            "Increase this for high-resolution images or very thick roots."
+        )
+        self.sp_sigma_step = make_spin(self.canvas_tab.p_sigma_step, 1, 10)
+        self.sp_sigma_step.setToolTip(
+            "Step between root radius scales in the Frangi filter.\n"
+            "Increase to speed up processing on large radius ranges."
+        )
         self.sp_thick = make_spin(self.canvas_tab.p_final_thick, 1, 10)
-        self.sp_thick.setToolTip("Final root mask width (pixels).\nUse 1 for standard resolution, 2 or 3 for high-resolution images.")
-        
+        self.sp_thick.setToolTip(
+            "Final root mask width (pixels).\n"
+            "Use 1 for standard resolution, 2 or 3 for high-resolution images."
+        )
         self.sp_f_high = make_dspin(self.canvas_tab.p_strong_conf, 0.0, 1.0)
-        self.sp_f_high.setToolTip("Strict threshold (0-1) for solid root tissue.\nRaise to drop background noise; lower if the root core is missing.")
-        
+        self.sp_f_high.setToolTip(
+            "Strict threshold (0-1) for solid root tissue.\n"
+            "Raise to drop background noise; lower if the root core is missing."
+        )
         self.sp_f_low = make_dspin(self.canvas_tab.p_faint_sens, 0.0, 1.0)
-        self.sp_f_low.setToolTip("Relaxed threshold (0-1).\nRecovers faint lateral tips that physically connect to core roots (Hysteresis).")
-        
+        self.sp_f_low.setToolTip(
+            "Relaxed threshold (0-1).\n"
+            "Recovers faint lateral tips that physically connect to core roots (Hysteresis)."
+        )
         self.sp_search = make_spin(self.canvas_tab.p_search_range, 0, 50)
         self.sp_search.setToolTip("Pixels to look outside the current mask boundary for missing root segments.")
-        
         self.sp_bridge = make_spin(self.canvas_tab.p_bridge_gaps, 0, 50)
-        self.sp_bridge.setToolTip("Maximum gap (pixels) to jump across broken heatmap segments.\nRaise to connect 'dotted' roots.")
-        
-        self.sp_min_part = make_spin(self.canvas_tab.p_min_part, 1, 500)
-        self.sp_min_part.setToolTip("Discard isolated heatmap blobs smaller than this pixel count.\nRaise to remove salt-and-pepper noise.")
+        self.sp_bridge.setToolTip(
+            "Maximum gap (pixels) to jump across broken heatmap segments.\n"
+            "Raise to connect 'dotted' roots."
+        )
 
-        param_grid.addWidget(QLabel("Final Width:"), 0, 0)
-        param_grid.addWidget(self.sp_thick, 0, 1)
-        param_grid.addWidget(QLabel("Search Radius:"), 0, 2)
-        param_grid.addWidget(self.sp_search, 0, 3)
+        param_grid.addWidget(QLabel("Min Root Radius:"), 0, 0)
+        param_grid.addWidget(self.sp_min_sigma, 0, 1)
+        param_grid.addWidget(QLabel("Max Root Radius:"), 0, 2)
+        param_grid.addWidget(self.sp_max_sigma, 0, 3)
 
-        param_grid.addWidget(QLabel("Core Threshold:"), 1, 0)
-        param_grid.addWidget(self.sp_f_high, 1, 1)
-        param_grid.addWidget(QLabel("Bridge Gaps:"), 1, 2)
-        param_grid.addWidget(self.sp_bridge, 1, 3)
+        param_grid.addWidget(QLabel("Radius Step:"), 1, 0)
+        param_grid.addWidget(self.sp_sigma_step, 1, 1)
+        param_grid.addWidget(QLabel("Final Width:"), 1, 2)
+        param_grid.addWidget(self.sp_thick, 1, 3)
 
-        param_grid.addWidget(QLabel("Faint Threshold:"), 2, 0)
-        param_grid.addWidget(self.sp_f_low, 2, 1)
-        param_grid.addWidget(QLabel("Min Size:"), 2, 2)
-        param_grid.addWidget(self.sp_min_part, 2, 3)
+        param_grid.addWidget(QLabel("Search Range:"), 2, 0)
+        param_grid.addWidget(self.sp_search, 2, 1)
+        param_grid.addWidget(QLabel("Bridge Gaps:"), 2, 2)
+        param_grid.addWidget(self.sp_bridge, 2, 3)
+
+        param_grid.addWidget(QLabel("Core Thresh:"), 3, 0)
+        param_grid.addWidget(self.sp_f_high, 3, 1)
+        param_grid.addWidget(QLabel("Faint Thresh:"), 3, 2)
+        param_grid.addWidget(self.sp_f_low, 3, 3)
+
         main_layout.addLayout(param_grid)
         main_layout.addWidget(separator())
 
@@ -627,7 +774,6 @@ class FrangiToolPanel(QWidget):
         # --- Connect Signals ---
         self.sp_search.valueChanged.connect(self.push_params)
         self.sp_bridge.valueChanged.connect(self.push_params)
-        self.sp_min_part.valueChanged.connect(self.push_params)
         self.sp_f_low.valueChanged.connect(self.push_params)
         self.sp_f_high.valueChanged.connect(self.push_params)
         self.sp_thick.valueChanged.connect(self.push_params)
@@ -638,7 +784,8 @@ class FrangiToolPanel(QWidget):
         self.cb_smooth.currentIndexChanged.connect(self.push_params)
         self.chk_correction.stateChanged.connect(self.push_params)
         self.sp_min_sigma.valueChanged.connect(self.push_params)
-        self.sp_max_sigma.valueChanged.connect(self.push_params) 
+        self.sp_max_sigma.valueChanged.connect(self.push_params)
+        self.sp_sigma_step.valueChanged.connect(self.push_params)
 
         # --- Bottom Stretch & Button ---
         main_layout.addStretch(1)
@@ -658,7 +805,6 @@ class FrangiToolPanel(QWidget):
         """Passes all UI states down to the Canvas Tab and triggers a regeneration."""
         self.canvas_tab.p_search_range = self.sp_search.value()
         self.canvas_tab.p_bridge_gaps = self.sp_bridge.value()
-        self.canvas_tab.p_min_part = self.sp_min_part.value()
         self.canvas_tab.p_faint_sens = self.sp_f_low.value()
         self.canvas_tab.p_strong_conf = self.sp_f_high.value()
         self.canvas_tab.p_final_thick = self.sp_thick.value()
@@ -670,6 +816,7 @@ class FrangiToolPanel(QWidget):
         self.canvas_tab.p_smooth_mode = self.cb_smooth.currentText()
         self.canvas_tab.p_min_sigma = self.sp_min_sigma.value()
         self.canvas_tab.p_max_sigma = self.sp_max_sigma.value()
+        self.canvas_tab.p_sigma_step = self.sp_sigma_step.value()
                 
         targets = [cid for cid, chk in self.class_checkboxes.items() if chk.isChecked()]
         self.canvas_tab.p_target_classes = targets

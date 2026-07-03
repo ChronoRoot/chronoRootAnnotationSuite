@@ -165,9 +165,9 @@ class ChronoRootAnnotationSuite(QMainWindow):
             cfg["frangi"] = {
                 "min_sigma": self.panel_frangi.sp_min_sigma.value(),
                 "max_sigma": self.panel_frangi.sp_max_sigma.value(),
+                "sigma_step": self.panel_frangi.sp_sigma_step.value(),
                 "search_range": self.panel_frangi.sp_search.value(),
                 "bridge_gaps": self.panel_frangi.sp_bridge.value(),
-                "min_part": self.panel_frangi.sp_min_part.value(),
                 "faint_sens": self.panel_frangi.sp_f_low.value(),
                 "strong_conf": self.panel_frangi.sp_f_high.value(),
                 "final_thick": self.panel_frangi.sp_thick.value(),
@@ -341,6 +341,10 @@ class ChronoRootAnnotationSuite(QMainWindow):
         else:
             self.splitter.setSizes([250, 320, 930])
 
+        self.browser.set_browser_controls_visible(
+            self._panel_expanded(self.splitter.sizes()[0])
+        )
+
     def _panel_expanded(self, size):
         return size > self.COLLAPSED_PANEL_WIDTH
 
@@ -395,6 +399,7 @@ class ChronoRootAnnotationSuite(QMainWindow):
             self.browser_panel.setMaximumWidth(rail)
             self._apply_splitter_sizes(rail, sizes[1], sizes[2] + sizes[0] - rail)
             self._set_panel_toggle_appearance(self.btn_toggle_files, expanded=False)
+            self.browser.set_browser_controls_visible(False)
         else:
             self.browser.show()
             self.browser_panel.setMinimumWidth(0)
@@ -405,6 +410,7 @@ class ChronoRootAnnotationSuite(QMainWindow):
             give_back = min(width, sizes[2])
             self._apply_splitter_sizes(width, sizes[1], sizes[2] - give_back)
             self._set_panel_toggle_appearance(self.btn_toggle_files, expanded=True)
+            self.browser.set_browser_controls_visible(True)
 
     def toggle_middle_panel(self):
         if self._focus_mode_active or self.workspaces.currentIndex() != 4:
@@ -470,7 +476,6 @@ class ChronoRootAnnotationSuite(QMainWindow):
         frangi.p_sigma_step = f_cfg.get("sigma_step", 1)
         frangi.p_search_range = f_cfg.get("search_range", 0)
         frangi.p_bridge_gaps = f_cfg.get("bridge_gaps", 1)
-        frangi.p_min_part = f_cfg.get("min_part", 5)
         frangi.p_faint_sens = f_cfg.get("faint_sens", 0.05)
         frangi.p_strong_conf = f_cfg.get("strong_conf", 0.20)
         frangi.p_final_thick = f_cfg.get("final_thick", 1)
