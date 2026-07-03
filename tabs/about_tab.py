@@ -66,7 +66,7 @@ class AboutTab(QWidget):
             QApplication.processEvents()
 
             old_hash = self.get_git_hash()
-            subprocess.check_call(["git", "pull"], stderr=subprocess.STDOUT)
+            subprocess.check_call(["git", "pull", "https://github.com/ChronoRoot/chronoRootAnnotationSuite"], stderr=subprocess.STDOUT)
             new_hash = self.get_git_hash()
 
             if old_hash == new_hash:

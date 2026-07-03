@@ -467,7 +467,7 @@ class ChronoRootAnnotationSuite(QMainWindow):
         frangi = self.workspaces.canvas_frangi
         frangi.p_min_sigma = f_cfg.get("min_sigma", 1)
         frangi.p_max_sigma = f_cfg.get("max_sigma", 5)
-        frangi.p_sigma_step = f_cfg.get("sigma_step", 2)
+        frangi.p_sigma_step = f_cfg.get("sigma_step", 1)
         frangi.p_search_range = f_cfg.get("search_range", 0)
         frangi.p_bridge_gaps = f_cfg.get("bridge_gaps", 1)
         frangi.p_min_part = f_cfg.get("min_part", 5)

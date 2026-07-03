@@ -10,9 +10,22 @@ from PyQt5.QtGui import QImage, QPixmap, QColor, QPainter
 from PyQt5.QtCore import Qt, QTimer
 
 from skimage.filters import frangi, apply_hysteresis_threshold
-from skimage.morphology import skeletonize
+from core.root_graph_builder import extract_skeleton
 from scipy.ndimage import label, distance_transform_edt
 
+def fixed_frangi(image, sigmas=range(1, 10, 1), **kwargs):
+    # Create an empty array to hold our maximum values
+    filtered_max = np.zeros_like(image, dtype=float)
+    
+    # Loop through the scales ourselves
+    for sigma in sigmas:
+        # Call the original frangi, but force it to look at only ONE scale
+        current_result = frangi(image, sigmas=[sigma], **kwargs)
+        
+        # Combine by keeping the brightest pixels
+        filtered_max = np.maximum(filtered_max, current_result)
+    
+    return filtered_max
 
 class _NoWheelSpinBox(QSpinBox):
     def wheelEvent(self, event):
@@ -70,13 +83,13 @@ class FrangiCanvasTab(QWidget):
         # Processing Parameters 
         self.p_search_range = 0
         self.p_bridge_gaps = 1
-        self.p_faint_sens = 0.05  
-        self.p_strong_conf = 0.20 
+        self.p_faint_sens = 0.15  
+        self.p_strong_conf = 0.50 
         self.p_min_part = 5
         self.p_final_thick = 1
         self.p_min_sigma = 1     
-        self.p_max_sigma = 10    
-        self.p_sigma_step = 2    
+        self.p_max_sigma = 5    
+        self.p_sigma_step = 1    
         
         self.p_roots_dark = False
         self.p_allow_disconnected = False
@@ -295,15 +308,13 @@ class FrangiCanvasTab(QWidget):
         
         if self.p_centerline_correction:
             frangi_scales = np.arange(self.p_min_sigma, self.p_max_sigma + 1, self.p_sigma_step)
-            vesselness = frangi(gray_crop, black_ridges=self.p_roots_dark, sigmas=frangi_scales)
+            vesselness = fixed_frangi(gray_crop, black_ridges=self.p_roots_dark, sigmas=frangi_scales)
             vesselness[search_mask == 0] = 0 
-            vesselness_clipped = np.clip(vesselness, 0.0, 0.5)
-            vesselness_norm = vesselness_clipped / 0.5
         else:
             # If disabled, pass a dummy zero-array so the heatmap renders blank/blue safely
-            vesselness_norm = np.zeros(gray_crop.shape, dtype=np.float32)
+            vesselness = np.zeros(gray_crop.shape, dtype=np.float32)
 
-        vessel_8u = (vesselness_norm * 255).astype(np.uint8)
+        vessel_8u = (vesselness * 255).astype(np.uint8)
         heatmap_bgr = cv2.applyColorMap(vessel_8u, cv2.COLORMAP_JET)
         heatmap_rgb_base = cv2.cvtColor(heatmap_bgr, cv2.COLOR_BGR2RGB)
         
@@ -324,11 +335,11 @@ class FrangiCanvasTab(QWidget):
         heatmap_rgb[cb_y:cb_y+cb_h, cb_x:cb_x+cb_w] = grad_rgb
         cv2.rectangle(heatmap_rgb, (cb_x, cb_y), (cb_x+cb_w, cb_y+cb_h), (255, 255, 255), 1)
         
-        cv2.putText(heatmap_rgb, "0.5", (cb_x + cb_w + 5, cb_y + 10), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 255), 1)
+        cv2.putText(heatmap_rgb, "1.0", (cb_x + cb_w + 5, cb_y + 10), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 255), 1)
         cv2.putText(heatmap_rgb, "0.0", (cb_x + cb_w + 5, cb_y + cb_h), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 255), 1)
         
         if self.p_centerline_correction:
-            binary_vessels = apply_hysteresis_threshold(vesselness_norm, self.p_faint_sens, self.p_strong_conf)
+            binary_vessels = apply_hysteresis_threshold(vesselness, self.p_faint_sens, self.p_strong_conf)
             labeled_frangi, num_frangi = label(binary_vessels, structure=np.ones((3,3)))
             sizes = np.bincount(labeled_frangi.ravel()); sizes[0] = 0
             
@@ -362,7 +373,7 @@ class FrangiCanvasTab(QWidget):
             # If disabled, enforce strict uniform width ONLY on the targeted classes
             proposed_blob = target_mask_crop.copy().astype(np.uint8)
                 
-        proposed_skeleton = skeletonize(proposed_blob > 0).astype(np.uint8)
+        proposed_skeleton = extract_skeleton(proposed_blob)[0].astype(np.uint8)
         proposed_mask_raw = cv2.dilate(proposed_skeleton, kernel, iterations=self.p_final_thick)
         
         # --- Merge with untouched aerial parts before component analysis ---
