@@ -278,7 +278,6 @@ class FrangiCanvasTab(QWidget):
         self.main_window = main_window
         self._frangi_worker = None
         self._frangi_generation = 0
-        self._frangi_loading = False
         
         # Processing Parameters 
         self.p_search_range = 0
@@ -428,15 +427,11 @@ class FrangiCanvasTab(QWidget):
             "target_classes": list(self.p_target_classes),
         }
 
-    def _hide_frangi_loading(self):
-        if self._frangi_loading and self.main_window:
-            self.main_window.hide_loading()
-        self._frangi_loading = False
-
     def _on_frangi_finished(self, generation, result):
+        if self.main_window:
+            self.main_window.hide_loading()
         if generation != self._frangi_generation:
             return
-        self._hide_frangi_loading()
         worker = self.sender()
         if worker is self._frangi_worker:
             self._frangi_worker = None
@@ -444,7 +439,8 @@ class FrangiCanvasTab(QWidget):
         self._apply_proposal_result(result)
 
     def _on_frangi_error(self, message):
-        self._hide_frangi_loading()
+        if self.main_window:
+            self.main_window.hide_loading()
         worker = self.sender()
         if worker is self._frangi_worker:
             self._frangi_worker = None
@@ -544,9 +540,7 @@ class FrangiCanvasTab(QWidget):
         self._frangi_generation += 1
         generation = self._frangi_generation
 
-        if self.p_centerline_correction and not self._frangi_loading:
-            self.main_window.show_loading(self.FRANGI_LOADING_MSG)
-            self._frangi_loading = True
+        self.main_window.show_loading(self.FRANGI_LOADING_MSG)
 
         worker = FrangiWorker(generation, snapshot)
         self._frangi_worker = worker

@@ -1,6 +1,7 @@
 import os
 import json
 import re
+import copy
 import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt
@@ -8,7 +9,7 @@ import matplotlib.pyplot as plt
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QSplitter, QLabel,
     QPushButton, QComboBox, QFormLayout, QFileDialog, QMessageBox,
-    QGroupBox, QProgressDialog, QTreeWidget, QTreeWidgetItem,
+    QGroupBox, QTreeWidget, QTreeWidgetItem,
     QHeaderView, QAbstractItemView, QRadioButton, QButtonGroup,
     QTextEdit, QDoubleSpinBox, QStackedWidget, QListWidget,
     QListWidgetItem, QSizePolicy,
@@ -321,6 +322,130 @@ def render_quantitative_plot(ax, df, plot_type, y_var, x_var, hue_var, error_bar
                 by_label.values(), by_label.keys(),
                 title=hue_var.capitalize(), bbox_to_anchor=(1.05, 1), loc="upper left",
             )
+
+
+def safe_figure_name(text):
+    return (
+        str(text).replace(" ", "_")
+        .replace("(", "")
+        .replace(")", "")
+        .replace("/", "_")
+        .replace("°", "deg")
+    )
+
+
+def format_stat_config_entry(entry):
+    return stats_module.format_stat_config(
+        entry.get("stat_compare", ""),
+        entry.get("stat_within"),
+        entry.get("stat_and_within"),
+        entry.get("stat_test", "auto"),
+        entry.get("stat_alpha", 0.05),
+    )
+
+
+def queue_entry_label_for_export(entry, index):
+    if entry["kind"] == "qualitative":
+        return f"Fig {index}: Qualitative Atlas (columns: {entry['col_group_label']})"
+    hue = entry.get("hue_var", "None")
+    hue_part = f" × {hue}" if hue and hue != "None" else ""
+    stat_line = format_stat_config_entry(entry)
+    return (
+        f"Fig {index}: {entry['metric']} — {entry['plot_type']} "
+        f"({entry['x_var']}{hue_part})\n"
+        f"       Stats: {stat_line}"
+    )
+
+
+def render_report_figure(figure, df, color_maps, plot_type, y_var=None, x_var=None,
+                         hue_var=None, error_bar=None, col_group="condition"):
+    figure.clf()
+    if plot_type == QUALITATIVE_PLOT_TYPE:
+        canvas_dims, dest_ini = convex_hull.calculate_optimal_canvas(df)
+        convex_hull.draw_atlas_grid_on_figure(
+            df, figure, canvas_dims, dest_ini, col_group=col_group,
+        )
+        return
+    ax = figure.add_subplot(111)
+    render_quantitative_plot(
+        ax, df, plot_type, y_var, x_var, hue_var,
+        error_bar=error_bar, color_maps=color_maps,
+    )
+    figure.tight_layout()
+
+
+def export_report_bundle(target_dir, df, report_queue, color_maps):
+    """File export only. Safe to run off the UI thread."""
+    from matplotlib.figure import Figure
+
+    df.to_csv(os.path.join(target_dir, "Master_Aggregated_Data.csv"), index=False)
+
+    fig_dir = os.path.join(target_dir, "Figures")
+    os.makedirs(fig_dir, exist_ok=True)
+
+    quant_entries = [e for e in report_queue if e["kind"] == "quantitative"]
+    qual_entries = [e for e in report_queue if e["kind"] == "qualitative"]
+
+    fig_num = 0
+    all_stat_results = []
+    summary_sections = []
+
+    for entry in report_queue:
+        if entry["kind"] != "quantitative":
+            continue
+        fig_num += 1
+        figure = Figure(figsize=(8, 6))
+        figure.patch.set_facecolor("#f4f4f4")
+        render_report_figure(
+            figure, df, color_maps,
+            entry["plot_type"],
+            y_var=entry["metric"],
+            x_var=entry["x_var"],
+            hue_var=entry["hue_var"],
+            error_bar=entry["error_bar"],
+        )
+        safe_name = safe_figure_name(entry["metric"])
+        plot_slug = safe_figure_name(entry["plot_type"].split()[0])
+        file_name = os.path.join(fig_dir, f"Fig_{fig_num:02d}_{safe_name}_{plot_slug}.svg")
+        figure.savefig(file_name, format="svg", bbox_inches="tight")
+
+        stat_results = entry.get("stat_results", [])
+        all_stat_results.extend(stat_results)
+        label = queue_entry_label_for_export(entry, fig_num)
+        config_line = format_stat_config_entry(entry)
+        summary_sections.append(
+            f"\n{'=' * 50}\n{label}\n"
+            f"Statistical settings: {config_line}\n"
+            f"{'=' * 50}\n"
+            + stats_module.results_to_text(
+                stat_results, alpha=entry.get("stat_alpha", 0.05),
+            )
+        )
+
+    if qual_entries:
+        qual = qual_entries[-1]
+        convex_hull.generate_qualitative_grid(
+            df,
+            target_dir,
+            col_group=qual["col_group"],
+            export_svg=True,
+        )
+
+    if all_stat_results:
+        summary_path = os.path.join(target_dir, "Statistical_Summary.txt")
+        with open(summary_path, "w", encoding="utf-8") as f:
+            f.write("ChronoRoot Batch Report — Statistical Summary\n")
+            f.write("\n".join(summary_sections))
+        stats_module.results_to_dataframe(all_stat_results).to_csv(
+            os.path.join(target_dir, "Statistical_Results.csv"),
+            index=False,
+        )
+
+    return {
+        "target_dir": target_dir,
+        "quant_count": len(quant_entries),
+        "has_qualitative": bool(qual_entries),
+    }
 
 
 class ReportFileListPanel(QWidget):
@@ -1124,19 +1249,11 @@ class ComparisonReportTab(QWidget):
 
     def _render_to_figure(self, figure, plot_type, y_var=None, x_var=None, hue_var=None,
                           error_bar=None, col_group="condition"):
-        figure.clf()
-        if plot_type == QUALITATIVE_PLOT_TYPE:
-            canvas_dims, dest_ini = convex_hull.calculate_optimal_canvas(self.df)
-            convex_hull.draw_atlas_grid_on_figure(
-                self.df, figure, canvas_dims, dest_ini, col_group=col_group,
-            )
-            return
-        ax = figure.add_subplot(111)
-        render_quantitative_plot(
-            ax, self.df, plot_type, y_var, x_var, hue_var,
-            error_bar=error_bar, color_maps=self.color_maps,
+        render_report_figure(
+            figure, self.df, self.color_maps, plot_type,
+            y_var=y_var, x_var=x_var, hue_var=hue_var,
+            error_bar=error_bar, col_group=col_group,
         )
-        figure.tight_layout()
 
     def update_plot(self):
         if self.df.empty:
@@ -1182,13 +1299,7 @@ class ComparisonReportTab(QWidget):
 
     @staticmethod
     def _safe_figure_name(text):
-        return (
-            text.replace(" ", "_")
-            .replace("(", "")
-            .replace(")", "")
-            .replace("/", "_")
-            .replace("°", "deg")
-        )
+        return safe_figure_name(text)
 
     def generate_report(self):
         if self.df.empty:
@@ -1206,84 +1317,31 @@ class ComparisonReportTab(QWidget):
         if not target_dir:
             return
 
-        csv_path = os.path.join(target_dir, "Master_Aggregated_Data.csv")
-        self._get_clean_dataframe().to_csv(csv_path, index=False)
+        df = self._get_clean_dataframe().copy()
+        queue = copy.deepcopy(self.report_queue)
+        color_maps = copy.deepcopy(self.color_maps)
 
-        fig_dir = os.path.join(target_dir, "Figures")
-        os.makedirs(fig_dir, exist_ok=True)
+        self.main_window.show_loading("Generating report…")
+        from main import ModelWorker
+        worker = ModelWorker(export_report_bundle, target_dir, df, queue, color_maps)
+        self.main_window.active_workers.add(worker)
+        worker.finished.connect(self._on_report_export_finished)
+        worker.error.connect(self.main_window._on_thread_error)
+        worker.start()
 
-        quant_entries = [e for e in self.report_queue if e["kind"] == "quantitative"]
-        qual_entries = [e for e in self.report_queue if e["kind"] == "qualitative"]
-        total_steps = len(quant_entries) + (1 if qual_entries else 0)
-        progress = QProgressDialog("Generating report...", "Cancel", 0, max(total_steps, 1), self)
-        progress.setWindowModality(Qt.WindowModal)
-        step = 0
-
-        fig_num = 0
-        all_stat_results = []
-        summary_sections = []
-
-        for entry in self.report_queue:
-            if entry["kind"] == "quantitative":
-                if progress.wasCanceled():
-                    break
-                fig_num += 1
-                self._render_to_figure(
-                    self.figure,
-                    entry["plot_type"],
-                    y_var=entry["metric"],
-                    x_var=entry["x_var"],
-                    hue_var=entry["hue_var"],
-                    error_bar=entry["error_bar"],
-                )
-                safe_name = self._safe_figure_name(entry["metric"])
-                plot_slug = self._safe_figure_name(entry["plot_type"].split()[0])
-                file_name = os.path.join(fig_dir, f"Fig_{fig_num:02d}_{safe_name}_{plot_slug}.svg")
-                self.figure.savefig(file_name, format="svg", bbox_inches="tight")
-
-                stat_results = entry.get("stat_results", [])
-                all_stat_results.extend(stat_results)
-                label = self._queue_entry_label(entry, fig_num)
-                config_line = self._format_stat_config(entry)
-                summary_sections.append(
-                    f"\n{'=' * 50}\n{label}\n"
-                    f"Statistical settings: {config_line}\n"
-                    f"{'=' * 50}\n"
-                    + stats_module.results_to_text(
-                        stat_results, alpha=entry.get("stat_alpha", 0.05),
-                    )
-                )
-                step += 1
-                progress.setValue(step)
-
-        if qual_entries and not progress.wasCanceled():
-            qual = qual_entries[-1]
-            convex_hull.generate_qualitative_grid(
-                self.df,
-                target_dir,
-                col_group=qual["col_group"],
-                export_svg=True,
-            )
-            step += 1
-            progress.setValue(step)
-
-        if all_stat_results:
-            summary_path = os.path.join(target_dir, "Statistical_Summary.txt")
-            with open(summary_path, "w", encoding="utf-8") as f:
-                f.write("ChronoRoot Batch Report — Statistical Summary\n")
-                f.write("\n".join(summary_sections))
-            stats_module.results_to_dataframe(all_stat_results).to_csv(
-                os.path.join(target_dir, "Statistical_Results.csv"),
-                index=False,
-            )
-
-        self.canvas.draw()
-        progress.setValue(max(total_steps, 1))
+    def _on_report_export_finished(self, summary):
+        self.main_window.hide_loading()
+        worker = self.sender()
+        if worker in self.main_window.active_workers:
+            self.main_window.active_workers.remove(worker)
+            worker.deleteLater()
+        if not summary:
+            return
         QMessageBox.information(
             self, "Report Complete",
-            f"Report saved to:\n{target_dir}\n\n"
-            f"Figures: {len(quant_entries)} quantitative"
-            + (", 1 qualitative atlas" if qual_entries else ""),
+            f"Report saved to:\n{summary['target_dir']}\n\n"
+            f"Figures: {summary['quant_count']} quantitative"
+            + (", 1 qualitative atlas" if summary["has_qualitative"] else ""),
         )
 
     def generate_full_report(self):

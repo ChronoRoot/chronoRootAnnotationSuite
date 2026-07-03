@@ -6,12 +6,12 @@ os.environ["QT_LOGGING_RULES"] = "*.debug=false;*.warning=false"
 import json
 
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
-                             QSplitter, QStackedWidget, QProgressDialog, QMessageBox,
+                             QSplitter, QStackedWidget, QMessageBox,
                              QLabel, QFrame, QInputDialog, QTabWidget, QGroupBox,
                              QCheckBox, QRadioButton, QPushButton, QSizePolicy, QToolButton,
                              QStyle)
 from PyQt5.QtGui import QIcon
-from PyQt5.QtCore import Qt, QThread, pyqtSignal, QSize
+from PyQt5.QtCore import Qt, QThread, pyqtSignal, QSize, QTimer
 
 from core.model import (
     PlantImageModel,
@@ -33,6 +33,7 @@ from components.analyzer_panel import PhenomicsControlPanel
 from components.genotype_manager import GenotypeManagerDialog
 from components.workspace_manager import WorkspaceManager
 from components.instance_list import InstanceListPanel
+from components.loading_overlay import LoadingOverlay
 
 from tabs.review_tab import ReviewToolPanel
 from tabs.frangi_tab import FrangiToolPanel
@@ -63,6 +64,7 @@ class ModelWorker(QThread):
 
 class ChronoRootAnnotationSuite(QMainWindow):
     COLLAPSED_PANEL_WIDTH = 28
+    LOADING_SHOW_DELAY_MS = 300
 
     def __init__(self):
         super().__init__()
@@ -344,6 +346,16 @@ class ChronoRootAnnotationSuite(QMainWindow):
         self.browser.set_browser_controls_visible(
             self._panel_expanded(self.splitter.sizes()[0])
         )
+
+        self._loading_depth = 0
+        self._loading_show_token = 0
+        self._pending_loading_message = ""
+        self._loading_overlay = LoadingOverlay(main_widget)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, "_loading_overlay") and self.centralWidget():
+            self._loading_overlay.setGeometry(self.centralWidget().rect())
 
     def _panel_expanded(self, size):
         return size > self.COLLAPSED_PANEL_WIDTH
@@ -915,17 +927,29 @@ class ChronoRootAnnotationSuite(QMainWindow):
 
     # --- Loading & Threading ---
     def show_loading(self, message):
-        self.progress = QProgressDialog(message, None, 0, 0, self)
-        self.progress.setWindowTitle("Please Wait")
-        self.progress.setWindowModality(Qt.WindowModal)
-        self.progress.setCancelButton(None)
-        self.progress.show()
+        self._loading_depth += 1
+        if self._loading_depth == 1:
+            self._pending_loading_message = message
+            self._loading_show_token += 1
+            token = self._loading_show_token
+            QTimer.singleShot(
+                self.LOADING_SHOW_DELAY_MS,
+                lambda: self._reveal_loading_if_needed(token),
+            )
+
+    def _reveal_loading_if_needed(self, token):
+        if token != self._loading_show_token:
+            return
+        if self._loading_depth == 0:
+            return
+        self._loading_overlay.show_message(self._pending_loading_message)
 
     def hide_loading(self):
-        if hasattr(self, "progress") and self.progress:
-            self.progress.close()
-            self.progress.deleteLater()
-            self.progress = None
+        if self._loading_depth > 0:
+            self._loading_depth -= 1
+        if self._loading_depth == 0:
+            self._loading_show_token += 1
+            self._loading_overlay.hide_overlay()
 
     def scan_directory(self, folder_path, force_refresh=False):
         self.browser.current_dir = folder_path
