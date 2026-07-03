@@ -334,6 +334,13 @@ class UnifiedFileBrowser(QWidget):
     def set_browser_controls_visible(self, expanded):
         self.chk_hide_non_annotated.setVisible(expanded)
 
+    def set_hide_non_annotated(self, checked):
+        self.chk_hide_non_annotated.blockSignals(True)
+        self.chk_hide_non_annotated.setChecked(checked)
+        self.chk_hide_non_annotated.blockSignals(False)
+        if self.current_dir in self.folder_cache:
+            self.render_contents(self.folder_cache[self.current_dir], use_cache=False)
+
     def _on_hide_filter_toggled(self, _checked):
         if self.current_dir in self.folder_cache:
             self.render_contents(self.folder_cache[self.current_dir], use_cache=False)

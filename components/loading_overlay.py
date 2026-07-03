@@ -1,5 +1,5 @@
 from PyQt5.QtWidgets import QWidget, QVBoxLayout, QLabel, QProgressBar, QFrame, QSizePolicy
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QTimer
 
 
 class LoadingOverlay(QWidget):
@@ -49,13 +49,18 @@ class LoadingOverlay(QWidget):
         super().resizeEvent(event)
 
     def show_message(self, text):
+        self.message_label.setMinimumHeight(0)
         self.message_label.setText(text)
-        self.message_label.adjustSize()
-        self._card.adjustSize()
         if self.parentWidget():
             self.setGeometry(self.parentWidget().rect())
         self.show()
         self.raise_()
+        QTimer.singleShot(0, self._refresh_layout)
+
+    def _refresh_layout(self):
+        self.message_label.adjustSize()
+        self._card.adjustSize()
+        self.updateGeometry()
 
     def hide_overlay(self):
         self.hide()

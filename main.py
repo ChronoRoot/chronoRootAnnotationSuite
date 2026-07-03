@@ -129,6 +129,10 @@ class ChronoRootAnnotationSuite(QMainWindow):
             self.config["report_search_roots"] = []
         if "panel_sizes_report" not in self.config:
             self.config["panel_sizes_report"] = [250, 320, 930]
+        if "browser" not in self.config:
+            self.config["browser"] = {"hide_non_annotated": False}
+        elif "hide_non_annotated" not in self.config["browser"]:
+            self.config["browser"]["hide_non_annotated"] = False
 
     def save_interface_config(self):
         try:
@@ -193,6 +197,10 @@ class ChronoRootAnnotationSuite(QMainWindow):
                 "target_classes": g_targets,
             }
 
+            cfg["browser"] = {
+                "hide_non_annotated": self.browser.chk_hide_non_annotated.isChecked(),
+            }
+
             self.config = cfg
             with open(self.config_file, "w") as f:
                 json.dump(cfg, f, indent=4)
@@ -236,6 +244,8 @@ class ChronoRootAnnotationSuite(QMainWindow):
         self.browser.setMinimumWidth(250)
         self.browser.setMaximumWidth(400)
         browser_panel_layout.addWidget(self.browser, stretch=1)
+        b_cfg = self.config.get("browser", {})
+        self.browser.set_hide_non_annotated(b_cfg.get("hide_non_annotated", False))
         self.splitter.addWidget(self.browser_panel)
 
         self.workspaces = WorkspaceManager(self, self.global_model)
