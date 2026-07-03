@@ -193,6 +193,8 @@ class ChronoRootAnnotationSuite(QMainWindow):
             ]
             cfg["graph"] = {
                 "prune": self.panel_graph.sp_prune.value(),
+                "prune_cleanup_1": self.global_model.get_graph_params()[1],
+                "prune_cleanup_2": self.global_model.get_graph_params()[2],
                 "thick": self.panel_graph.sp_thick.value(),
                 "target_classes": g_targets,
             }
@@ -511,9 +513,23 @@ class ChronoRootAnnotationSuite(QMainWindow):
 
         g_cfg = self.config.get("graph", {})
         graph = self.workspaces.canvas_graph
-        graph.p_prune = g_cfg.get("prune", 3)
+        graph.p_prune = g_cfg.get("prune", 5)
         graph.p_thick = g_cfg.get("thick", 1)
         graph.p_target_classes = g_cfg.get("target_classes", [1, 2])
+
+    def _sync_graph_params_to_model(self):
+        """Write graph-tab primary prune into plate model."""
+        self.global_model.set_graph_params(primary=self.panel_graph.sp_prune.value())
+
+    def _finalize_plate_meta(self, plate_meta):
+        """Merge phenomics plate fields with graph prune settings for save/export."""
+        self._sync_graph_params_to_model()
+        plate_meta = dict(plate_meta)
+        graph_params = self.global_model.plate_meta.get("graph_params")
+        if graph_params:
+            plate_meta["graph_params"] = dict(graph_params)
+        plate_meta.update(self.global_model.get_graph_params_export_fields())
+        return plate_meta
 
     def wire_signals(self):
         self.workspaces.workspace_changed.connect(self._on_workspace_changed)
@@ -1076,6 +1092,8 @@ class ChronoRootAnnotationSuite(QMainWindow):
         self.workspaces.inspector_tab.show_no_measurements_state()
 
         self.panel_phenomics.restore_plate_meta(self.global_model.get_plate_meta())
+        self.global_model.seed_graph_params_from_config(self.config.get("graph", {}))
+        self.panel_graph.sync_from_model()
 
         if self.global_model.masks:
             uids = list(self.global_model.masks.keys())
@@ -1193,9 +1211,12 @@ class ChronoRootAnnotationSuite(QMainWindow):
             return
 
         shape = self.global_model.raw_image.shape if self.global_model.raw_image is not None else None
+        plate_meta = self._finalize_plate_meta(
+            self.panel_phenomics.capture_plate_meta(shape)
+        )
         self.global_model.set_task_metadata(
             self.panel_phenomics.capture_metadata(),
-            self.panel_phenomics.capture_plate_meta(shape),
+            plate_meta,
         )
 
         self.global_model.callbacks_muted = True
@@ -1407,6 +1428,7 @@ class ChronoRootAnnotationSuite(QMainWindow):
             self._run_export_worker(plate_meta)
 
     def _run_export_worker(self, plate_meta):
+        plate_meta = self._finalize_plate_meta(plate_meta)
         out_dir = self.browser.get_effective_output_dir(self.current_task_path)
         os.makedirs(out_dir, exist_ok=True)
         export_base_name = self.current_base_name

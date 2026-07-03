@@ -72,7 +72,7 @@ class GraphCanvasTab(QWidget):
         super().__init__()
         self.model = model
         
-        self.p_prune = 3
+        self.p_prune = 5
         self.p_thick = 1
         self.interaction_mode = "START" 
         
@@ -171,6 +171,11 @@ class GraphCanvasTab(QWidget):
         num_features, _ = cv2.connectedComponents(bin_mask, connectivity=8)
         return num_features > 2
 
+    def sync_from_model(self):
+        """Refresh cached prune primary from plate model."""
+        primary, _, _ = self.model.get_graph_params()
+        self.p_prune = primary
+
     def reset_user_nodes(self):
         self.user_start_node = None
         self.user_end_node = None
@@ -226,6 +231,9 @@ class GraphCanvasTab(QWidget):
             self.clear_to_black()
             return
             
+        primary, cleanup_1, cleanup_2 = self.model.get_graph_params()
+        self.p_prune = primary
+
         if uid != self.last_processed_uid or self.p_prune != self.last_prune_val:
             self.user_start_node = None
             self.user_end_node = None
@@ -298,7 +306,9 @@ class GraphCanvasTab(QWidget):
             p_y, p_x = np.where(active)
             root_bin_canvas[p_y + y_off, p_x + x_off] = 1
                     
-        full_skel, branches, endpoints, is_valid = extract_skeleton(root_bin_canvas, self.p_prune)
+        full_skel, branches, endpoints, is_valid = extract_skeleton(
+            root_bin_canvas, primary, cleanup_1, cleanup_2
+        )
         
         # Skeleton drawn directly over full-brightness image
         skel_vis = self.base_rgb.copy()
@@ -615,9 +625,12 @@ class GraphToolPanel(QWidget):
         self.sp_thick.setToolTip("Thickness used when applying graph colors to the mask.")
         self.sp_thick.valueChanged.connect(self.push_params)
 
-        self.sp_prune.setToolTip("Remove short skeleton spurs (higher = more pruning).")
+        self.sp_prune.setToolTip(
+            "Plate-wide skeleton pruning (DPI-dependent). Lower if lateral roots disappear; "
+            "raise if skeleton spurs/noise remain."
+        )
         
-        form.addRow("Prune Iterations:", self.sp_prune)
+        form.addRow("Plate Prune Iterations:", self.sp_prune)
         form.addRow("Dilation Base Thick:", self.sp_thick)
         layout.addLayout(form)
         
@@ -682,7 +695,9 @@ class GraphToolPanel(QWidget):
         else: self.canvas_tab.interaction_mode = "WAYPOINT"
 
     def push_params(self):
-        self.canvas_tab.p_prune = self.sp_prune.value()
+        primary = self.sp_prune.value()
+        primary, _, _ = self.model.set_graph_params(primary=primary)
+        self.canvas_tab.p_prune = primary
         self.canvas_tab.p_thick = self.sp_thick.value()
         
         # Extract checked classes
@@ -696,6 +711,14 @@ class GraphToolPanel(QWidget):
     
         if self.model.active_uid:
             self.canvas_tab.generate_pipeline()
+
+    def sync_from_model(self):
+        """Restore panel controls from plate model after load."""
+        primary, _, _ = self.model.get_graph_params()
+        self.sp_prune.blockSignals(True)
+        self.sp_prune.setValue(primary)
+        self.sp_prune.blockSignals(False)
+        self.canvas_tab.sync_from_model()
             
     def toggle_buttons(self, enabled):
         self.btn_apply_mask.setEnabled(enabled)

@@ -65,7 +65,9 @@ def analyze_single_plant(model, uid, genotype, plant_num, cm_per_px):
         root_bin[p_y + y_off, p_x + x_off] = 1
         mc_skel[p_y + y_off, p_x + x_off] = cid
 
-    full_skel, branches, endpoints, is_valid = extract_skeleton(root_bin, prune_iters=3)
+    full_skel, branches, endpoints, is_valid = extract_skeleton(
+        root_bin, *model.get_graph_params()
+    )
     if not is_valid:
         return None
 

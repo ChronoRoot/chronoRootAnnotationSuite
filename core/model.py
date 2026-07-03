@@ -13,6 +13,12 @@ LOGICAL_THICKNESS = 2
 MAX_HISTORY = 10
 SCHEMA_VERSION = 1
 
+GRAPH_PRUNE_DEFAULTS = {
+    "prune_primary": 5,
+    "prune_cleanup_1": 3,
+    "prune_cleanup_2": 3,
+}
+
 ANNOTATION_STATUSES = ("without_annotation", "pending", "in_progress", "completed")
 ANALYSIS_STATUSES = ("not_applicable", "not_analyzed", "analyzed")
 
@@ -349,6 +355,74 @@ class PlantImageModel:
 
     def get_plate_meta(self):
         return dict(self.plate_meta)
+
+    @staticmethod
+    def normalize_graph_prune_params(primary, cleanup_1, cleanup_2):
+        """Clamp plate graph prune triple: cleanup passes in [1, primary-1] when primary > 1."""
+        primary = max(0, min(10, int(primary)))
+        cleanup_1 = int(cleanup_1)
+        cleanup_2 = int(cleanup_2)
+        if primary <= 1:
+            cleanup_1 = max(0, cleanup_1) if primary == 0 else 1
+            cleanup_2 = max(0, cleanup_2) if primary == 0 else 1
+        else:
+            max_cleanup = primary - 1
+            cleanup_1 = max(1, min(cleanup_1, max_cleanup))
+            cleanup_2 = max(1, min(cleanup_2, max_cleanup))
+        return primary, cleanup_1, cleanup_2
+
+    def get_graph_params(self):
+        """Return normalized (primary, cleanup_1, cleanup_2) from plate_meta or defaults."""
+        gp = self.plate_meta.get("graph_params") or {}
+        primary = gp.get("prune_primary", GRAPH_PRUNE_DEFAULTS["prune_primary"])
+        cleanup_1 = gp.get("prune_cleanup_1", GRAPH_PRUNE_DEFAULTS["prune_cleanup_1"])
+        cleanup_2 = gp.get("prune_cleanup_2", GRAPH_PRUNE_DEFAULTS["prune_cleanup_2"])
+        return self.normalize_graph_prune_params(primary, cleanup_1, cleanup_2)
+
+    def set_graph_params(self, primary=None, cleanup_1=None, cleanup_2=None):
+        """Persist plate-wide graph prune settings in plate_meta."""
+        current_primary, current_c1, current_c2 = self.get_graph_params()
+        if primary is None:
+            primary = current_primary
+        if cleanup_1 is None:
+            cleanup_1 = current_c1
+        if cleanup_2 is None:
+            cleanup_2 = current_c2
+        primary, cleanup_1, cleanup_2 = self.normalize_graph_prune_params(
+            primary, cleanup_1, cleanup_2
+        )
+        self.plate_meta["graph_params"] = {
+            "prune_primary": primary,
+            "prune_cleanup_1": cleanup_1,
+            "prune_cleanup_2": cleanup_2,
+        }
+        self.dirty = True
+        return primary, cleanup_1, cleanup_2
+
+    def get_graph_params_export_fields(self):
+        """Flat dict for metrics JSON export."""
+        primary, cleanup_1, cleanup_2 = self.get_graph_params()
+        return {
+            "graph_prune_primary": primary,
+            "graph_prune_cleanup_1": cleanup_1,
+            "graph_prune_cleanup_2": cleanup_2,
+        }
+
+    def seed_graph_params_from_config(self, config_graph):
+        """Initialize graph_params from app config when plate has no saved values."""
+        if self.plate_meta.get("graph_params"):
+            return
+        primary = config_graph.get("prune", GRAPH_PRUNE_DEFAULTS["prune_primary"])
+        cleanup_1 = config_graph.get("prune_cleanup_1", GRAPH_PRUNE_DEFAULTS["prune_cleanup_1"])
+        cleanup_2 = config_graph.get("prune_cleanup_2", GRAPH_PRUNE_DEFAULTS["prune_cleanup_2"])
+        primary, cleanup_1, cleanup_2 = self.normalize_graph_prune_params(
+            primary, cleanup_1, cleanup_2
+        )
+        self.plate_meta["graph_params"] = {
+            "prune_primary": primary,
+            "prune_cleanup_1": cleanup_1,
+            "prune_cleanup_2": cleanup_2,
+        }
 
     def invalidate_peek_cache(self, json_path=None):
         """Clear browse peek cache after annotation save."""

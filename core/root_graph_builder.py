@@ -102,9 +102,11 @@ def get_roi_bounding_box(mask, padding=5):
     x_end, y_end = min(w_img, x + w + padding), min(h_img, y + h + padding)
     return (slice(y_start, y_end), slice(x_start, x_end)), (x_start, y_start)
 
-def extract_skeleton(binary_mask, prune_iters=3):
+def extract_skeleton(binary_mask, prune_primary=5, prune_cleanup_1=3, prune_cleanup_2=3, *, prune_iters=None):
     """Generates skeleton and topological points directly from a numpy array."""
-    
+    if prune_iters is not None:
+        prune_primary = prune_iters
+
     # Clean up mask with morphological operations 
     morph_kernel_size = 3
     morph_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (morph_kernel_size, morph_kernel_size))
@@ -124,9 +126,9 @@ def extract_skeleton(binary_mask, prune_iters=3):
     skeleton_crop = np.array(skeletonize(cropped_mask > 0), dtype='uint8')
 
     # Apply customizable pruning pipeline
-    skeleton_crop = trim(prune(skeleton_crop, prune_iters))
-    skeleton_crop = trim(prune(skeleton_crop, 1))
-    skeleton_crop = trim(prune(skeleton_crop, 1))
+    skeleton_crop = trim(prune(skeleton_crop, prune_primary))
+    skeleton_crop = trim(prune(skeleton_crop, prune_cleanup_1))
+    skeleton_crop = trim(prune(skeleton_crop, prune_cleanup_2))
     
     branch_points, end_points = skeleton_nodes(skeleton_crop)
     
