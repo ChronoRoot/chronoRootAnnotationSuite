@@ -696,7 +696,10 @@ class GraphToolPanel(QWidget):
 
     def push_params(self):
         primary = self.sp_prune.value()
-        primary, _, _ = self.model.set_graph_params(primary=primary)
+        primary, _, _ = self.model.set_graph_params(
+            primary=primary,
+            mark_dirty=bool(self.model.masks),
+        )
         self.canvas_tab.p_prune = primary
         self.canvas_tab.p_thick = self.sp_thick.value()
         

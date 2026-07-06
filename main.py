@@ -519,7 +519,10 @@ class ChronoRootAnnotationSuite(QMainWindow):
 
     def _sync_graph_params_to_model(self):
         """Write graph-tab primary prune into plate model."""
-        self.global_model.set_graph_params(primary=self.panel_graph.sp_prune.value())
+        self.global_model.set_graph_params(
+            primary=self.panel_graph.sp_prune.value(),
+            mark_dirty=False,
+        )
 
     def _finalize_plate_meta(self, plate_meta):
         """Merge phenomics plate fields with graph prune settings for save/export."""
@@ -675,7 +678,12 @@ class ChronoRootAnnotationSuite(QMainWindow):
         self.metadata_dirty = True
         self.update_overlay_labels()
 
+    def _has_open_task(self):
+        return bool(self.current_file_path and self.global_model.masks)
+
     def _is_task_dirty(self):
+        if not self._has_open_task():
+            return False
         return self.global_model.dirty or self.metadata_dirty
 
     def _resolve_metrics_path(self, task_dir=None, base_name=None):

@@ -278,6 +278,7 @@ class FrangiCanvasTab(QWidget):
         self.main_window = main_window
         self._frangi_worker = None
         self._frangi_generation = 0
+        self.active_workers = set()
         
         # Processing Parameters 
         self.p_search_range = 0
@@ -430,21 +431,27 @@ class FrangiCanvasTab(QWidget):
     def _on_frangi_finished(self, generation, result):
         if self.main_window:
             self.main_window.hide_loading()
-        if generation != self._frangi_generation:
-            return
         worker = self.sender()
+        if worker in self.active_workers:
+            self.active_workers.remove(worker)
+            worker.deleteLater()
         if worker is self._frangi_worker:
             self._frangi_worker = None
-            worker.deleteLater()
+        if generation != self._frangi_generation:
+            return
         self._apply_proposal_result(result)
 
     def _on_frangi_error(self, message):
         if self.main_window:
             self.main_window.hide_loading()
         worker = self.sender()
+        if worker in self.active_workers:
+            self.active_workers.remove(worker)
+            worker.deleteLater()
         if worker is self._frangi_worker:
             self._frangi_worker = None
-            worker.deleteLater()
+        if hasattr(worker, "generation") and worker.generation != self._frangi_generation:
+            return
         if self.main_window:
             self.main_window._on_thread_error(message)
 
@@ -544,6 +551,7 @@ class FrangiCanvasTab(QWidget):
 
         worker = FrangiWorker(generation, snapshot)
         self._frangi_worker = worker
+        self.active_workers.add(worker)
         worker.finished.connect(self._on_frangi_finished)
         worker.error.connect(self._on_frangi_error)
         worker.start()
@@ -552,15 +560,24 @@ class FrangiCanvasTab(QWidget):
         uid = self.model.active_uid
         if not uid or self.proposed_tight_patch is None: return
         
+        # Save proposed states to local variables
+        proposed_full_mask = self.proposed_full_mask
+        proposed_tight_patch = self.proposed_tight_patch
+        proposed_x = self.proposed_x
+        proposed_y = self.proposed_y
+        
+        # Clear proposed states immediately to prevent duplicate application on double click
+        self.proposed_full_mask = None
+        self.proposed_tight_patch = None
+        
         self.model.save_state(uid)
         
-        self.model.masks[uid] = self.proposed_full_mask
-        self.model.class_patches[uid] = (self.proposed_tight_patch, self.proposed_x, self.proposed_y)
+        self.model.masks[uid] = proposed_full_mask
+        self.model.class_patches[uid] = (proposed_tight_patch, proposed_x, proposed_y)
             
         self.model.update_metadata_for_uid(uid)
         self.model.dirty = True
         self.model._notify_data_changed()
-        self.generate_and_display_proposal()
 
     def numpy_to_qpixmap(self, img_array):
         h, w, ch = img_array.shape

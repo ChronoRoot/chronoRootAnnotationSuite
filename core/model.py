@@ -379,7 +379,7 @@ class PlantImageModel:
         cleanup_2 = gp.get("prune_cleanup_2", GRAPH_PRUNE_DEFAULTS["prune_cleanup_2"])
         return self.normalize_graph_prune_params(primary, cleanup_1, cleanup_2)
 
-    def set_graph_params(self, primary=None, cleanup_1=None, cleanup_2=None):
+    def set_graph_params(self, primary=None, cleanup_1=None, cleanup_2=None, mark_dirty=True):
         """Persist plate-wide graph prune settings in plate_meta."""
         current_primary, current_c1, current_c2 = self.get_graph_params()
         if primary is None:
@@ -391,12 +391,16 @@ class PlantImageModel:
         primary, cleanup_1, cleanup_2 = self.normalize_graph_prune_params(
             primary, cleanup_1, cleanup_2
         )
-        self.plate_meta["graph_params"] = {
+        new_params = {
             "prune_primary": primary,
             "prune_cleanup_1": cleanup_1,
             "prune_cleanup_2": cleanup_2,
         }
-        self.dirty = True
+        if self.plate_meta.get("graph_params") == new_params:
+            return primary, cleanup_1, cleanup_2
+        self.plate_meta["graph_params"] = new_params
+        if mark_dirty:
+            self.dirty = True
         return primary, cleanup_1, cleanup_2
 
     def get_graph_params_export_fields(self):
