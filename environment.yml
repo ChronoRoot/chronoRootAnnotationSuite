@@ -1,0 +1,15 @@
+name: chronoRootAnnotation
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - numpy
+  - opencv
+  - nibabel
+  - scipy
+  - pyqt
+  - scikit-image
+  - pandas
+  - seaborn
+  - networkx
