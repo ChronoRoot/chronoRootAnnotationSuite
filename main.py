@@ -196,8 +196,6 @@ class ChronoRootAnnotationSuite(QMainWindow):
             ]
             cfg["graph"] = {
                 "prune": self.panel_graph.sp_prune.value(),
-                "prune_cleanup_1": self.global_model.get_graph_params()[1],
-                "prune_cleanup_2": self.global_model.get_graph_params()[2],
                 "thick": self.panel_graph.sp_thick.value(),
                 "target_classes": g_targets,
             }
@@ -265,7 +263,9 @@ class ChronoRootAnnotationSuite(QMainWindow):
         self.tool_stack = QStackedWidget()
         self.panel_review = ReviewToolPanel(self.global_model, self.workspaces.canvas_review)
         self.panel_frangi = FrangiToolPanel(self.global_model, self.workspaces.canvas_frangi)
-        self.panel_graph = GraphToolPanel(self.global_model, self.workspaces.canvas_graph)
+        self.panel_graph = GraphToolPanel(
+            self.global_model, self.workspaces.canvas_graph, self.config
+        )
 
         self.instance_list = InstanceListPanel(
             self.global_model, self.workspaces, review_tool_panel=self.panel_review, annotation_tab_index=0
@@ -520,25 +520,21 @@ class ChronoRootAnnotationSuite(QMainWindow):
 
         g_cfg = self.config.get("graph", {})
         graph = self.workspaces.canvas_graph
-        graph.p_prune = g_cfg.get("prune", 5)
         graph.p_thick = g_cfg.get("thick", 1)
         graph.p_target_classes = g_cfg.get("target_classes", [1, 2])
 
-    def _sync_graph_params_to_model(self):
-        """Write graph-tab primary prune into plate model."""
-        self.global_model.set_graph_params(
-            primary=self.panel_graph.sp_prune.value(),
-            mark_dirty=False,
-        )
-
     def _finalize_plate_meta(self, plate_meta):
-        """Merge phenomics plate fields with graph prune settings for save/export."""
-        self._sync_graph_params_to_model()
+        """Merge phenomics plate fields with graph prune for save/export."""
+        if self.global_model.masks:
+            self.global_model.set_graph_prune_primary(
+                self.panel_graph.sp_prune.value(),
+                mark_dirty=False,
+            )
         plate_meta = dict(plate_meta)
-        graph_params = self.global_model.plate_meta.get("graph_params")
-        if graph_params:
-            plate_meta["graph_params"] = dict(graph_params)
-        plate_meta.update(self.global_model.get_graph_params_export_fields())
+        plate_meta.update(self.global_model.get_graph_prune_export_fields())
+        plate_meta.pop("graph_params", None)
+        plate_meta.pop("graph_prune_cleanup_1", None)
+        plate_meta.pop("graph_prune_cleanup_2", None)
         return plate_meta
 
     def wire_signals(self):
@@ -582,7 +578,6 @@ class ChronoRootAnnotationSuite(QMainWindow):
         self.chk_show_geno_global.toggled.connect(self._apply_global_label_preferences)
         self.rad_fmt_text_global.toggled.connect(self._apply_global_label_preferences)
         self.rad_fmt_num_global.toggled.connect(self._apply_global_label_preferences)
-        self.panel_graph.sp_prune.valueChanged.connect(self._on_prune_value_changed)
         self._apply_global_label_preferences()
 
         self._ensure_middle_panel_visible_on_startup()
@@ -885,11 +880,6 @@ class ChronoRootAnnotationSuite(QMainWindow):
         self.config["review"]["show_geno"] = show_geno
         self.config["review"]["label_format"] = fmt
 
-    def _on_prune_value_changed(self, val):
-        if "graph" not in self.config:
-            self.config["graph"] = {}
-        self.config["graph"]["prune"] = val
-
     # --- Calibration (from Analyzer) ---
     def start_calibration_flow(self):
         self.is_calibrating = True
@@ -1095,7 +1085,10 @@ class ChronoRootAnnotationSuite(QMainWindow):
 
         self.show_loading(f"Loading {self.current_base_name}...\n(Loading plate data…)")
         worker = ModelWorker(
-            self.global_model.load_task, self.current_task_path, self.current_base_name
+            self.global_model.load_task,
+            self.current_task_path,
+            self.current_base_name,
+            self.config.get("graph", {}).get("prune", 5),
         )
         self.active_workers.add(worker)
         worker.finished.connect(self._on_load_finished)
@@ -1119,8 +1112,8 @@ class ChronoRootAnnotationSuite(QMainWindow):
         self.workspaces.inspector_tab.show_no_measurements_state()
 
         self.panel_phenomics.restore_plate_meta(self.global_model.get_plate_meta())
-        self.global_model.seed_graph_params_from_config(self.config.get("graph", {}))
-        self.panel_graph.sync_from_model()
+        config_prune = self.config.get("graph", {}).get("prune", 5)
+        self.panel_graph.sync_from_model(config_prune)
 
         if self.global_model.masks:
             uids = list(self.global_model.masks.keys())
@@ -1131,6 +1124,7 @@ class ChronoRootAnnotationSuite(QMainWindow):
             )
             self.panel_phenomics.enable_tools(True)
             self.ensure_active_plant()
+            self.workspaces.canvas_graph.refresh_graph_preview()
         else:
             self.panel_phenomics.clear_table()
 

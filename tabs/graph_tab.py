@@ -72,7 +72,6 @@ class GraphCanvasTab(QWidget):
         super().__init__()
         self.model = model
         
-        self.p_prune = 5
         self.p_thick = 1
         self.interaction_mode = "START" 
         
@@ -171,10 +170,10 @@ class GraphCanvasTab(QWidget):
         num_features, _ = cv2.connectedComponents(bin_mask, connectivity=8)
         return num_features > 2
 
-    def sync_from_model(self):
-        """Refresh cached prune primary from plate model."""
-        primary, _, _ = self.model.get_graph_params()
-        self.p_prune = primary
+    def refresh_graph_preview(self):
+        """Regenerate skeleton preview when model prune or selection is ready."""
+        if self.model.active_uid:
+            self.generate_pipeline()
 
     def reset_user_nodes(self):
         self.user_start_node = None
@@ -231,15 +230,14 @@ class GraphCanvasTab(QWidget):
             self.clear_to_black()
             return
             
-        primary, cleanup_1, cleanup_2 = self.model.get_graph_params()
-        self.p_prune = primary
+        primary, cleanup_1, cleanup_2 = self.model.get_graph_prune_triple()
 
-        if uid != self.last_processed_uid or self.p_prune != self.last_prune_val:
+        if uid != self.last_processed_uid or primary != self.last_prune_val:
             self.user_start_node = None
             self.user_end_node = None
             self.user_waypoints = []
             self.last_processed_uid = uid
-            self.last_prune_val = self.p_prune
+            self.last_prune_val = primary
         
         mask = self.model.masks[uid]
         if self._mask_is_disconnected(mask):
@@ -580,10 +578,11 @@ class GraphCanvasTab(QWidget):
 # 2. THE SIDEBAR TOOL PANEL
 # ==========================================
 class GraphToolPanel(QWidget):
-    def __init__(self, shared_model, canvas_tab: GraphCanvasTab):
+    def __init__(self, shared_model, canvas_tab: GraphCanvasTab, app_config=None):
         super().__init__()
         self.model = shared_model
         self.canvas_tab = canvas_tab
+        self.app_config = app_config
         
         self.init_ui()
         self.model.register_selection_callback(self.on_selection_changed)
@@ -616,7 +615,8 @@ class GraphToolPanel(QWidget):
         form = QFormLayout()
         self.sp_prune = QSpinBox()
         self.sp_prune.setRange(0, 10)
-        self.sp_prune.setValue(self.canvas_tab.p_prune)
+        g_cfg = (self.app_config or {}).get("graph", {})
+        self.sp_prune.setValue(g_cfg.get("prune", 5))
         self.sp_prune.valueChanged.connect(self.push_params)
         
         self.sp_thick = QSpinBox()
@@ -696,11 +696,10 @@ class GraphToolPanel(QWidget):
 
     def push_params(self):
         primary = self.sp_prune.value()
-        primary, _, _ = self.model.set_graph_params(
-            primary=primary,
-            mark_dirty=bool(self.model.masks),
-        )
-        self.canvas_tab.p_prune = primary
+        if self.model.masks:
+            self.model.set_graph_prune_primary(primary, mark_dirty=True)
+        elif self.app_config is not None:
+            self.app_config.setdefault("graph", {})["prune"] = primary
         self.canvas_tab.p_thick = self.sp_thick.value()
         
         # Extract checked classes
@@ -715,13 +714,15 @@ class GraphToolPanel(QWidget):
         if self.model.active_uid:
             self.canvas_tab.generate_pipeline()
 
-    def sync_from_model(self):
-        """Restore panel controls from plate model after load."""
-        primary, _, _ = self.model.get_graph_params()
+    def sync_from_model(self, config_prune=5):
+        """Restore spinbox from plate model or session config; refresh preview."""
+        if self.model.masks:
+            primary = self.model.get_graph_prune_primary()
+        else:
+            primary = config_prune
         self.sp_prune.blockSignals(True)
         self.sp_prune.setValue(primary)
         self.sp_prune.blockSignals(False)
-        self.canvas_tab.sync_from_model()
             
     def toggle_buttons(self, enabled):
         self.btn_apply_mask.setEnabled(enabled)

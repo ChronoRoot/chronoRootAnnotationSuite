@@ -83,8 +83,6 @@ def peek_metrics_metadata(path):
         "plant_count": len(data.get("plants", [])),
         "original_image": data.get("original_image", ""),
         "graph_prune_primary": data.get("graph_prune_primary", ""),
-        "graph_prune_cleanup_1": data.get("graph_prune_cleanup_1", ""),
-        "graph_prune_cleanup_2": data.get("graph_prune_cleanup_2", ""),
         "json_dir": os.path.dirname(path),
     }
 
@@ -1092,8 +1090,6 @@ class ComparisonReportTab(QWidget):
                     "relative_folder": relative_folder or "root",
                     "source_file": os.path.basename(file_path),
                     "graph_prune_primary": data.get("graph_prune_primary"),
-                    "graph_prune_cleanup_1": data.get("graph_prune_cleanup_1"),
-                    "graph_prune_cleanup_2": data.get("graph_prune_cleanup_2"),
                 }
                 for plant in data.get("plants", []):
                     all_plants_data.append({**plate_meta, **plant})
