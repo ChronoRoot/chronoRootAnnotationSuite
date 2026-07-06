@@ -48,7 +48,7 @@ check_disk_space() {
 REPO_URL="https://github.com/ChronoRoot/chronoRootAnnotationSuite.git"
 DEFAULT_INSTALL_DIR="$HOME/.local/chronoroot-annotation-suite"
 DESKTOP_ENTRY_DIR="$HOME/.local/share/applications"
-CONFIG_FILE="$HOME/.config/chronoroot-annotation-suite/config.json"
+CONFIG_FILE="$HOME/.config/chronoRootAnnotationSuite/config.json"
 
 main() {
     clear

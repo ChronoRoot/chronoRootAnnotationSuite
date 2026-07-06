@@ -20,15 +20,41 @@ An open-source desktop tool for correcting automatic root segmentations on petri
 
 Measure requires the plate to be finished first.
 
-## Launch
+## Installation
 
+You can install the ChronoRoot Annotation Suite using either an Apptainer/Singularity container (recommended for Linux systems to avoid local python dependency conflicts) or directly inside a Conda environment.
+
+### Option 1: Apptainer/Singularity (Recommended)
+This installer builds an isolated container image (~800 MB) from the `image.def` file, creates a wrapper script to handle desktop display bindings, and registers a desktop shortcut.
+
+Run the following command:
 ```bash
-./main.sh
+wget https://raw.githubusercontent.com/ChronoRoot/chronoRootAnnotationSuite/main/install_apptainer.sh && chmod +x install_apptainer.sh && ./install_apptainer.sh
 ```
 
-Or: `python main.py`
+### Option 2: Conda Environment
+This installer sets up a local Conda environment named `chronoRootAnnotation` with all package dependencies (PyQt5, OpenCV, NumPy, NetworkX, SciPy, etc.), builds a launcher script, and registers a desktop shortcut.
 
-Config: `~/.config/chronoRootAnnotationSuite/config.json`
+Run the following command:
+```bash
+wget https://raw.githubusercontent.com/ChronoRoot/chronoRootAnnotationSuite/main/install_conda.sh && chmod +x install_conda.sh && ./install_conda.sh
+```
+
+## Launch
+
+After installation, you can launch the application in three ways:
+
+1. **System Menu**: Search for **ChronoRoot Annotation Suite** in your desktop application launcher/applications menu.
+2. **Wrapper Script**: Run the generated execution script (installed by default to `~/.local/chronoroot-annotation-suite/ChronoRootAnnotationSuite.sh`).
+3. **Manual Launch**:
+   - For Container: Run `./main.sh` from the repository root.
+   - For Conda: Activate the conda environment and run python:
+     ```bash
+     conda activate chronoRootAnnotation
+     python main.py
+     ```
+
+**Config Location:** `~/.config/chronoRootAnnotationSuite/config.json`
 
 ## Input and output files
 
