@@ -163,6 +163,9 @@ class ChronoRootAnnotationSuite(QMainWindow):
                 "brush_size": self.panel_review.slider_size.value(),
                 "opacity": self.panel_review.slider_opacity.value(),
                 "show_bboxes": self.panel_review.btn_bbox.isChecked(),
+                "show_num": self.chk_show_num_global.isChecked(),
+                "show_geno": self.chk_show_geno_global.isChecked(),
+                "label_format": "TEXT" if self.rad_fmt_text_global.isChecked() else "NUMBER",
             }
 
             f_targets = [
@@ -297,11 +300,12 @@ class ChronoRootAnnotationSuite(QMainWindow):
         self.global_label_group = QGroupBox("Canvas Label Settings")
         gl = QVBoxLayout(self.global_label_group)
 
+        r_cfg = self.config.get("review", {})
         row_show = QHBoxLayout()
         self.chk_show_num_global = QCheckBox("Plant #")
         self.chk_show_geno_global = QCheckBox("Genotype")
-        self.chk_show_num_global.setChecked(True)
-        self.chk_show_geno_global.setChecked(True)
+        self.chk_show_num_global.setChecked(r_cfg.get("show_num", True))
+        self.chk_show_geno_global.setChecked(r_cfg.get("show_geno", True))
         row_show.addWidget(QLabel("Show:"))
         row_show.addWidget(self.chk_show_num_global)
         row_show.addWidget(self.chk_show_geno_global)
@@ -310,7 +314,10 @@ class ChronoRootAnnotationSuite(QMainWindow):
         row_fmt = QHBoxLayout()
         self.rad_fmt_text_global = QRadioButton("Text")
         self.rad_fmt_num_global = QRadioButton("Index")
-        self.rad_fmt_text_global.setChecked(True)
+        if r_cfg.get("label_format", "TEXT") == "NUMBER":
+            self.rad_fmt_num_global.setChecked(True)
+        else:
+            self.rad_fmt_text_global.setChecked(True)
         row_fmt.addWidget(QLabel("Format:"))
         row_fmt.addWidget(self.rad_fmt_text_global)
         row_fmt.addWidget(self.rad_fmt_num_global)
@@ -575,6 +582,7 @@ class ChronoRootAnnotationSuite(QMainWindow):
         self.chk_show_geno_global.toggled.connect(self._apply_global_label_preferences)
         self.rad_fmt_text_global.toggled.connect(self._apply_global_label_preferences)
         self.rad_fmt_num_global.toggled.connect(self._apply_global_label_preferences)
+        self.panel_graph.sp_prune.valueChanged.connect(self._on_prune_value_changed)
         self._apply_global_label_preferences()
 
         self._ensure_middle_panel_visible_on_startup()
@@ -870,6 +878,17 @@ class ChronoRootAnnotationSuite(QMainWindow):
         self.rad_fmt_num_global.setEnabled(show_geno)
         fmt = "TEXT" if self.rad_fmt_text_global.isChecked() else "NUMBER"
         self.workspaces.canvas_review.set_label_preferences(show_num, show_geno, fmt)
+
+        if "review" not in self.config:
+            self.config["review"] = {}
+        self.config["review"]["show_num"] = show_num
+        self.config["review"]["show_geno"] = show_geno
+        self.config["review"]["label_format"] = fmt
+
+    def _on_prune_value_changed(self, val):
+        if "graph" not in self.config:
+            self.config["graph"] = {}
+        self.config["graph"]["prune"] = val
 
     # --- Calibration (from Analyzer) ---
     def start_calibration_flow(self):

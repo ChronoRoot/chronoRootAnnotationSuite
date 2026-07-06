@@ -43,7 +43,7 @@ class SegmentedProgressBar(QWidget):
 
 class FolderStatsWidget(QWidget):
     def __init__(self, text, total, without_annotation, pending, in_progress, completed,
-                 analyzed=0, not_analyzed=0, is_folder=True):
+                 analyzed=0, not_analyzed=0, is_folder=True, hide_without=False):
         super().__init__()
         layout = QVBoxLayout(self)
         layout.setContentsMargins(5, 5, 5, 5)
@@ -65,22 +65,31 @@ class FolderStatsWidget(QWidget):
         layout.addLayout(top_row)
 
         if is_folder and total > 0:
-            if without_annotation != 0:
-                ann_txt = (
-                    f"Without: {without_annotation} | Pending: {pending} | "
-                    f"In progress: {in_progress} | Done: {completed} | Total: {total}"
-                )
-            else:
+            if hide_without:
                 ann_txt = (
                     f"Pending: {pending} | "
-                    f"In progress: {in_progress} | Done: {completed} | Total: {total}"
+                    f"In progress: {in_progress} | Done: {completed} | Total: {total - without_annotation}"
                 )
+                pb_segments = [completed, in_progress, pending, 0]
+            else:
+                if without_annotation != 0:
+                    ann_txt = (
+                        f"Without: {without_annotation} | Pending: {pending} | "
+                        f"In progress: {in_progress} | Done: {completed} | Total: {total}"
+                    )
+                else:
+                    ann_txt = (
+                        f"Pending: {pending} | "
+                        f"In progress: {in_progress} | Done: {completed} | Total: {total}"
+                    )
+                pb_segments = [completed, in_progress, pending, without_annotation]
+
             lbl_ann = QLabel(ann_txt)
             lbl_ann.setStyleSheet("color: gray; font-size: 10px;")
             layout.addWidget(lbl_ann)
 
             layout.addWidget(SegmentedProgressBar(
-                [completed, in_progress, pending, without_annotation],
+                pb_segments,
                 ["#28a745", "#ffc107", "#bdbdbd", "#bdbdbd"],
             ))
 
@@ -593,6 +602,7 @@ class UnifiedFileBrowser(QWidget):
                     analyzed=item.get("analyzed", 0),
                     not_analyzed=item.get("not_analyzed", 0),
                     is_folder=True,
+                    hide_without=self.chk_hide_non_annotated.isChecked(),
                 )
                 list_item.setSizeHint(widget.sizeHint())
                 self.task_list.addItem(list_item)
