@@ -82,7 +82,6 @@ def peek_metrics_metadata(path):
         "timepoint": data.get("timepoint", ""),
         "plant_count": len(data.get("plants", [])),
         "original_image": data.get("original_image", ""),
-        "graph_prune_primary": data.get("graph_prune_primary", ""),
         "json_dir": os.path.dirname(path),
     }
 
@@ -1089,7 +1088,6 @@ class ComparisonReportTab(QWidget):
                     "timepoint": data.get("timepoint", "Unknown"),
                     "relative_folder": relative_folder or "root",
                     "source_file": os.path.basename(file_path),
-                    "graph_prune_primary": data.get("graph_prune_primary"),
                 }
                 for plant in data.get("plants", []):
                     all_plants_data.append({**plate_meta, **plant})

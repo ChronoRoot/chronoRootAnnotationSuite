@@ -264,7 +264,7 @@ class ChronoRootAnnotationSuite(QMainWindow):
         self.panel_review = ReviewToolPanel(self.global_model, self.workspaces.canvas_review)
         self.panel_frangi = FrangiToolPanel(self.global_model, self.workspaces.canvas_frangi)
         self.panel_graph = GraphToolPanel(
-            self.global_model, self.workspaces.canvas_graph, self.config
+            self.global_model, self.workspaces.canvas_graph
         )
 
         self.instance_list = InstanceListPanel(
@@ -520,22 +520,9 @@ class ChronoRootAnnotationSuite(QMainWindow):
 
         g_cfg = self.config.get("graph", {})
         graph = self.workspaces.canvas_graph
+        graph.p_prune = g_cfg.get("prune", 5)
         graph.p_thick = g_cfg.get("thick", 1)
         graph.p_target_classes = g_cfg.get("target_classes", [1, 2])
-
-    def _finalize_plate_meta(self, plate_meta):
-        """Merge phenomics plate fields with graph prune for save/export."""
-        if self.global_model.masks:
-            self.global_model.set_graph_prune_primary(
-                self.panel_graph.sp_prune.value(),
-                mark_dirty=False,
-            )
-        plate_meta = dict(plate_meta)
-        plate_meta.update(self.global_model.get_graph_prune_export_fields())
-        plate_meta.pop("graph_params", None)
-        plate_meta.pop("graph_prune_cleanup_1", None)
-        plate_meta.pop("graph_prune_cleanup_2", None)
-        return plate_meta
 
     def wire_signals(self):
         self.workspaces.workspace_changed.connect(self._on_workspace_changed)
@@ -1088,7 +1075,6 @@ class ChronoRootAnnotationSuite(QMainWindow):
             self.global_model.load_task,
             self.current_task_path,
             self.current_base_name,
-            self.config.get("graph", {}).get("prune", 5),
         )
         self.active_workers.add(worker)
         worker.finished.connect(self._on_load_finished)
@@ -1112,8 +1098,6 @@ class ChronoRootAnnotationSuite(QMainWindow):
         self.workspaces.inspector_tab.show_no_measurements_state()
 
         self.panel_phenomics.restore_plate_meta(self.global_model.get_plate_meta())
-        config_prune = self.config.get("graph", {}).get("prune", 5)
-        self.panel_graph.sync_from_model(config_prune)
 
         if self.global_model.masks:
             uids = list(self.global_model.masks.keys())
@@ -1232,9 +1216,7 @@ class ChronoRootAnnotationSuite(QMainWindow):
             return
 
         shape = self.global_model.raw_image.shape if self.global_model.raw_image is not None else None
-        plate_meta = self._finalize_plate_meta(
-            self.panel_phenomics.capture_plate_meta(shape)
-        )
+        plate_meta = self.panel_phenomics.capture_plate_meta(shape)
         self.global_model.set_task_metadata(
             self.panel_phenomics.capture_metadata(),
             plate_meta,
@@ -1335,7 +1317,13 @@ class ChronoRootAnnotationSuite(QMainWindow):
 
     def _start_measure_worker(self, plants_meta, cm_per_px):
         self.show_loading("Measuring traits…")
-        worker = ModelWorker(extract_plate_metrics, self.global_model, plants_meta, cm_per_px)
+        worker = ModelWorker(
+            extract_plate_metrics,
+            self.global_model,
+            plants_meta,
+            cm_per_px,
+            self.workspaces.canvas_graph.p_prune,
+        )
         self.active_workers.add(worker)
         worker.finished.connect(self._on_measure_finished)
         worker.error.connect(self._on_thread_error)
@@ -1382,7 +1370,8 @@ class ChronoRootAnnotationSuite(QMainWindow):
             self.panel_phenomics.current_cm_per_px = live_cm_per_px
 
         viz_data = analyze_single_plant(
-            self.global_model, uid, genotype, plant_num, live_cm_per_px
+            self.global_model, uid, genotype, plant_num, live_cm_per_px,
+            self.workspaces.canvas_graph.p_prune,
         )
 
         self.workspaces.inspector_tab.update_view(
@@ -1449,7 +1438,6 @@ class ChronoRootAnnotationSuite(QMainWindow):
             self._run_export_worker(plate_meta)
 
     def _run_export_worker(self, plate_meta):
-        plate_meta = self._finalize_plate_meta(plate_meta)
         out_dir = self.browser.get_effective_output_dir(self.current_task_path)
         os.makedirs(out_dir, exist_ok=True)
         export_base_name = self.current_base_name
@@ -1473,15 +1461,19 @@ class ChronoRootAnnotationSuite(QMainWindow):
                 "plant_num": meta.get("plant_num", str(uid)),
             })
 
+        prune_iters = self.workspaces.canvas_graph.p_prune
         self.show_loading("Exporting analysis…")
-        worker = ModelWorker(self._export_analysis_bundle, out_dir, export_base_name, plate_meta, plants_meta, cm_per_px)
+        worker = ModelWorker(
+            self._export_analysis_bundle, out_dir, export_base_name,
+            plate_meta, plants_meta, cm_per_px, prune_iters,
+        )
         self.active_workers.add(worker)
         worker.finished.connect(self._on_export_finished)
         worker.error.connect(self._on_thread_error)
         worker.start()
 
-    def _export_analysis_bundle(self, out_dir, export_base_name, plate_meta, plants_meta, cm_per_px):
-        full_results = extract_plate_metrics(self.global_model, plants_meta, cm_per_px)
+    def _export_analysis_bundle(self, out_dir, export_base_name, plate_meta, plants_meta, cm_per_px, prune_iters):
+        full_results = extract_plate_metrics(self.global_model, plants_meta, cm_per_px, prune_iters)
         export_rsml_and_json(out_dir, export_base_name, plate_meta, full_results)
         return scalar_metrics_dict(full_results)
 

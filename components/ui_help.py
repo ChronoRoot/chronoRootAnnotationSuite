@@ -73,10 +73,10 @@ HELP_GRAPH = """<b>Root tracing check</b><br><br>
 Select each plant and confirm skeleton and main-root path look correct.<br><br>
 
 <b>Graph Settings</b><br>
-• <b>Plate Prune Iterations</b> — plate-wide skeleton spur removal (DPI/resolution dependent).
-  Tune on a representative plant here; the same value is used for full-plate Measure and export.
-  Lower pruning if real lateral roots disappear; raise it if skeleton noise or spurs remain after
-  skeletonization. Two smaller automatic cleanup passes follow the primary value.<br>
+• <b>Plate Prune Iterations</b> — skeleton spur removal (DPI/resolution dependent). This is an
+  interface setting: tune it on a representative plant here and the same value is used for the
+  preview and for full-plate Measure and export. Lower pruning if real lateral roots disappear;
+  raise it if skeleton noise or spurs remain after skeletonization.<br>
 • <b>Dilation Base Thick</b> — thickness when applying graph colors to the mask.<br><br>
 
 <b>Node Click Interaction</b><br>

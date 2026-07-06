@@ -13,8 +13,6 @@ LOGICAL_THICKNESS = 2
 MAX_HISTORY = 10
 SCHEMA_VERSION = 1
 
-DEFAULT_GRAPH_PRUNE_PRIMARY = 5
-
 ANNOTATION_STATUSES = ("without_annotation", "pending", "in_progress", "completed")
 ANALYSIS_STATUSES = ("not_applicable", "not_analyzed", "analyzed")
 
@@ -61,19 +59,6 @@ def analysis_status_display(status):
         "analyzed": "Analyzed",
     }
     return mapping.get(status, "—")
-
-
-def normalize_graph_prune_primary(primary):
-    return max(0, min(10, int(primary)))
-
-
-def derive_cleanup_iters(primary):
-    """Derive two cleanup prune passes from the user-facing primary value."""
-    primary = normalize_graph_prune_primary(primary)
-    if primary <= 1:
-        return 1, 1
-    cleanup = min(3, primary - 1)
-    return cleanup, cleanup
 
 
 # --- Analysis export paths (filesystem only; not stored in annotation JSON) ---
@@ -365,58 +350,6 @@ class PlantImageModel:
     def get_plate_meta(self):
         return dict(self.plate_meta)
 
-    def get_graph_prune_primary(self):
-        """Plate-wide primary prune iterations from plate_meta or default."""
-        if "graph_prune_primary" in self.plate_meta:
-            return normalize_graph_prune_primary(self.plate_meta["graph_prune_primary"])
-        return DEFAULT_GRAPH_PRUNE_PRIMARY
-
-    def get_graph_prune_triple(self):
-        """Return (primary, cleanup_1, cleanup_2) for extract_skeleton."""
-        primary = self.get_graph_prune_primary()
-        cleanup_1, cleanup_2 = derive_cleanup_iters(primary)
-        return primary, cleanup_1, cleanup_2
-
-    def set_graph_prune_primary(self, value, mark_dirty=True):
-        """Persist plate-wide primary prune in plate_meta."""
-        primary = normalize_graph_prune_primary(value)
-        if self.plate_meta.get("graph_prune_primary") == primary:
-            return primary
-        self.plate_meta["graph_prune_primary"] = primary
-        self.plate_meta.pop("graph_params", None)
-        self.plate_meta.pop("graph_prune_cleanup_1", None)
-        self.plate_meta.pop("graph_prune_cleanup_2", None)
-        if mark_dirty:
-            self.dirty = True
-        return primary
-
-    def get_graph_prune_export_fields(self):
-        return {"graph_prune_primary": self.get_graph_prune_primary()}
-
-    def apply_graph_prune_default(self, default):
-        """Set graph_prune_primary from app config when plate has no saved value."""
-        if "graph_prune_primary" in self.plate_meta:
-            return
-        self.plate_meta["graph_prune_primary"] = normalize_graph_prune_primary(
-            default if default is not None else DEFAULT_GRAPH_PRUNE_PRIMARY
-        )
-
-    def _migrate_plate_graph_prune(self):
-        """Normalize legacy nested prune fields into graph_prune_primary."""
-        if "graph_prune_primary" in self.plate_meta:
-            self.plate_meta["graph_prune_primary"] = normalize_graph_prune_primary(
-                self.plate_meta["graph_prune_primary"]
-            )
-        else:
-            gp = self.plate_meta.get("graph_params") or {}
-            if "prune_primary" in gp:
-                self.plate_meta["graph_prune_primary"] = normalize_graph_prune_primary(
-                    gp["prune_primary"]
-                )
-        self.plate_meta.pop("graph_params", None)
-        self.plate_meta.pop("graph_prune_cleanup_1", None)
-        self.plate_meta.pop("graph_prune_cleanup_2", None)
-
     def invalidate_peek_cache(self, json_path=None):
         """Clear browse peek cache after annotation save."""
         if json_path:
@@ -576,7 +509,7 @@ class PlantImageModel:
         return contents
 
     # --- Load / save ---
-    def load_task(self, task_path, base_name, graph_prune_default=None):
+    def load_task(self, task_path, base_name):
         if base_name.lower().endswith(('.png', '.jpg', '.jpeg')):
             base_name = os.path.splitext(base_name)[0]
             
@@ -649,9 +582,6 @@ class PlantImageModel:
         # 3. Warm up class patches for faster GUI response
         for uid in self.masks.keys():
             self._get_class_patch(uid)
-
-        if graph_prune_default is not None:
-            self.apply_graph_prune_default(graph_prune_default)
 
     # --- Mask validation & spatial sort ---
     def clean_and_validate_masks(self):
@@ -821,7 +751,6 @@ class PlantImageModel:
                 self.status = "in_progress"
 
             self.plate_meta = data.get("plate_meta") or {}
-            self._migrate_plate_graph_prune()
             self.plants_meta = {}
 
             for ann in data.get('annotations', []):

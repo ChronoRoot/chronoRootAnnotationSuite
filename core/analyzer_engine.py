@@ -43,7 +43,7 @@ def scalar_metrics_dict(full_results):
     return {uid: plant_scalar_record(data) for uid, data in full_results.items()}
 
 
-def analyze_single_plant(model, uid, genotype, plant_num, cm_per_px):
+def analyze_single_plant(model, uid, genotype, plant_num, cm_per_px, prune_iters=5):
     """
     Run skeleton/graph/metrics pipeline for one plant.
     Returns a full in-memory dict (scalars + transient viz fields) or None.
@@ -65,9 +65,7 @@ def analyze_single_plant(model, uid, genotype, plant_num, cm_per_px):
         root_bin[p_y + y_off, p_x + x_off] = 1
         mc_skel[p_y + y_off, p_x + x_off] = cid
 
-    full_skel, branches, endpoints, is_valid = extract_skeleton(
-        root_bin, *model.get_graph_prune_triple()
-    )
+    full_skel, branches, endpoints, is_valid = extract_skeleton(root_bin, prune_iters)
     if not is_valid:
         return None
 
@@ -162,12 +160,12 @@ def analyze_single_plant(model, uid, genotype, plant_num, cm_per_px):
     }
 
 
-def extract_plate_metrics(model, plants_meta, cm_per_px):
+def extract_plate_metrics(model, plants_meta, cm_per_px, prune_iters=5):
     results = {}
     for p_meta in plants_meta:
         uid = p_meta["uid"]
         full = analyze_single_plant(
-            model, uid, p_meta["genotype"], p_meta["plant_num"], cm_per_px
+            model, uid, p_meta["genotype"], p_meta["plant_num"], cm_per_px, prune_iters
         )
         if full:
             results[uid] = full
