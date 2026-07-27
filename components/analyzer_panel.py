@@ -15,9 +15,9 @@ from components.ui_help import HELP_METADATA, show_help
 BULK_ENTER_NEW_LABEL = "Enter new genotype…"
 BULK_ENTER_NEW_ROLE = "enter_new_genotype"
 
-COL_UID, COL_GENOTYPE, COL_PLANT_NUM, COL_GERMINATED, COL_IGNORE = range(5)
-
-# Second data role on the UID cell: plate position of a seed that never germinated.
+# The Plant # cell carries the row identity: Qt.UserRole holds the model UID, which the
+# user never sees, and ROLE_SEED_POS the plate position of a seed that never germinated.
+COL_PLANT_NUM, COL_GENOTYPE, COL_GERMINATED, COL_IGNORE = range(4)
 ROLE_SEED_POS = Qt.UserRole + 1
 
 
@@ -177,12 +177,12 @@ class PhenomicsControlPanel(QWidget):
 
         layout.addSpacing(4)
 
-        self.table_plants = QTableWidget(0, 5)
+        self.table_plants = QTableWidget(0, 4)
         self.table_plants.setHorizontalHeaderLabels(
-            ["Plant", "Genotype", "Plant #", "Germinated", "Ignore"]
+            ["Plant #", "Genotype", "Germinated", "Ignore"]
         )
         self.table_plants.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        for col in (COL_UID, COL_GERMINATED, COL_IGNORE):
+        for col in (COL_PLANT_NUM, COL_GERMINATED, COL_IGNORE):
             self.table_plants.horizontalHeader().setSectionResizeMode(
                 col, QHeaderView.ResizeToContents
             )
@@ -250,7 +250,7 @@ class PhenomicsControlPanel(QWidget):
 
         selected_uids = []
         for row in selected_rows:
-            item = self.table_plants.item(row, COL_UID)
+            item = self.table_plants.item(row, COL_PLANT_NUM)
             if item:
                 selected_uids.append(item.data(Qt.UserRole))
         if selected_uids:
@@ -268,9 +268,9 @@ class PhenomicsControlPanel(QWidget):
 
         if uid_set:
             for row in range(self.table_plants.rowCount()):
-                item = self.table_plants.item(row, COL_UID)
+                item = self.table_plants.item(row, COL_PLANT_NUM)
                 if item and item.data(Qt.UserRole) in uid_set:
-                    index = self.table_plants.model().index(row, COL_UID)
+                    index = self.table_plants.model().index(row, COL_PLANT_NUM)
                     selection_model.select(
                         index,
                         QItemSelectionModel.Select | QItemSelectionModel.Rows,
@@ -409,7 +409,7 @@ class PhenomicsControlPanel(QWidget):
     def get_table_uids(self):
         uids = set()
         for row in range(self.table_plants.rowCount()):
-            item = self.table_plants.item(row, COL_UID)
+            item = self.table_plants.item(row, COL_PLANT_NUM)
             if item:
                 uids.add(item.data(Qt.UserRole))
         return uids
@@ -418,17 +418,16 @@ class PhenomicsControlPanel(QWidget):
         """Snapshot the metadata table per UID before a table rebuild."""
         metadata = {}
         for row in range(self.table_plants.rowCount()):
-            uid_item = self.table_plants.item(row, COL_UID)
-            if not uid_item:
-                continue
-            uid = uid_item.data(Qt.UserRole)
             num_item = self.table_plants.item(row, COL_PLANT_NUM)
+            if not num_item:
+                continue
+            uid = num_item.data(Qt.UserRole)
             metadata[uid] = normalize_plant_meta({
                 "genotype": self._genotype_from_combo(self.table_plants.cellWidget(row, COL_GENOTYPE)),
-                "plant_num": num_item.text() if num_item else "",
+                "plant_num": num_item.text(),
                 "germinated": self._flag_from_row(row, COL_GERMINATED, True),
                 "ignore": self._flag_from_row(row, COL_IGNORE, False),
-                "seed_pos": uid_item.data(ROLE_SEED_POS),
+                "seed_pos": num_item.data(ROLE_SEED_POS),
             }, uid)
         return metadata
 
@@ -668,11 +667,10 @@ class PhenomicsControlPanel(QWidget):
             saved = normalize_plant_meta(preserved_metadata.get(uid), uid)
             self.table_plants.insertRow(row)
 
-            item_uid = QTableWidgetItem(str(uid))
-            item_uid.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
-            item_uid.setData(Qt.UserRole, uid)
-            item_uid.setData(ROLE_SEED_POS, saved["seed_pos"])
-            self.table_plants.setItem(row, COL_UID, item_uid)
+            item_num = QTableWidgetItem(saved["plant_num"])
+            item_num.setData(Qt.UserRole, uid)
+            item_num.setData(ROLE_SEED_POS, saved["seed_pos"])
+            self.table_plants.setItem(row, COL_PLANT_NUM, item_num)
 
             combo = QComboBox()
             combo.setEditable(True)
@@ -684,8 +682,6 @@ class PhenomicsControlPanel(QWidget):
             combo.currentIndexChanged.connect(self.update_overlay_labels)
             combo.currentIndexChanged.connect(self.metadata_dirty_changed.emit)
             self.table_plants.setCellWidget(row, COL_GENOTYPE, combo)
-
-            self.table_plants.setItem(row, COL_PLANT_NUM, QTableWidgetItem(saved["plant_num"]))
 
             # A seed placeholder has no mask to measure, so its state is fixed.
             is_seed = bool(saved["seed_pos"])

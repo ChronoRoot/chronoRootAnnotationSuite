@@ -200,9 +200,6 @@ class GenotypeHelper:
     @staticmethod
     def sanitize_table_cell(table, item):
         """Sanitizes manual edits in genotype/plant-number table cells."""
-        if item.column() == 0:
-            return
-
         raw_text = item.text()
         if " " in raw_text:
             table.blockSignals(True)

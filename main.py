@@ -870,10 +870,18 @@ class ChronoRootAnnotationSuite(QMainWindow):
         self._apply_plant_selection(uids, source="table", zoom=zoom)
 
     def update_overlay_labels(self):
+        # The table is the only place plant numbers and genotypes are edited, so mirror them
+        # into the model here; the canvas labels and the Annotation plant list read them back.
+        # Restricting to known uids keeps a stale table from wiping or resurrecting a plant.
+        known = set(self.global_model.plant_uids())
+        for uid, meta in self.panel_phenomics.capture_metadata().items():
+            if uid in known:
+                self.global_model.plants_meta[uid] = meta
         if hasattr(self.workspaces.canvas_review, "set_overlay_labels"):
             self.workspaces.canvas_review.set_overlay_labels(
                 self.panel_phenomics.build_overlay_labels()
             )
+        self.instance_list.populate_list()
 
     def _apply_global_label_preferences(self):
         show_num = self.chk_show_num_global.isChecked()

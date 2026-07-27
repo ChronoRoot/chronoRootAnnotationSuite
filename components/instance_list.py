@@ -102,6 +102,10 @@ class InstanceListPanel(QWidget):
                 item = self.list_instances.topLevelItem(i)
                 uid = item.data(0, Qt.UserRole)
                 area = self.model.areas.get(uid, 0)
+                # Plant numbers are edited in the metadata table, so refresh the label too.
+                number = (self.model.plants_meta.get(uid) or {}).get("plant_num") or uid
+                kind = "Seed" if self.model.is_seed_placeholder(uid) else "Plant"
+                item.setText(0, f"{kind} {number}")
                 item.setText(1, f"{area:,}")
                 item.setData(1, Qt.UserRole, area)
                 if uid in self.model.color_map:
@@ -121,7 +125,11 @@ class InstanceListPanel(QWidget):
         for uid in plant_uids:
             area = self.model.areas.get(uid, 0)
             is_seed = self.model.is_seed_placeholder(uid)
-            item = SortableTreeItem([f"Seed {uid}" if is_seed else f"Plant {uid}", f"{area:,}"])
+            number = (self.model.plants_meta.get(uid) or {}).get("plant_num") or uid
+            item = SortableTreeItem([
+                f"{'Seed' if is_seed else 'Plant'} {number}", f"{area:,}"
+            ])
+            # The uid stays the sort key, so rows keep their left-to-right plate order.
             item.setData(0, Qt.UserRole, uid)
             item.setData(1, Qt.UserRole, area)
             if is_seed:
