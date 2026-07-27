@@ -360,9 +360,10 @@ class PaintCanvas(BaseCanvas):
                     bg_rect.setBrush(QBrush(QColor(0, 0, 0, 160)))
                     bg_rect.setPen(QPen(Qt.NoPen))
                     
+                    x_pos = x + w / 2 - bg_rect.boundingRect().height() / 2
                     y_pos = y - bg_rect.boundingRect().height() - 2
-                    bg_rect.setPos(x, y_pos)
-                    text_item.setPos(x, y_pos)
+                    bg_rect.setPos(x_pos, y_pos)
+                    text_item.setPos(x_pos, y_pos)
                     
                     self.bbox_group.addToGroup(bg_rect)
                     self.bbox_group.addToGroup(text_item)
