@@ -12,7 +12,7 @@ from PyQt5.QtWidgets import (
     QGroupBox, QTreeWidget, QTreeWidgetItem,
     QHeaderView, QAbstractItemView, QRadioButton, QButtonGroup,
     QTextEdit, QDoubleSpinBox, QStackedWidget, QListWidget,
-    QListWidgetItem, QSizePolicy,
+    QListWidgetItem, QSizePolicy, QCheckBox,
 )
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QFontMetrics
@@ -39,7 +39,14 @@ METRIC_MAPPING = {
     "aspect_ratio": "Aspect Ratio (H/W)",
     "tip_angle_deg": "Mean Tip Angle (°)",
     "emergence_angle_deg": "Mean Emergence Angle (°)",
+    "germinated": "Germination (0/1)",
 }
+
+# Per-plant 0/1 flag: its mean over any group is the germination rate.
+GERMINATION_METRIC = METRIC_MAPPING["germinated"]
+
+# Root topology needed by the qualitative atlas. Not plottable, not written to CSV.
+ATLAS_COLS = ["hull_pts", "ini_pos", "ftip_pos"]
 
 PLOT_TYPES = [
     "Box Plot",
@@ -378,7 +385,8 @@ def export_report_bundle(target_dir, df, report_queue, color_maps):
     """File export only. Safe to run off the UI thread."""
     from matplotlib.figure import Figure
 
-    df.to_csv(os.path.join(target_dir, "Master_Aggregated_Data.csv"), index=False)
+    csv_df = df.drop(columns=[c for c in ATLAS_COLS if c in df.columns])
+    csv_df.to_csv(os.path.join(target_dir, "Master_Aggregated_Data.csv"), index=False)
 
     fig_dir = os.path.join(target_dir, "Figures")
     os.makedirs(fig_dir, exist_ok=True)
@@ -735,11 +743,19 @@ class ComparisonReportTab(QWidget):
         self.cb_hue.setCurrentText("genotype")
         self.cb_hue.currentIndexChanged.connect(self._on_plot_settings_changed)
 
+        self.chk_hide_nongerm = QCheckBox("Hide non-germinated plants")
+        self.chk_hide_nongerm.setToolTip(
+            "Leave out plants recorded as non-germinated, whose traits are all 0."
+        )
+        self.chk_hide_nongerm.setChecked(True)
+        self.chk_hide_nongerm.toggled.connect(self._on_plot_settings_changed)
+
         plot_form.addRow("Plot Type:", self.cb_plot_type)
         plot_form.addRow("Line Error Bars:", self.cb_error_bar)
         plot_form.addRow("Y-Axis (Metric):", self.cb_y_metric)
         plot_form.addRow("X-Axis (Group):", self.cb_x_axis)
         plot_form.addRow("Hue (Color):", self.cb_hue)
+        plot_form.addRow(self.chk_hide_nongerm)
         controls_layout.addWidget(plot_group)
 
         self.qual_group = QGroupBox("Atlas Columns")
@@ -943,12 +959,11 @@ class ComparisonReportTab(QWidget):
         )
 
     def _count_compare_groups(self):
-        if self.df.empty:
-            return 0
+        active = self._active_df()
         col = self.cb_stat_compare.currentText()
-        if col not in self.df.columns:
+        if active.empty or col not in active.columns:
             return 0
-        return self.df[col].dropna().nunique()
+        return active[col].dropna().nunique()
 
     def _update_test_hint(self):
         if self._is_qualitative_plot():
@@ -1023,7 +1038,18 @@ class ComparisonReportTab(QWidget):
         self.cb_stat_and_within.blockSignals(False)
         self._on_stat_settings_changed()
 
+    def _sync_germination_filter_state(self):
+        """Germination is computed from the non-germinated rows, so hiding them is not offered."""
+        plotting_germination = self._germination_selected()
+        self.chk_hide_nongerm.setEnabled(not plotting_germination)
+        self.chk_hide_nongerm.setToolTip(
+            "Not available while plotting germination: the rate needs every seed."
+            if plotting_germination else
+            "Leave out plants recorded as non-germinated, whose traits are all 0."
+        )
+
     def _on_plot_settings_changed(self):
+        self._sync_germination_filter_state()
         self.update_plot()
 
     def _on_stat_settings_changed(self):
@@ -1049,14 +1075,28 @@ class ComparisonReportTab(QWidget):
             self._update_test_hint()
         self.update_plot()
 
-    def _get_clean_dataframe(self):
+    def _germination_selected(self):
+        """True while the germination metric is plotted: it needs the non-germinated rows."""
+        return self.cb_y_metric.currentText() == GERMINATION_METRIC
+
+    def _active_df(self):
+        """Rows feeding the plot, the statistics and the exports."""
+        hide = self.chk_hide_nongerm.isChecked() and not self._germination_selected()
+        if hide and GERMINATION_METRIC in self.df.columns:
+            return self.df[self.df[GERMINATION_METRIC] != 0]
+        return self.df
+
+    def _get_clean_dataframe(self, keep_geometry=False):
         meta_cols = [
             "plate_id", "condition", "timepoint", "genotype", "plant_num",
             "relative_folder", "source_file",
         ]
         metric_cols = list(METRIC_MAPPING.values())
-        desired_cols = [c for c in meta_cols + metric_cols if c in self.df.columns]
-        return self.df[desired_cols].copy()
+        if keep_geometry:
+            metric_cols += ATLAS_COLS
+        active = self._active_df()
+        desired_cols = [c for c in meta_cols + metric_cols if c in active.columns]
+        return active[desired_cols].copy()
 
     def _set_data_loaded_state(self, enabled):
         self.btn_export_csv.setEnabled(enabled)
@@ -1103,12 +1143,9 @@ class ComparisonReportTab(QWidget):
         self.report_queue = []
         self._refresh_report_queue_list()
 
-        numeric_metrics = []
-        for col in self.df.columns:
-            if pd.api.types.is_numeric_dtype(self.df[col]) and col not in [
-                "uid", "plant_num", "scale_cm_px",
-            ]:
-                numeric_metrics.append(col)
+        # Whitelist: only defined traits are plottable, so stray columns in older or
+        # hand-edited metrics files (identifiers, graph settings) never reach the dropdown.
+        numeric_metrics = [name for name in METRIC_MAPPING.values() if name in self.df.columns]
 
         for col in AXIS_OPTIONS:
             if col in self.df.columns:
@@ -1127,6 +1164,7 @@ class ComparisonReportTab(QWidget):
 
         self._refresh_stratify_options()
         self._update_test_hint()
+        self._sync_germination_filter_state()
         self._set_data_loaded_state(True)
         self.update_plot()
 
@@ -1142,7 +1180,7 @@ class ComparisonReportTab(QWidget):
     def _run_stats_for_metric(self, metric):
         settings = self._current_stat_settings()
         return stats_module.run_comparisons_structured(
-            self.df,
+            self._active_df(),
             metric,
             settings["stat_compare"],
             within_col=settings["stat_within"],
@@ -1250,7 +1288,7 @@ class ComparisonReportTab(QWidget):
     def _render_to_figure(self, figure, plot_type, y_var=None, x_var=None, hue_var=None,
                           error_bar=None, col_group="condition"):
         render_report_figure(
-            figure, self.df, self.color_maps, plot_type,
+            figure, self._active_df(), self.color_maps, plot_type,
             y_var=y_var, x_var=x_var, hue_var=hue_var,
             error_bar=error_bar, col_group=col_group,
         )
@@ -1317,7 +1355,8 @@ class ComparisonReportTab(QWidget):
         if not target_dir:
             return
 
-        df = self._get_clean_dataframe().copy()
+        # Keep the root topology so the qualitative atlas can be redrawn off the UI thread.
+        df = self._get_clean_dataframe(keep_geometry=True)
         queue = copy.deepcopy(self.report_queue)
         color_maps = copy.deepcopy(self.color_maps)
 

@@ -14,6 +14,7 @@ METRICS_SCALAR_KEYS = (
     "uid",
     "genotype",
     "plant_num",
+    "germinated",
     "mr_length_mm",
     "lr_length_mm",
     "tr_length_mm",
@@ -35,7 +36,25 @@ METRICS_SCALAR_KEYS = (
 
 def plant_scalar_record(data):
     """Serializable metrics-only plant record for session cache and JSON export."""
-    return {k: data[k] for k in METRICS_SCALAR_KEYS if k in data}
+    record = {k: data[k] for k in METRICS_SCALAR_KEYS if k in data}
+    record.setdefault("germinated", 1)
+    return record
+
+
+def zero_plant_record(uid, genotype, plant_num):
+    """Record for a plant that never germinated: identifiers kept, every trait at 0."""
+    record = dict.fromkeys(METRICS_SCALAR_KEYS, 0)
+    record.update({
+        "uid": uid,
+        "genotype": genotype,
+        "plant_num": plant_num,
+        "germinated": 0,
+        # Empty geometry keeps the plant out of the convex hull atlas.
+        "hull_pts": [],
+        "ini_pos": [],
+        "ftip_pos": [],
+    })
+    return record
 
 
 def scalar_metrics_dict(full_results):
@@ -164,6 +183,12 @@ def extract_plate_metrics(model, plants_meta, cm_per_px, prune_iters=5):
     results = {}
     for p_meta in plants_meta:
         uid = p_meta["uid"]
+        # Ignored plants (contamination, damage, ...) are left out of the results entirely.
+        if p_meta.get("ignore", False):
+            continue
+        if not p_meta.get("germinated", True):
+            results[uid] = zero_plant_record(uid, p_meta["genotype"], p_meta["plant_num"])
+            continue
         full = analyze_single_plant(
             model, uid, p_meta["genotype"], p_meta["plant_num"], cm_per_px, prune_iters
         )
@@ -292,10 +317,14 @@ def load_measurements_from_metrics_json(metrics_path, current_uids, plants_metad
 def export_rsml_and_json(out_dir, base_name, plate_meta, measurements_dict):
     master_rsml = ET.Element("rsml")
 
-    first_uid = list(measurements_dict.keys())[0] if measurements_dict else None
-
-    if first_uid and "metadata_xml" in measurements_dict[first_uid]:
-        master_rsml.append(measurements_dict[first_uid]["metadata_xml"])
+    # Non-germinated plants carry no RSML, so take the header from the first
+    # measured plant rather than simply the first record.
+    header = next(
+        (d["metadata_xml"] for d in measurements_dict.values() if d.get("metadata_xml") is not None),
+        None,
+    )
+    if header is not None:
+        master_rsml.append(header)
     else:
         metadata = ET.SubElement(master_rsml, "metadata")
         ET.SubElement(metadata, "version").text = "1.0"

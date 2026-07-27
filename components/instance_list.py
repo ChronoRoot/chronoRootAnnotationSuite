@@ -87,9 +87,10 @@ class InstanceListPanel(QWidget):
         self.btn_del.setEnabled(enabled)
 
     def populate_list(self):
-        self.lbl_instance_count.setText(f"<b>Plants ({len(self.model.masks)} total):</b>")
+        plant_uids = self.model.plant_uids()
+        self.lbl_instance_count.setText(f"<b>Plants ({len(plant_uids)} total):</b>")
 
-        current_uids = set(self.model.masks.keys())
+        current_uids = set(plant_uids)
         existing_uids = {
             self.list_instances.topLevelItem(i).data(0, Qt.UserRole)
             for i in range(self.list_instances.topLevelItemCount())
@@ -117,11 +118,15 @@ class InstanceListPanel(QWidget):
         self.list_instances.setSortingEnabled(False)
         self.list_instances.clear()
 
-        for uid in sorted(self.model.masks.keys()):
+        for uid in plant_uids:
             area = self.model.areas.get(uid, 0)
-            item = SortableTreeItem([f"Plant {uid}", f"{area:,}"])
+            is_seed = self.model.is_seed_placeholder(uid)
+            item = SortableTreeItem([f"Seed {uid}" if is_seed else f"Plant {uid}", f"{area:,}"])
             item.setData(0, Qt.UserRole, uid)
             item.setData(1, Qt.UserRole, area)
+            if is_seed:
+                item.setForeground(0, QColor("#888888"))
+                item.setForeground(1, QColor("#888888"))
 
             if uid in self.model.color_map:
                 c = self.model.color_map[uid]

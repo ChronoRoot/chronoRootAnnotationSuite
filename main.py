@@ -545,10 +545,11 @@ class ChronoRootAnnotationSuite(QMainWindow):
         self.panel_phenomics.calibration_changed.connect(self._on_metadata_dirty)
         self.panel_phenomics.overlay_labels_changed.connect(self.update_overlay_labels)
         self.panel_phenomics.metadata_dirty_changed.connect(self._on_metadata_dirty)
-        self.panel_phenomics.auto_renumber_requested.connect(self._on_auto_renumber_plants)
+        self.panel_phenomics.add_non_germinated_requested.connect(self._on_add_non_germinated)
 
         if hasattr(self.workspaces.canvas_review, "distance_measured"):
             self.workspaces.canvas_review.distance_measured.connect(self.on_distance_measured)
+        self.workspaces.canvas_review.point_picked.connect(self._on_seed_point_picked)
 
         self.workspaces.inspector_tab.go_to_metadata_requested.connect(
             self._go_to_plant_metadata
@@ -589,6 +590,9 @@ class ChronoRootAnnotationSuite(QMainWindow):
         self._sync_workspace_ui(index)
 
     def _sync_workspace_ui(self, index):
+        if index != 0:
+            # Leaving Annotation abandons a seed placement that was never clicked.
+            self.panel_phenomics.set_seed_mode(False)
         if index in [0, 1, 2, 3]:
             self.ensure_active_plant()
 
@@ -657,19 +661,35 @@ class ChronoRootAnnotationSuite(QMainWindow):
                     uid,
                 )
 
-    def _on_auto_renumber_plants(self):
-        if not self.global_model.masks:
+    def _on_add_non_germinated(self, checked):
+        """Arm (or cancel) the one-click seed placement on the annotation canvas."""
+        if not checked or self.global_model.raw_image is None:
+            self.panel_phenomics.set_seed_mode(False)
+            self.panel_review.force_mode("SELECT")
             return
+
+        # Show the canvas first: switching workspace resets the tool to SELECT.
+        self.workspaces.setCurrentIndex(0)
+        self.panel_review.force_mode("SEED")
+
+    def _on_seed_point_picked(self, x, y):
+        """One click placed a seed that never germinated: record it and leave seed mode."""
+        if self.panel_review.canvas_tab.current_mode != "SEED":
+            return
+
+        # Keep the table edits the user already made before the new row appears.
         self.global_model.set_task_metadata(
             plants_meta=self.panel_phenomics.capture_metadata(),
         )
-        self.global_model.sync_plant_numbers_to_uids(force=True)
-        self.panel_phenomics.apply_plant_numbers(self.global_model.get_plants_metadata())
-        self.metadata_dirty = True
+        # The data callback rebuilds the metadata table with the new row.
+        self.global_model.add_seed_marker(x, y)
+        self.panel_phenomics.set_seed_mode(False)
+        self.panel_review.force_mode("SELECT")
         self.update_overlay_labels()
+        self.metadata_dirty = True
 
     def _has_open_task(self):
-        return bool(self.current_file_path and self.global_model.masks)
+        return bool(self.current_file_path and self.global_model.plant_uids())
 
     def _is_task_dirty(self):
         if not self._has_open_task():
@@ -750,9 +770,10 @@ class ChronoRootAnnotationSuite(QMainWindow):
             self.expand_middle_panel()
 
     def ensure_active_plant(self):
-        """Guarantee a valid active plant when masks exist but selection is empty or stale."""
+        """Guarantee a valid active plant when plants exist but selection is empty or stale."""
         model = self.global_model
-        if not model.masks:
+        valid_uids = set(model.plant_uids())
+        if not valid_uids:
             if model.selected_uids:
                 self._selection_sync_guard = True
                 model.set_selection([])
@@ -760,7 +781,6 @@ class ChronoRootAnnotationSuite(QMainWindow):
                 self._selection_sync_guard = False
             return
 
-        valid_uids = set(model.masks.keys())
         selected = [uid for uid in model.selected_uids if uid in valid_uids]
 
         if not selected:
@@ -774,9 +794,8 @@ class ChronoRootAnnotationSuite(QMainWindow):
         if self._selection_sync_guard:
             return
 
-        valid_uids = [uid for uid in uids if uid in self.global_model.masks]
-        if uids and not valid_uids:
-            valid_uids = []
+        known_uids = set(self.global_model.plant_uids())
+        valid_uids = [uid for uid in uids if uid in known_uids]
 
         self._selection_sync_guard = True
         self.global_model.set_selection(valid_uids)
@@ -790,8 +809,8 @@ class ChronoRootAnnotationSuite(QMainWindow):
         self._selection_sync_guard = False
 
     def _sync_metadata_table_with_model(self, uid_mapping=None):
-        """Rebuild plant metadata table when mask topology changes (new/merge/delete/split)."""
-        model_uids = set(self.global_model.masks.keys())
+        """Rebuild plant metadata table when the plant set changes (new/merge/delete/split/seed)."""
+        model_uids = set(self.global_model.plant_uids())
         table_uids = self.panel_phenomics.get_table_uids()
         if model_uids == table_uids and self._is_identity_uid_mapping(uid_mapping):
             return
@@ -802,6 +821,9 @@ class ChronoRootAnnotationSuite(QMainWindow):
         preserved = self.panel_phenomics.capture_metadata()
         if uid_mapping:
             preserved = self.panel_phenomics.remap_metadata(preserved, uid_mapping)
+        # The table wins for plants it knows; the model supplies plants added since the
+        # last rebuild, such as a freshly placed non-germinated seed.
+        preserved = {**self.global_model.get_plants_metadata(), **preserved}
 
         if model_uids:
             self.panel_phenomics.populate_table(
@@ -1098,9 +1120,10 @@ class ChronoRootAnnotationSuite(QMainWindow):
         self.workspaces.inspector_tab.show_no_measurements_state()
 
         self.panel_phenomics.restore_plate_meta(self.global_model.get_plate_meta())
+        self.panel_phenomics.current_task_dir = self.current_task_path or ""
 
-        if self.global_model.masks:
-            uids = list(self.global_model.masks.keys())
+        uids = self.global_model.plant_uids()
+        if uids:
             self.panel_phenomics.populate_table(
                 uids,
                 self.config.get("saved_genotypes", []),
@@ -1181,7 +1204,7 @@ class ChronoRootAnnotationSuite(QMainWindow):
         try:
             restored, warnings = load_measurements_from_metrics_json(
                 metrics_path,
-                self.global_model.masks.keys(),
+                self.global_model.plant_uids(),
                 self.global_model.get_plants_metadata(),
             )
         except (OSError, json.JSONDecodeError, ValueError) as exc:
@@ -1272,7 +1295,7 @@ class ChronoRootAnnotationSuite(QMainWindow):
             self.browser.update_file_status_in_cache(
                 self.current_file_path,
                 new_status=ann_display,
-                new_plant_count=len(self.global_model.masks),
+                new_plant_count=len(self.global_model.plant_uids()),
                 new_analysis_status=self._current_analysis_status_for_cache(),
             )
 
@@ -1287,15 +1310,9 @@ class ChronoRootAnnotationSuite(QMainWindow):
         elif self._pending_measure is not None:
             _, cm_per_px = self._pending_measure
             self._pending_measure = None
-            plants_meta = [
-                {
-                    "uid": uid,
-                    "genotype": meta.get("genotype", "Unknown"),
-                    "plant_num": meta.get("plant_num", str(uid)),
-                }
-                for uid, meta in self.panel_phenomics.capture_metadata().items()
-            ]
-            self._start_measure_worker(plants_meta, cm_per_px)
+            self._start_measure_worker(
+                self.panel_phenomics.build_plants_meta_list(), cm_per_px
+            )
 
     # --- Analysis Engine ---
     def run_measurements(self, plants_meta, cm_per_px):
@@ -1369,10 +1386,12 @@ class ChronoRootAnnotationSuite(QMainWindow):
         else:
             self.panel_phenomics.current_cm_per_px = live_cm_per_px
 
-        viz_data = analyze_single_plant(
-            self.global_model, uid, genotype, plant_num, live_cm_per_px,
-            self.workspaces.canvas_graph.p_prune,
-        )
+        viz_data = None
+        if uid in self.global_model.masks and not plant_meta.get("ignore", False):
+            viz_data = analyze_single_plant(
+                self.global_model, uid, genotype, plant_num, live_cm_per_px,
+                self.workspaces.canvas_graph.p_prune,
+            )
 
         self.workspaces.inspector_tab.update_view(
             uid,
@@ -1452,14 +1471,7 @@ class ChronoRootAnnotationSuite(QMainWindow):
         cm_per_px = plate_meta.get("scale_cm_px")
         if cm_per_px is None:
             cm_per_px = self.panel_phenomics.get_cm_per_px(shape)
-        plants_meta = []
-        for row_meta in self.panel_phenomics.capture_metadata().items():
-            uid, meta = row_meta
-            plants_meta.append({
-                "uid": uid,
-                "genotype": meta.get("genotype", "Unknown"),
-                "plant_num": meta.get("plant_num", str(uid)),
-            })
+        plants_meta = self.panel_phenomics.build_plants_meta_list()
 
         prune_iters = self.workspaces.canvas_graph.p_prune
         self.show_loading("Exporting analysis…")

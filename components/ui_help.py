@@ -16,7 +16,7 @@ HELP_WORKFLOW = """<b>How to use this app</b><br><br>
 • <b>Root Tracing Check</b> — confirm skeleton and main-root path per plant.<br><br>
 <b>Traits path</b><br>
 • <b>Plant Metadata</b> — plate fields, scale, genotypes.<br>
-• <b>Measure</b>, then <b>Export</b>.<br>
+• <b>Run Measurements</b>, then <b>Save Results</b>.<br>
 • <b>Phenomics Inspector</b> — review per plant.<br>
 • <b>Batch Reports</b> — compare plates across an experiment."""
 
@@ -75,7 +75,7 @@ Select each plant and confirm skeleton and main-root path look correct.<br><br>
 <b>Graph Settings</b><br>
 • <b>Plate Prune Iterations</b> — skeleton spur removal (DPI/resolution dependent). This is an
   interface setting: tune it on a representative plant here and the same value is used for the
-  preview and for full-plate Measure and export. Lower pruning if real lateral roots disappear;
+  preview and for full-plate measurements and export. Lower pruning if real lateral roots disappear;
   raise it if skeleton noise or spurs remain after skeletonization.<br>
 • <b>Dilation Base Thick</b> — thickness when applying graph colors to the mask.<br><br>
 
@@ -102,10 +102,19 @@ or Custom Ratio (px/cm).<br>
 • <b>Check scale on image</b> — verify the ruler overlay.<br><br>
 
 <b>Genotype List…</b> — manage saved genotypes.<br>
-<b>Auto Renumber</b> — reorder plant numbers left-to-right.<br><br>
+<b>+ Non-Germinated</b> — one click on the seed position of a plant that never grew.
+It records only that position, never an annotation to paint, and keeps its place in the
+left-to-right order. Its row is added unchecked in the <b>Germinated</b> column so it
+exports with every trait at 0.<br>
+<b>Ignore</b> — check for a plant that did germinate but cannot be analyzed, for example
+because of contamination. Ignored plants are left out of the results entirely, so they
+count neither as germinated nor as non-germinated.<br>
+<b>Import / Export Genotypes…</b> — a plate file mapping each plant number to a genotype
+name, saved as <i>plate id</i>.json. Plant numbers in the file that match no plant on the
+plate are reported so you can add them first.<br><br>
 
-Click <b>Measure</b> to compute traits (plate should be finished first).<br>
-Click <b>Export</b> to write trait outputs for this plate."""
+Click <b>Run Measurements</b> to compute traits (plate should be finished first).<br>
+Click <b>Save Results</b> to write trait outputs for this plate."""
 
 HELP_INSPECTOR = """<b>Phenomics review</b><br><br>
 
@@ -135,7 +144,11 @@ HELP_BATCH = """<b>Batch Reports</b><br><br>
 <b>Plot</b><br>
 • <b>Plot Type</b>, <b>Line Error Bars</b>, <b>Y-Axis (Metric)</b>,
 <b>X-Axis (Group)</b>, <b>Hue (Color)</b>.<br>
-• Qualitative Atlas uses <b>Atlas Columns</b> (Condition, Genotype, or Condition | Genotype).<br><br>
+• Qualitative Atlas uses <b>Atlas Columns</b> (Condition, Genotype, or Condition | Genotype).<br>
+• <b>Hide non-germinated plants</b> — leave out plants whose traits are all 0.<br>
+• <b>Germination (0/1)</b> — one metric per plant, 0 or 1, so its mean is the germination
+rate. Plot it against timepoint to follow germination over time. The hide option is
+switched off for it, since the rate needs every seed.<br><br>
 
 <b>Statistics</b><br>
 • <b>Compare groups by:</b> main factor (e.g. genotype).<br>

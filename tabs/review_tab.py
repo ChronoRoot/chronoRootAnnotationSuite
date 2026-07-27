@@ -84,6 +84,7 @@ class PaintCanvas(BaseCanvas):
     on_marquee_select = pyqtSignal(QRectF, bool) # --- NEW: Drag & Select Signal ---
     on_split_finish = pyqtSignal(list)
     distance_measured = pyqtSignal(float)  
+    point_picked = pyqtSignal(int, int)
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -127,7 +128,7 @@ class PaintCanvas(BaseCanvas):
         elif mode == "SPLIT":
             self.setCursor(Qt.PointingHandCursor)
             if self.brush_cursor: self.brush_cursor.setVisible(False)
-        elif mode == "RULER":
+        elif mode in ["RULER", "SEED"]:
             self.setCursor(Qt.CrossCursor)
             if self.brush_cursor: self.brush_cursor.setVisible(False)
             
@@ -182,6 +183,10 @@ class PaintCanvas(BaseCanvas):
                     line = self.scene.addLine(last_p.x(), last_p.y(), sp.x(), sp.y(), QPen(Qt.red, 4))
                     self.poly_lines.append(line)
                     
+        elif self.mode == "SEED":
+            if event.button() == Qt.LeftButton:
+                self.point_picked.emit(int(sp.x()), int(sp.y()))
+
         elif self.mode == "RULER":
             if event.button() == Qt.LeftButton:
                 self.clear_poly_visuals() 
@@ -365,6 +370,7 @@ class PaintCanvas(BaseCanvas):
 
 class ReviewCanvasTab(QWidget):
     distance_measured = pyqtSignal(float)  
+    point_picked = pyqtSignal(int, int)
     
     def __init__(self, shared_model):
         super().__init__()
@@ -406,6 +412,7 @@ class ReviewCanvasTab(QWidget):
         self.canvas.on_marquee_select.connect(self.handle_marquee_select) # Hooked up Drag
         
         self.canvas.distance_measured.connect(self.distance_measured.emit)
+        self.canvas.point_picked.connect(self.point_picked.emit)
         
         rl.addWidget(self.canvas)
         
@@ -524,8 +531,8 @@ class ReviewCanvasTab(QWidget):
             self.canvas.update_overlays(self.model.bboxes, self.model.color_map, self.overlay_labels, 
                                         self.show_bboxes, self.show_labels, s_num, s_geno, g_fmt)
 
-        # 2. SELECT MODE
-        elif self.current_mode == "SELECT":
+        # 2. SELECT MODE (SEED keeps the same view so seeds can be placed between plants)
+        elif self.current_mode in ["SELECT", "SEED"]:
             valid_selection = [uid for uid in self.model.selected_uids if uid in self.model.masks]
             overlay_data = self.model.get_overlay_data(selected_ids=valid_selection, opacity=self.opacity)
             overlay_pixmap = _bytes_to_pixmap(overlay_data, is_rgba=True)
@@ -595,6 +602,10 @@ class ReviewCanvasTab(QWidget):
         elif mode == "RULER":
             self.lbl_info.setText(
                 "Ruler: click and drag to measure. Set calibration in Plant Metadata for cm."
+            )
+        elif mode == "SEED":
+            self.lbl_info.setText(
+                "Non-germinated seed: click its position on the plate. One click places one seed."
             )
 
     def zoom_to_plant(self, uid):

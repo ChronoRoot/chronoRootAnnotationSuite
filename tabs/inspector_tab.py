@@ -63,7 +63,7 @@ class PhenomicsInspectorTab(QWidget):
         self.lbl_empty = QLabel(
             "<b>No measurements yet.</b><br><br>"
             "Open <b>Plant Metadata</b>, set scale and genotypes, "
-            "then click <b>Measure</b>."
+            "then click <b>Run Measurements</b>."
         )
         self.lbl_empty.setWordWrap(True)
         self.lbl_empty.setAlignment(Qt.AlignCenter)
@@ -71,7 +71,7 @@ class PhenomicsInspectorTab(QWidget):
         empty_layout.addWidget(self.lbl_empty)
 
         self.btn_run_analysis = QPushButton("Go to Plant Metadata")
-        self.btn_run_analysis.setToolTip("Open Plant Metadata to set scale, genotypes, and run Measure.")
+        self.btn_run_analysis.setToolTip("Open Plant Metadata to set scale, genotypes, and run measurements.")
         self.btn_run_analysis.setStyleSheet(
             "background-color: #007bff; color: white; font-weight: bold; padding: 12px;"
         )

@@ -12,6 +12,8 @@ LINE_THICKNESS = 1
 LOGICAL_THICKNESS = 2
 MAX_HISTORY = 10
 SCHEMA_VERSION = 1
+# Half-size of the box drawn around a seed placeholder, which has no mask of its own.
+SEED_MARKER_RADIUS = 8
 
 ANNOTATION_STATUSES = ("without_annotation", "pending", "in_progress", "completed")
 ANALYSIS_STATUSES = ("not_applicable", "not_analyzed", "analyzed")
@@ -59,6 +61,25 @@ def analysis_status_display(status):
         "analyzed": "Analyzed",
     }
     return mapping.get(status, "—")
+
+
+# --- Per-plant metadata ---
+def normalize_plant_meta(meta, uid):
+    """
+    Canonical per-plant record used by the model, the metadata table and the saved JSON.
+    A seed placeholder has `germinated` False and a `seed_pos`: it holds a plate position
+    so plant numbering stays intact, but it has no mask and no root system to measure.
+    `ignore` marks a plant that did germinate but cannot be analyzed (e.g. contamination).
+    """
+    meta = meta or {}
+    seed_pos = meta.get("seed_pos")
+    return {
+        "genotype": meta.get("genotype", ""),
+        "plant_num": str(meta.get("plant_num", "")).strip() or str(uid),
+        "germinated": bool(meta.get("germinated", True)),
+        "ignore": bool(meta.get("ignore", False)),
+        "seed_pos": [int(seed_pos[0]), int(seed_pos[1])] if seed_pos else None,
+    }
 
 
 # --- Analysis export paths (filesystem only; not stored in annotation JSON) ---
@@ -312,15 +333,51 @@ class PlantImageModel:
         self.active_uid = list(self.selected_uids)[0] if len(self.selected_uids) == 1 else None
         self._notify_selection_changed()
 
+    # --- Plant registry ---
+    def plant_uids(self):
+        """Every plant on the plate: painted masks plus seed-only placeholders."""
+        seeds = {
+            uid for uid, meta in self.plants_meta.items()
+            if meta.get("seed_pos") and uid not in self.masks
+        }
+        return sorted(set(self.masks) | seeds)
+
+    def is_seed_placeholder(self, uid):
+        """True for a plant that only holds a plate position (no mask to measure)."""
+        return uid not in self.masks and bool((self.plants_meta.get(uid) or {}).get("seed_pos"))
+
+    def _plant_bbox(self, uid):
+        """Bbox from the plant mask, or a fixed marker box for a seed placeholder."""
+        mask = self.masks.get(uid)
+        if mask is not None:
+            coords = cv2.findNonZero(mask)
+            return cv2.boundingRect(coords) if coords is not None else None
+
+        pos = (self.plants_meta.get(uid) or {}).get("seed_pos")
+        if not pos:
+            return None
+        x, y = int(pos[0]), int(pos[1])
+        r = SEED_MARKER_RADIUS
+        return (x - r, y - r, 2 * r, 2 * r)
+
+    def add_seed_marker(self, x, y):
+        """Register a seed that never germinated at (x, y). No mask, no undo state."""
+        uid = self.prepare_new_uid()
+        self.max_id = max(self.max_id, uid)
+        self.color_map[uid] = HIGH_CONTRAST_COLORS[uid % len(HIGH_CONTRAST_COLORS)]
+        self.plants_meta[uid] = normalize_plant_meta(
+            {"germinated": False, "seed_pos": [x, y]}, uid
+        )
+        self.update_metadata_for_uid(uid)
+        self.dirty = True
+        return uid
+
     # --- Task metadata ---
     def set_task_metadata(self, plants_meta=None, plate_meta=None):
         """Inject per-plant and plate metadata before save."""
         if plants_meta is not None:
             self.plants_meta = {
-                int(uid): {
-                    "genotype": meta.get("genotype", ""),
-                    "plant_num": str(meta.get("plant_num", "")).strip() or str(uid),
-                }
+                int(uid): normalize_plant_meta(meta, uid)
                 for uid, meta in plants_meta.items()
             }
         if plate_meta is not None:
@@ -328,24 +385,16 @@ class PlantImageModel:
 
     def get_plants_metadata(self):
         return {
-            uid: {
-                "genotype": meta.get("genotype", ""),
-                "plant_num": str(meta.get("plant_num", "")).strip() or str(uid),
-            }
+            uid: normalize_plant_meta(meta, uid)
             for uid, meta in self.plants_meta.items()
         }
 
-    def sync_plant_numbers_to_uids(self, force=False):
-        """Default Plant # to UID; force=True overwrites user edits (auto renumber)."""
-        for uid in self.masks:
-            if force:
-                entry = self.plants_meta.setdefault(uid, {"genotype": "", "plant_num": str(uid)})
+    def sync_plant_numbers_to_uids(self):
+        """Give every plant a default Plant # equal to its UID, keeping user edits."""
+        for uid in self.plant_uids():
+            entry = self.plants_meta.setdefault(uid, normalize_plant_meta({}, uid))
+            if not str(entry.get("plant_num", "")).strip():
                 entry["plant_num"] = str(uid)
-                continue
-            if uid not in self.plants_meta:
-                self.plants_meta[uid] = {"genotype": "", "plant_num": str(uid)}
-            elif not str(self.plants_meta[uid].get("plant_num", "")).strip():
-                self.plants_meta[uid]["plant_num"] = str(uid)
 
     def get_plate_meta(self):
         return dict(self.plate_meta)
@@ -364,10 +413,7 @@ class PlantImageModel:
         remapped = {}
         for old_uid, meta in self.plants_meta.items():
             new_uid = mapping.get(old_uid, old_uid)
-            remapped[new_uid] = {
-                "genotype": meta.get("genotype", ""),
-                "plant_num": str(meta.get("plant_num", "")).strip() or str(new_uid),
-            }
+            remapped[new_uid] = normalize_plant_meta(meta, new_uid)
         self.plants_meta = remapped
 
     def _remap_uid_collections(self, mapping):
@@ -378,9 +424,9 @@ class PlantImageModel:
         new_masks, new_bboxes, new_areas, new_color_map, new_class_patches = {}, {}, {}, {}, {}
 
         for old_uid, new_uid in mapping.items():
-            if old_uid not in self.masks:
-                continue
-            new_masks[new_uid] = self.masks[old_uid]
+            # Seed placeholders have no mask but must keep their box and metadata.
+            if old_uid in self.masks:
+                new_masks[new_uid] = self.masks[old_uid]
             if old_uid in self.bboxes:
                 new_bboxes[new_uid] = self.bboxes[old_uid]
             if old_uid in self.areas:
@@ -394,7 +440,7 @@ class PlantImageModel:
         self.areas = new_areas
         self.color_map = new_color_map
         self.class_patches = new_class_patches
-        self.max_id = len(new_masks)
+        self.max_id = max(mapping.values())
         self.history.clear()
         self._remap_plants_meta(mapping)
 
@@ -574,10 +620,11 @@ class PlantImageModel:
             self.class_patches.pop(uid, None)
         # ---------------------------------------------------------------------
 
-        self.max_id = max(self.masks.keys()) if self.masks else 0
+        uids = self.plant_uids()
+        self.max_id = max(uids) if uids else 0
         self.regenerate_metadata()
         self.sort_instances_spatially(row_tolerance=250)
-        self.sync_plant_numbers_to_uids(force=False)
+        self.sync_plant_numbers_to_uids()
         
         # 3. Warm up class patches for faster GUI response
         for uid in self.masks.keys():
@@ -618,7 +665,7 @@ class PlantImageModel:
     
     def reindex_instances(self):
         """Remaps all UIDs to be strictly continuous. Returns a mapping of {old_uid: new_uid}."""
-        sorted_uids = sorted(self.masks.keys())
+        sorted_uids = self.plant_uids()
         if not sorted_uids:
             return {}
 
@@ -632,9 +679,10 @@ class PlantImageModel:
     def sort_instances_spatially(self, row_tolerance=250):
         """
         Sorts instances Left-to-Right, grouped by horizontal rows.
-        Returns mapping {old_uid: new_uid} (empty if no masks or already ordered).
+        Seed placeholders take part through their marker box, so they keep their slot.
+        Returns mapping {old_uid: new_uid} (empty if no plants or already ordered).
         """
-        if not self.masks:
+        if not self.bboxes:
             return {}
 
         centroids = []
@@ -675,7 +723,7 @@ class PlantImageModel:
     # --- Load / save (write) ---
     def save_current_task(self, task_path, base_name, mark_finished=False):
         """Writes current mask data to disk. Completely insulates GUI from JSON/NIfTI."""
-        if not self.masks: return False
+        if not self.plant_uids(): return False
 
         # 1. CLEANUP AND VALIDATE
         is_valid, bad_uid = self.clean_and_validate_masks()
@@ -687,7 +735,7 @@ class PlantImageModel:
 
         # 2. Spatially order UIDs (left-to-right rows); preserve user plant numbers
         mapping = self.sort_instances_spatially(row_tolerance=250)
-        self.sync_plant_numbers_to_uids(force=False)
+        self.sync_plant_numbers_to_uids()
 
         # 3. PROCEED WITH SAVING
         if mark_finished:
@@ -755,6 +803,11 @@ class PlantImageModel:
 
             for ann in data.get('annotations', []):
                 uid = int(ann['id'])
+                self.plants_meta[uid] = normalize_plant_meta(ann, uid)
+
+                # A seed placeholder stores only its position, so there is nothing to decode.
+                if "instance_rle" not in ann and not ann.get('segmentation'):
+                    continue
 
                 if "instance_rle" in ann:
                     mask = decode_rle(ann["instance_rle"])
@@ -765,13 +818,6 @@ class PlantImageModel:
                         cv2.fillPoly(mask, [poly], 1)
 
                 self.masks[uid] = mask
-
-                genotype = ann.get("genotype", "")
-                saved_num = str(ann.get("plant_num", "")).strip()
-                self.plants_meta[uid] = {
-                    "genotype": genotype,
-                    "plant_num": saved_num,
-                }
 
                 ys, xs = np.where(mask)
                 if len(xs) > 0 and "semantic_rle" in ann:
@@ -804,8 +850,16 @@ class PlantImageModel:
             "annotations": [],
         }
 
-        for uid in sorted(self.masks.keys()):
-            mask = self.masks[uid]
+        for uid in self.plant_uids():
+            plant_meta = normalize_plant_meta(self.plants_meta.get(uid), uid)
+            entry = {"id": int(uid), "image_id": 1, "category_id": 1, **plant_meta}
+
+            mask = self.masks.get(uid)
+            if mask is None:
+                # Seed placeholder: plate position only, no pixels to encode.
+                output["annotations"].append(entry)
+                continue
+
             if np.sum(mask) == 0:
                 continue
 
@@ -814,14 +868,8 @@ class PlantImageModel:
                 continue
 
             patch, _, _ = self._get_class_patch(uid)
-            plant_meta = self.plants_meta.get(uid, {})
-            plant_num = str(plant_meta.get("plant_num", "")).strip() or str(uid)
             output["annotations"].append({
-                "id": int(uid),
-                "image_id": 1,
-                "category_id": 1,
-                "genotype": plant_meta.get("genotype", ""),
-                "plant_num": plant_num,
+                **entry,
                 "instance_rle": encode_rle(mask),
                 "semantic_rle": encode_rle(patch),
                 "area": float(np.sum(mask)),
@@ -981,34 +1029,31 @@ class PlantImageModel:
             if 0 <= y < mask.shape[0] and 0 <= x < mask.shape[1] and mask[y, x] > 0: return uid
         return 0
 
-    def update_metadata_for_uid(self, uid):
-        if uid not in self.masks:
+    def _refresh_bbox_for_uid(self, uid):
+        """Recompute box, area and colour for one plant. Returns False if it has nothing left."""
+        box = self._plant_bbox(uid)
+        if box is None:
             self.bboxes.pop(uid, None)
             self.areas.pop(uid, None)
-            return
+            return False
 
-        coords = cv2.findNonZero(self.masks[uid])
-        if coords is not None:
-            self.bboxes[uid] = cv2.boundingRect(coords)
-            self.areas[uid] = int(np.sum(self.masks[uid] > 0)) # Compute total pixel area
-            if uid not in self.color_map:
-                self.color_map[uid] = HIGH_CONTRAST_COLORS[uid % len(HIGH_CONTRAST_COLORS)]
-        else:
-            self.bboxes.pop(uid, None)
-            self.areas.pop(uid, None)
+        mask = self.masks.get(uid)
+        self.bboxes[uid] = box
+        self.areas[uid] = int(np.sum(mask > 0)) if mask is not None else 0
+        if uid not in self.color_map:
+            self.color_map[uid] = HIGH_CONTRAST_COLORS[uid % len(HIGH_CONTRAST_COLORS)]
+        return True
+
+    def update_metadata_for_uid(self, uid):
+        if not self._refresh_bbox_for_uid(uid):
             self.masks.pop(uid, None)
         self._notify_data_changed()
 
     def regenerate_metadata(self):
         self.bboxes = {}
         self.areas = {}
-        for uid, mask in self.masks.items():
-            coords = cv2.findNonZero(mask)
-            if coords is not None:
-                self.bboxes[uid] = cv2.boundingRect(coords)
-                self.areas[uid] = int(np.sum(mask > 0))
-                if uid not in self.color_map:
-                    self.color_map[uid] = HIGH_CONTRAST_COLORS[uid % len(HIGH_CONTRAST_COLORS)]
+        for uid in self.plant_uids():
+            self._refresh_bbox_for_uid(uid)
         self._notify_data_changed()
 
     # --- Editing tools ---
@@ -1027,7 +1072,7 @@ class PlantImageModel:
         self.apply_stroke(uid, first_points, brush_size, is_erase=False, record_undo=False)
         
         self.update_metadata_for_uid(uid)
-        
+
         self.dirty = True
     def merge_instances(self, ids):
         """Creates a brand new UID for the merged result and deletes the originals."""
@@ -1172,8 +1217,12 @@ class PlantImageModel:
         self.save_state(ids)
         
         for uid in ids:
+            # Seed placeholders live only in plants_meta, so undo cannot bring them back.
+            if uid not in self.masks:
+                self.plants_meta.pop(uid, None)
             self.masks.pop(uid, None)
             self.bboxes.pop(uid, None)
+            self.areas.pop(uid, None)
             if uid in self.class_patches:
                 del self.class_patches[uid]
                 
@@ -1393,8 +1442,9 @@ class PlantImageModel:
                 self.color_map.pop(uid, None)
                 if uid in self.class_patches: 
                     del self.class_patches[uid]
-                
-        self.max_id = old_max_id
+
+        # Seed placeholders are not in the history, so keep their UIDs reserved.
+        self.max_id = max([old_max_id] + self.plant_uids())
         
         self.dirty = True
         self._notify_data_changed()

@@ -1,15 +1,24 @@
+import json
+import os
+
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
                              QPushButton, QFormLayout, QTableWidget,
                              QTableWidgetItem, QHeaderView, QComboBox,
-                             QMessageBox, QInputDialog)
+                             QMessageBox, QInputDialog, QFileDialog)
 from PyQt5.QtGui import QRegularExpressionValidator
 from PyQt5.QtCore import Qt, pyqtSignal, QRegularExpression, QItemSelectionModel, QTimer
 
+from core.model import normalize_plant_meta
 from components.genotype_manager import GenotypeHelper, GenotypeManagerDialog
 from components.ui_help import HELP_METADATA, show_help
 
 BULK_ENTER_NEW_LABEL = "Enter new genotype…"
 BULK_ENTER_NEW_ROLE = "enter_new_genotype"
+
+COL_UID, COL_GENOTYPE, COL_PLANT_NUM, COL_GERMINATED, COL_IGNORE = range(5)
+
+# Second data role on the UID cell: plate position of a seed that never germinated.
+ROLE_SEED_POS = Qt.UserRole + 1
 
 
 class PhenomicsControlPanel(QWidget):
@@ -23,13 +32,14 @@ class PhenomicsControlPanel(QWidget):
     overlay_labels_changed = pyqtSignal()
 
     metadata_dirty_changed = pyqtSignal()
-    auto_renumber_requested = pyqtSignal()
+    add_non_germinated_requested = pyqtSignal(bool)
 
     def __init__(self, global_config, config_file=None):
         super().__init__()
         self.config = global_config
         self.config_file = config_file
         self.current_cm_per_px = 1.0
+        self.current_task_dir = ""
         self._external_selection_sync = False
         self._last_bulk_row_selection = set()
         self._table_selection_timer = QTimer(self)
@@ -115,14 +125,27 @@ class PhenomicsControlPanel(QWidget):
         self.btn_manage_genos.setToolTip("Add, edit, or remove genotypes in the saved list.")
         self.btn_manage_genos.clicked.connect(self.manage_genotypes_requested.emit)
         id_header.addWidget(self.btn_manage_genos)
-        self.btn_auto_renumber = QPushButton("Auto Renumber")
-        self.btn_auto_renumber.setToolTip(
-            "Set every Plant # to match left-to-right order on the plate. "
-            "Manual edits are kept until you click this."
-        )
-        self.btn_auto_renumber.clicked.connect(self.auto_renumber_requested.emit)
-        id_header.addWidget(self.btn_auto_renumber)
         layout.addLayout(id_header)
+
+        id_actions = QHBoxLayout()
+        id_actions.setSpacing(8)
+        self.btn_add_non_germinated = QPushButton("Add \nNon-Germinated")
+        self.btn_add_non_germinated.setToolTip(
+            "Mark a seed that never germinated: one click on its position on the plate. "
+            "It keeps its place in the left-to-right order but creates no annotation."
+        )
+        self.btn_add_non_germinated.setCheckable(True)
+        self.btn_add_non_germinated.toggled.connect(self.add_non_germinated_requested.emit)
+        self.btn_add_non_germinated.setEnabled(False)
+        self.btn_import_genos = QPushButton("Import \nGenotypes")
+        self.btn_import_genos.setToolTip("Load a plate genotype file (plant number to genotype).")
+        self.btn_import_genos.clicked.connect(self.import_genotype_metadata)
+        self.btn_export_genos = QPushButton("Export \nGenotypes")
+        self.btn_export_genos.setToolTip("Save this plate's genotypes as a plant number to genotype file.")
+        self.btn_export_genos.clicked.connect(self.export_genotype_metadata)
+        for btn in (self.btn_add_non_germinated, self.btn_import_genos, self.btn_export_genos):
+            id_actions.addWidget(btn)
+        layout.addLayout(id_actions)
 
         self.lbl_bulk_hint = QLabel(
             "Select table rows (Ctrl/Shift+click), choose a genotype (or Enter new…), then Apply."
@@ -154,10 +177,15 @@ class PhenomicsControlPanel(QWidget):
 
         layout.addSpacing(4)
 
-        self.table_plants = QTableWidget(0, 3)
-        self.table_plants.setHorizontalHeaderLabels(["Plant", "Genotype", "Plant #"])
+        self.table_plants = QTableWidget(0, 5)
+        self.table_plants.setHorizontalHeaderLabels(
+            ["Plant", "Genotype", "Plant #", "Germinated", "Ignore"]
+        )
         self.table_plants.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        self.table_plants.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        for col in (COL_UID, COL_GERMINATED, COL_IGNORE):
+            self.table_plants.horizontalHeader().setSectionResizeMode(
+                col, QHeaderView.ResizeToContents
+            )
         self.table_plants.setSelectionMode(QTableWidget.ExtendedSelection)
         self.table_plants.setSelectionBehavior(QTableWidget.SelectRows)
         self.table_plants.itemSelectionChanged.connect(self._on_table_selection)
@@ -165,7 +193,7 @@ class PhenomicsControlPanel(QWidget):
         layout.addWidget(self.table_plants)
 
         btn_layout = QHBoxLayout()
-        self.btn_measure = QPushButton("Measure")
+        self.btn_measure = QPushButton("Run Measurements")
         self.btn_measure.setToolTip(
             "Compute traits for this plate. Unsaved changes must be saved first."
         )
@@ -173,7 +201,7 @@ class PhenomicsControlPanel(QWidget):
         self.btn_measure.clicked.connect(self._on_measure_clicked)
         self.btn_measure.setEnabled(False)
 
-        self.btn_export = QPushButton("Export")
+        self.btn_export = QPushButton("Save Results")
         self.btn_export.setToolTip(
             "Write trait outputs for this plate. Unfinished plates will be prompted to finish annotation first."
         )
@@ -222,7 +250,7 @@ class PhenomicsControlPanel(QWidget):
 
         selected_uids = []
         for row in selected_rows:
-            item = self.table_plants.item(row, 0)
+            item = self.table_plants.item(row, COL_UID)
             if item:
                 selected_uids.append(item.data(Qt.UserRole))
         if selected_uids:
@@ -240,9 +268,9 @@ class PhenomicsControlPanel(QWidget):
 
         if uid_set:
             for row in range(self.table_plants.rowCount()):
-                item = self.table_plants.item(row, 0)
+                item = self.table_plants.item(row, COL_UID)
                 if item and item.data(Qt.UserRole) in uid_set:
-                    index = self.table_plants.model().index(row, 0)
+                    index = self.table_plants.model().index(row, COL_UID)
                     selection_model.select(
                         index,
                         QItemSelectionModel.Select | QItemSelectionModel.Rows,
@@ -264,21 +292,35 @@ class PhenomicsControlPanel(QWidget):
 
     def _apply_genotype_to_rows(self, genotype, rows):
         for row in rows:
-            combo = self.table_plants.cellWidget(row, 1)
+            combo = self.table_plants.cellWidget(row, COL_GENOTYPE)
             if combo:
                 combo.blockSignals(True)
-                if combo.findText(genotype) < 0:
-                    combo.addItem(genotype)
-                combo.setCurrentText(genotype)
+                self._select_genotype_in_combo(combo, genotype)
                 combo.blockSignals(False)
         self.update_overlay_labels()
         self.metadata_dirty_changed.emit()
 
     def _on_table_item_changed(self, item):
         GenotypeHelper.sanitize_table_cell(self.table_plants, item)
-        if item.column() in (1, 2):
+        if item.column() in (COL_GENOTYPE, COL_PLANT_NUM, COL_GERMINATED, COL_IGNORE):
             self.update_overlay_labels()
             self.metadata_dirty_changed.emit()
+
+    @staticmethod
+    def _make_flag_item(checked, tooltip, editable=True):
+        """Checkbox cell used by the Germinated and Ignore columns."""
+        item = QTableWidgetItem()
+        flags = Qt.ItemIsSelectable | Qt.ItemIsEnabled
+        if editable:
+            flags |= Qt.ItemIsUserCheckable
+        item.setFlags(flags)
+        item.setCheckState(Qt.Checked if checked else Qt.Unchecked)
+        item.setToolTip(tooltip)
+        return item
+
+    def _flag_from_row(self, row, col, default):
+        item = self.table_plants.item(row, col)
+        return default if item is None else item.checkState() == Qt.Checked
 
     def _populate_bulk_genotype_combo(self, genotypes, select_text=None):
         self.cb_bulk_genotype.blockSignals(True)
@@ -331,20 +373,23 @@ class PhenomicsControlPanel(QWidget):
         text, ok = QInputDialog.getText(self, "New Genotype", "Enter genotype name:")
         if not ok or not text.strip():
             return None
+        return self._register_genotype(GenotypeManagerDialog.sanitize_genotype_name(text))
 
-        name = GenotypeManagerDialog.sanitize_genotype_name(text)
+    def _register_genotype(self, name):
+        """Add `name` to the saved list if it is new, then show it in the combos."""
         genotypes = self.config.get("saved_genotypes", [])
-        if name not in genotypes:
-            genotypes.append(name)
-            self.config["saved_genotypes"] = genotypes
-            GenotypeHelper._persist_genotypes(
-                genotypes,
-                config_file=self.config_file,
-                config_dict=self.config,
-            )
-            self.refresh_genotype_combos(genotypes, select_genotype=name)
-        else:
+        if name in genotypes:
             self._populate_bulk_genotype_combo(genotypes, select_text=name)
+            return name
+
+        genotypes.append(name)
+        self.config["saved_genotypes"] = genotypes
+        GenotypeHelper._persist_genotypes(
+            genotypes,
+            config_file=self.config_file,
+            config_dict=self.config,
+        )
+        self.refresh_genotype_combos(genotypes, select_genotype=name)
         return name
 
     def _resolve_bulk_genotype_for_apply(self):
@@ -364,26 +409,112 @@ class PhenomicsControlPanel(QWidget):
     def get_table_uids(self):
         uids = set()
         for row in range(self.table_plants.rowCount()):
-            item = self.table_plants.item(row, 0)
+            item = self.table_plants.item(row, COL_UID)
             if item:
                 uids.add(item.data(Qt.UserRole))
         return uids
 
     def capture_metadata(self):
-        """Snapshot genotype and plant number per UID before table rebuild."""
+        """Snapshot the metadata table per UID before a table rebuild."""
         metadata = {}
         for row in range(self.table_plants.rowCount()):
-            uid_item = self.table_plants.item(row, 0)
+            uid_item = self.table_plants.item(row, COL_UID)
             if not uid_item:
                 continue
             uid = uid_item.data(Qt.UserRole)
-            combo = self.table_plants.cellWidget(row, 1)
-            num_item = self.table_plants.item(row, 2)
-            metadata[uid] = {
-                "genotype": self._genotype_from_combo(combo),
-                "plant_num": num_item.text().strip() if num_item and num_item.text().strip() else str(uid),
-            }
+            num_item = self.table_plants.item(row, COL_PLANT_NUM)
+            metadata[uid] = normalize_plant_meta({
+                "genotype": self._genotype_from_combo(self.table_plants.cellWidget(row, COL_GENOTYPE)),
+                "plant_num": num_item.text() if num_item else "",
+                "germinated": self._flag_from_row(row, COL_GERMINATED, True),
+                "ignore": self._flag_from_row(row, COL_IGNORE, False),
+                "seed_pos": uid_item.data(ROLE_SEED_POS),
+            }, uid)
         return metadata
+
+    def _genotype_file_path(self, save):
+        """Ask for a genotype file, defaulting to <plate id>.json beside the plate."""
+        default = os.path.join(
+            self.current_task_dir, f"{self.in_plate_id.text().strip() or 'Plate'}.json"
+        )
+        dialog = QFileDialog.getSaveFileName if save else QFileDialog.getOpenFileName
+        title = "Export Plate Genotypes" if save else "Import Plate Genotypes"
+        path, _ = dialog(self, title, default, "JSON Files (*.json)")
+        return path
+
+    def export_genotype_metadata(self):
+        """Write {plant number: genotype} for every row, non-germinated plants included."""
+        if not self.table_plants.rowCount():
+            QMessageBox.information(self, "No Plants", "Open a plate before exporting genotypes.")
+            return
+
+        path = self._genotype_file_path(save=True)
+        if not path:
+            return
+
+        genotypes = {
+            meta["plant_num"]: meta["genotype"]
+            for meta in self.capture_metadata().values()
+        }
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(genotypes, f, indent=2)
+        QMessageBox.information(
+            self, "Genotypes Exported",
+            f"Wrote {len(genotypes)} plant(s) to:\n{path}"
+        )
+
+    def import_genotype_metadata(self):
+        """Apply a {plant number: genotype} file to the table, matching on Plant #."""
+        if not self.table_plants.rowCount():
+            QMessageBox.information(self, "No Plants", "Open a plate before importing genotypes.")
+            return
+
+        path = self._genotype_file_path(save=False)
+        if not path:
+            return
+
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                imported = json.load(f)
+            if not isinstance(imported, dict):
+                raise ValueError("Expected an object mapping plant numbers to genotype names.")
+        except (OSError, ValueError) as e:
+            QMessageBox.critical(self, "Import Failed", f"Could not read the genotype file:\n{e}")
+            return
+
+        rows_by_plant_num = {}
+        for row in range(self.table_plants.rowCount()):
+            num_item = self.table_plants.item(row, COL_PLANT_NUM)
+            if num_item:
+                rows_by_plant_num.setdefault(num_item.text().strip(), row)
+
+        rows_by_genotype, unmatched = {}, []
+        for plant_num, genotype in imported.items():
+            row = rows_by_plant_num.get(str(plant_num).strip())
+            if row is None:
+                unmatched.append(str(plant_num))
+                continue
+            name = GenotypeManagerDialog.sanitize_genotype_name(str(genotype))
+            if name:
+                rows_by_genotype.setdefault(name, []).append(row)
+
+        applied = 0
+        for name, rows in rows_by_genotype.items():
+            self._register_genotype(name)
+            self._apply_genotype_to_rows(name, rows)
+            applied += len(rows)
+
+        message = f"Applied genotypes to {applied} of {len(imported)} plant(s)."
+        if unmatched:
+            QMessageBox.warning(
+                self, "Unmatched Plant Numbers",
+                f"{message}\n\nNo plant on this plate carries these numbers:\n"
+                + ", ".join(unmatched)
+                + "\n\nAdd the missing plants (use + Non-Germinated for seeds that never "
+                "grew), fix their Plant # values, then import again."
+            )
+        else:
+            QMessageBox.information(self, "Genotypes Imported", message)
 
     def capture_plate_meta(self, raw_img_shape=None):
         """Snapshot plate-level metadata and calibration for persistence."""
@@ -434,10 +565,7 @@ class PhenomicsControlPanel(QWidget):
         for old_uid, meta in metadata.items():
             new_uid = uid_mapping.get(old_uid)
             if new_uid is not None:
-                remapped[new_uid] = {
-                    "genotype": meta.get("genotype", ""),
-                    "plant_num": str(meta.get("plant_num", "")).strip() or str(new_uid),
-                }
+                remapped[new_uid] = normalize_plant_meta(meta, new_uid)
         return remapped
 
     def clear_table(self):
@@ -446,6 +574,8 @@ class PhenomicsControlPanel(QWidget):
         self.table_plants.blockSignals(False)
         self._populate_bulk_genotype_combo(self.config.get("saved_genotypes", []))
         self.btn_measure.setEnabled(False)
+        self.set_seed_mode(False)
+        self.btn_add_non_germinated.setEnabled(False)
         self.reset_measurements()
         self.update_overlay_labels()
 
@@ -484,12 +614,13 @@ class PhenomicsControlPanel(QWidget):
         self.config["saved_genotypes"] = genotypes
         self.refresh_genotype_combos(genotypes)
 
-    def _genotype_from_combo(self, combo):
+    def _genotype_from_combo(self, combo, default=""):
+        """Resolved genotype of a row combo; `default` is used when nothing is assigned."""
         if not combo:
-            return "Unknown"
+            return default
         genotypes = self.config.get("saved_genotypes", [])
         resolved = GenotypeHelper.resolve_genotype_text(combo.currentText(), genotypes)
-        return resolved or combo.currentText().strip() or "Unknown"
+        return resolved or combo.currentText().strip() or default
 
     def _on_measure_clicked(self):
         cm_per_px = self.get_cm_per_px()
@@ -500,19 +631,20 @@ class PhenomicsControlPanel(QWidget):
         if not self.table_plants.selectedItems() and self.table_plants.rowCount() > 0:
             self.table_plants.selectRow(0)
 
-        plants_meta = []
-        for row in range(self.table_plants.rowCount()):
-            combo = self.table_plants.cellWidget(row, 1)
-            num_item = self.table_plants.item(row, 2)
-            plants_meta.append({
-                "uid": self.table_plants.item(row, 0).data(Qt.UserRole),
-                "genotype": self._genotype_from_combo(combo),
-                "plant_num": num_item.text().strip() if num_item and num_item.text().strip() else str(
-                    self.table_plants.item(row, 0).data(Qt.UserRole)
-                ),
-            })
+        self.measure_requested.emit(self.build_plants_meta_list(), cm_per_px)
 
-        self.measure_requested.emit(plants_meta, cm_per_px)
+    def build_plants_meta_list(self):
+        """Table snapshot as the uid-carrying list the analysis engine expects."""
+        plants_meta = []
+        for uid, meta in self.capture_metadata().items():
+            plants_meta.append({
+                "uid": uid,
+                "genotype": meta["genotype"] or "Unknown",
+                "plant_num": meta["plant_num"],
+                "germinated": meta["germinated"],
+                "ignore": meta["ignore"],
+            })
+        return plants_meta
 
     def _on_export_clicked(self):
         plate_meta = {
@@ -533,55 +665,55 @@ class PhenomicsControlPanel(QWidget):
         self._populate_bulk_genotype_combo(genotypes)
 
         for row, uid in enumerate(sorted(uids)):
+            saved = normalize_plant_meta(preserved_metadata.get(uid), uid)
             self.table_plants.insertRow(row)
 
             item_uid = QTableWidgetItem(str(uid))
             item_uid.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
             item_uid.setData(Qt.UserRole, uid)
-            self.table_plants.setItem(row, 0, item_uid)
+            item_uid.setData(ROLE_SEED_POS, saved["seed_pos"])
+            self.table_plants.setItem(row, COL_UID, item_uid)
 
             combo = QComboBox()
             combo.setEditable(True)
             combo.addItems(genotypes)
-            saved = preserved_metadata.get(uid, {})
-            genotype = saved.get("genotype")
-            if genotype:
-                if combo.findText(genotype) < 0:
-                    combo.addItem(genotype)
-                combo.setCurrentText(genotype)
+            self._select_genotype_in_combo(combo, saved["genotype"])
             combo.lineEdit().editingFinished.connect(
                 lambda c=combo: self._on_genotype_line_edited(c)
             )
             combo.currentIndexChanged.connect(self.update_overlay_labels)
             combo.currentIndexChanged.connect(self.metadata_dirty_changed.emit)
-            self.table_plants.setCellWidget(row, 1, combo)
+            self.table_plants.setCellWidget(row, COL_GENOTYPE, combo)
 
-            plant_num = str(saved.get("plant_num", "")).strip() or str(uid)
-            self.table_plants.setItem(row, 2, QTableWidgetItem(plant_num))
+            self.table_plants.setItem(row, COL_PLANT_NUM, QTableWidgetItem(saved["plant_num"]))
+
+            # A seed placeholder has no mask to measure, so its state is fixed.
+            is_seed = bool(saved["seed_pos"])
+            self.table_plants.setItem(row, COL_GERMINATED, self._make_flag_item(
+                saved["germinated"] and not is_seed,
+                "Seed marked on the plate; delete it in Annotation to remove it."
+                if is_seed else
+                "Uncheck for a seed that never germinated. It keeps its plate position and "
+                "plant number, and exports with every trait at 0.",
+                editable=not is_seed,
+            ))
+            self.table_plants.setItem(row, COL_IGNORE, self._make_flag_item(
+                saved["ignore"],
+                "Check for a plant that germinated but cannot be analyzed, for example "
+                "because of contamination. It is left out of the results entirely.",
+            ))
 
         self.table_plants.blockSignals(False)
         self._last_bulk_row_selection = set()
         self.btn_export.setEnabled(False)
         self.update_overlay_labels()
 
-    def apply_plant_numbers(self, plants_metadata):
-        """Refresh Plant # column from model metadata (e.g. after auto renumber)."""
-        self.table_plants.blockSignals(True)
-        for row in range(self.table_plants.rowCount()):
-            uid_item = self.table_plants.item(row, 0)
-            if not uid_item:
-                continue
-            uid = uid_item.data(Qt.UserRole)
-            meta = plants_metadata.get(uid, {})
-            plant_num = str(meta.get("plant_num", "")).strip() or str(uid)
-            num_item = self.table_plants.item(row, 2)
-            if num_item is None:
-                num_item = QTableWidgetItem(plant_num)
-                self.table_plants.setItem(row, 2, num_item)
-            else:
-                num_item.setText(plant_num)
-        self.table_plants.blockSignals(False)
-        self.update_overlay_labels()
+    def set_seed_mode(self, active):
+        """Keep the + Non-Germinated button in sync when seed placement ends or is cancelled."""
+        if self.btn_add_non_germinated.isChecked() != active:
+            self.btn_add_non_germinated.blockSignals(True)
+            self.btn_add_non_germinated.setChecked(active)
+            self.btn_add_non_germinated.blockSignals(False)
 
     def refresh_genotype_combos(self, genotypes, select_genotype=None):
         previous = select_genotype or self.cb_bulk_genotype.currentText()
@@ -593,39 +725,49 @@ class PhenomicsControlPanel(QWidget):
         )
 
         for row in range(self.table_plants.rowCount()):
-            combo = self.table_plants.cellWidget(row, 1)
+            combo = self.table_plants.cellWidget(row, COL_GENOTYPE)
             if combo:
                 current = combo.currentText()
+                resolved_row = (
+                    GenotypeHelper.resolve_genotype_text(current, genotypes) if current else ""
+                )
                 combo.blockSignals(True)
                 combo.clear()
                 combo.addItems(genotypes)
-                resolved_row = GenotypeHelper.resolve_genotype_text(current, genotypes)
-                if resolved_row and resolved_row in genotypes:
-                    combo.setCurrentText(resolved_row)
+                self._select_genotype_in_combo(combo, resolved_row)
                 combo.blockSignals(False)
 
         self.update_overlay_labels()
+
+    @staticmethod
+    def _select_genotype_in_combo(combo, genotype):
+        """
+        Show `genotype` in a row combo, keeping names that are absent from the saved list.
+        An empty value leaves the combo blank instead of silently falling back to the
+        first saved genotype, which would rewrite every unassigned plant.
+        """
+        if not genotype:
+            combo.setCurrentIndex(-1)
+            return
+        if combo.findText(genotype) < 0:
+            combo.addItem(genotype)
+        combo.setCurrentText(genotype)
 
     def build_overlay_labels(self):
         label_data = {}
         genotypes = self.config.get("saved_genotypes", [])
 
-        for row in range(self.table_plants.rowCount()):
-            uid_item = self.table_plants.item(row, 0)
-            if not uid_item:
-                continue
-            uid = uid_item.data(Qt.UserRole)
-            combo = self.table_plants.cellWidget(row, 1)
-            num_item = self.table_plants.item(row, 2)
-
-            genotype = self._genotype_from_combo(combo)
-            plant_num = num_item.text().strip() if num_item and num_item.text().strip() else str(uid)
-            geno_num = str(genotypes.index(genotype) + 1) if genotype in genotypes else "?"
-
+        for uid, meta in self.capture_metadata().items():
+            genotype = meta["genotype"]
+            geno_text = genotype
+            if not meta["germinated"]:
+                geno_text = f"{genotype}\n(not germinated)".strip()
+            elif meta["ignore"]:
+                geno_text = f"{genotype}\n(ignored)".strip()
             label_data[uid] = {
-                "plant_num": plant_num,
-                "geno_text": genotype,
-                "geno_num": geno_num,
+                "plant_num": meta["plant_num"],
+                "geno_text": geno_text,
+                "geno_num": str(genotypes.index(genotype) + 1) if genotype in genotypes else "?",
             }
         return label_data
 
@@ -677,6 +819,7 @@ class PhenomicsControlPanel(QWidget):
         self.btn_measure_tool.setEnabled(enabled)
         self.btn_set_calib.setEnabled(enabled)
         self.btn_measure.setEnabled(enabled)
+        self.btn_add_non_germinated.setEnabled(enabled)
 
     def reset_measurements(self):
         self.btn_export.setEnabled(False)
