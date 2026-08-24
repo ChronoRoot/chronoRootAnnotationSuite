@@ -1097,6 +1097,7 @@ class ChronoRootAnnotationSuite(QMainWindow):
             self.config["output_root"] = self.current_task_path
 
         self.global_model.callbacks_muted = True
+        self.panel_review.update_undo_state()
         self.global_model.set_selection([])
         self.panel_review.force_mode("SELECT")
 
@@ -1119,6 +1120,7 @@ class ChronoRootAnnotationSuite(QMainWindow):
             worker.deleteLater()
 
         self.global_model.callbacks_muted = False
+        self.panel_review.update_undo_state()
         self.setWindowTitle(
             f"ChronoRoot Annotation Suite | {self.current_base_name} [{self.global_model.status.upper()}]"
         )
@@ -1254,6 +1256,7 @@ class ChronoRootAnnotationSuite(QMainWindow):
         )
 
         self.global_model.callbacks_muted = True
+        self.panel_review.update_undo_state()
         self.show_loading("Saving progress...\n(Saving masks…)")
         self._pending_mark_finished = mark_finished
 
@@ -1271,6 +1274,7 @@ class ChronoRootAnnotationSuite(QMainWindow):
     def _on_save_finished(self, mapping):
         self.hide_loading()
         self.global_model.callbacks_muted = False
+        self.panel_review.update_undo_state()
         self._pending_mark_finished = False
         worker = self.sender()
         if worker in self.active_workers:
@@ -1525,6 +1529,7 @@ class ChronoRootAnnotationSuite(QMainWindow):
     def _on_thread_error(self, err_msg):
         self.hide_loading()
         self.global_model.callbacks_muted = False
+        self.panel_review.update_undo_state()
 
         worker = self.sender()
         if worker in getattr(self, "active_workers", set()):

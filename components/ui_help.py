@@ -32,7 +32,7 @@ HELP_ANNOTATION = """<b>Annotation</b><br><br>
 • <b>Shape Paint</b> — left adds outline, right erases.<br>
 • <b>Split (Knife)</b> — cut fused plants; double-click to finish the line.<br>
 • <b>Split disconnected fragments</b> — one ID split into separate plants.<br>
-• <b>Undo Last Action</b> — undo the last paint, split, or merge.<br>
+• <b>Undo Last Action</b> — undo the last paint, seed, split, merge, delete, Graph, or Frangi action. History resets after save or load.<br>
 • <b>Multi-Class Paint</b> — Main Root, Lateral Root, Hypocotyl, and other root-part labels.<br><br>
 <b>Brush Size</b> and <b>Overlay Opacity</b> — adjust paint brush and mask transparency.<br><br>
 <b>Navigation:</b> Ctrl+drag to pan, wheel to zoom."""

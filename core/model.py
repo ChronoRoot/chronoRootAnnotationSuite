@@ -1,6 +1,7 @@
 import os
 import json
 import re
+import copy
 
 import numpy as np
 import nibabel as nib
@@ -308,6 +309,7 @@ class PlantImageModel:
 
         self._data_callbacks = []
         self._selection_callbacks = []
+        self._history_callbacks = []
         self.callbacks_muted = False
 
     def register_data_callback(self, callback):
@@ -315,6 +317,9 @@ class PlantImageModel:
 
     def register_selection_callback(self, callback):
         self._selection_callbacks.append(callback)
+
+    def register_history_callback(self, callback):
+        self._history_callbacks.append(callback)
 
     def _notify_data_changed(self):
         if self.callbacks_muted:
@@ -327,6 +332,17 @@ class PlantImageModel:
             return
         for callback in self._selection_callbacks:
             callback()
+
+    def _notify_history_changed(self):
+        if self.callbacks_muted:
+            return
+        for callback in self._history_callbacks:
+            callback()
+
+    def clear_history(self):
+        if self.history:
+            self.history.clear()
+            self._notify_history_changed()
 
     def set_selection(self, uids):
         self.selected_uids = set(uids)
@@ -361,8 +377,9 @@ class PlantImageModel:
         return (x - r, y - r, 2 * r, 2 * r)
 
     def add_seed_marker(self, x, y):
-        """Register a seed that never germinated at (x, y). No mask, no undo state."""
+        """Register an undoable seed placeholder at (x, y)."""
         uid = self.prepare_new_uid()
+        self.save_state(uid)
         self.max_id = max(self.max_id, uid)
         self.color_map[uid] = HIGH_CONTRAST_COLORS[uid % len(HIGH_CONTRAST_COLORS)]
         self.plants_meta[uid] = normalize_plant_meta(
@@ -441,7 +458,7 @@ class PlantImageModel:
         self.color_map = new_color_map
         self.class_patches = new_class_patches
         self.max_id = max(mapping.values())
-        self.history.clear()
+        self.clear_history()
         self._remap_plants_meta(mapping)
 
     # --- Directory scan ---
@@ -567,7 +584,7 @@ class PlantImageModel:
         self.color_map.clear()  
         self.areas.clear()       
         self.bboxes.clear()            
-        self.history.clear()
+        self.clear_history()
         self.dirty = False
         self.original_multiclass = None
         self.class_patches.clear()
@@ -760,6 +777,7 @@ class PlantImageModel:
             nib.save(new_nifti, nii_path)
                 
         self.dirty = False
+        self.clear_history()
         
         # Return the mapping dictionary so the GUI knows how to update itself!
         return mapping
@@ -1217,7 +1235,7 @@ class PlantImageModel:
         self.save_state(ids)
         
         for uid in ids:
-            # Seed placeholders live only in plants_meta, so undo cannot bring them back.
+            # Seed placeholders have no mask; their metadata snapshot restores them on undo.
             if uid not in self.masks:
                 self.plants_meta.pop(uid, None)
             self.masks.pop(uid, None)
@@ -1285,7 +1303,7 @@ class PlantImageModel:
         
     def apply_class_stroke(self, uid, points, brush_size, class_id):
         if not points or class_id == 0 or uid not in self.masks: return 
-        
+
         patch_data = self._get_class_patch(uid) 
         if not patch_data: return
         patch, x_off, y_off = patch_data
@@ -1315,7 +1333,11 @@ class PlantImageModel:
                 cv2.circle(stroke_mask, (lx, ly), circle_radius, 1, -1)
             
         bin_crop = self.masks[uid][y_off:y_off+h, x_off:x_off+w]
-        patch[(stroke_mask > 0) & (bin_crop > 0)] = class_id
+        affected = (stroke_mask > 0) & (bin_crop > 0)
+        if not np.any(affected) or not np.any(patch[affected] != class_id): return
+
+        self.save_state(target_uids=uid)
+        patch[affected] = class_id
         
         self.class_patches[uid] = (patch, x_off, y_off)
         self.dirty = True
@@ -1398,58 +1420,107 @@ class PlantImageModel:
 
     # --- Undo ---
     def save_state(self, target_uids):
-        """Saves only the affected masks, plus the exact max_id at this moment."""
+        """Save the complete annotation state affected by one undoable action."""
         if isinstance(target_uids, int):
             target_uids = [target_uids]
-            
-        backup = {}
+
+        masks_backup = {}
+        class_backup = {}
+        metadata_backup = {}
         for uid in target_uids:
-            if uid in self.masks:
-                backup[uid] = self.masks[uid].copy()
+            masks_backup[uid] = self.masks[uid].copy() if uid in self.masks else None
+
+            patch_data = self.class_patches.get(uid)
+            if patch_data is None:
+                class_backup[uid] = None
             else:
-                backup[uid] = None 
-                
-        # We now explicitly record the max_id to guarantee perfect cleanup on Undo
+                patch, x, y = patch_data
+                class_backup[uid] = (patch.copy(), x, y)
+
+            metadata_backup[uid] = (
+                copy.deepcopy(self.plants_meta[uid])
+                if uid in self.plants_meta else None
+            )
+
         self.history.append({
-            "masks": backup,
-            "max_id": self.max_id 
+            "masks": masks_backup,
+            "class_patches": class_backup,
+            "plants_meta": metadata_backup,
+            "max_id": self.max_id,
+            "selected_uids": set(self.selected_uids),
+            "active_uid": self.active_uid,
+            "dirty": self.dirty,
         })
-        
-        if len(self.history) > MAX_HISTORY: 
+
+        if len(self.history) > MAX_HISTORY:
             self.history.pop(0)
+        self._notify_history_changed()
 
     def undo(self):
-        if not self.history: return False
+        if self.callbacks_muted or not self.history: return False
         last_state = self.history.pop()
-        
-        # 1. Restore the exact state of the targeted plants
-        for uid, old_mask in last_state["masks"].items():
-            if old_mask is not None:
-                self.masks[uid] = old_mask
-                self.update_metadata_for_uid(uid)
-            else:
-                self.masks.pop(uid, None)
-                self.bboxes.pop(uid, None)
-                self.color_map.pop(uid, None)
-            
-            if uid in self.class_patches: 
-                del self.class_patches[uid]
-                
-        # 2. Bulletproof Cleanup: Obliterate ANY newly created IDs
-        old_max_id = last_state["max_id"]
-        current_uids = list(self.masks.keys())
-        
-        for uid in current_uids:
-            if uid > old_max_id:
-                self.masks.pop(uid, None)
-                self.bboxes.pop(uid, None)
-                self.color_map.pop(uid, None)
-                if uid in self.class_patches: 
-                    del self.class_patches[uid]
 
-        # Seed placeholders are not in the history, so keep their UIDs reserved.
-        self.max_id = max([old_max_id] + self.plant_uids())
-        
-        self.dirty = True
+        # 1. Restore the exact state of every UID affected by the action.
+        for uid, old_mask in last_state["masks"].items():
+            if old_mask is None:
+                self.masks.pop(uid, None)
+            else:
+                self.masks[uid] = old_mask
+
+            old_patch = last_state["class_patches"][uid]
+            if old_patch is None:
+                self.class_patches.pop(uid, None)
+            else:
+                patch, x, y = old_patch
+                self.class_patches[uid] = (patch, x, y)
+
+            old_meta = last_state["plants_meta"][uid]
+            if old_meta is None:
+                self.plants_meta.pop(uid, None)
+            else:
+                self.plants_meta[uid] = copy.deepcopy(old_meta)
+
+        # 2. Remove every collection entry created after the snapshot.
+        old_max_id = last_state["max_id"]
+        current_uids = (
+            set(self.masks) | set(self.bboxes) | set(self.areas) |
+            set(self.color_map) | set(self.class_patches) | set(self.plants_meta)
+        )
+        for uid in current_uids:
+            if uid <= old_max_id:
+                continue
+            self.masks.pop(uid, None)
+            self.bboxes.pop(uid, None)
+            self.areas.pop(uid, None)
+            self.color_map.pop(uid, None)
+            self.class_patches.pop(uid, None)
+            self.plants_meta.pop(uid, None)
+
+        # 3. Rebuild derived per-plant state from the restored source data.
+        restored_uids = set(last_state["masks"])
+        for uid in restored_uids:
+            if uid in self.masks or self.is_seed_placeholder(uid):
+                self._refresh_bbox_for_uid(uid)
+            else:
+                self.bboxes.pop(uid, None)
+                self.areas.pop(uid, None)
+                self.color_map.pop(uid, None)
+
+        self.max_id = old_max_id
+        valid_uids = set(self.plant_uids())
+        self.selected_uids = {
+            uid for uid in last_state["selected_uids"] if uid in valid_uids
+        }
+        old_active = last_state["active_uid"]
+        if old_active in valid_uids:
+            self.active_uid = old_active
+        elif len(self.selected_uids) == 1:
+            self.active_uid = next(iter(self.selected_uids))
+        else:
+            self.active_uid = None
+        self.dirty = last_state["dirty"]
+
+        self._notify_history_changed()
         self._notify_data_changed()
+        self._notify_selection_changed()
         return True

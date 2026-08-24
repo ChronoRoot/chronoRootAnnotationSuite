@@ -226,8 +226,8 @@ class InstanceListPanel(QWidget):
     def action_delete(self):
         if self.model.selected_uids:
             uids_to_delete = list(self.model.selected_uids)
-            self.model.set_selection([])
             self.model.delete_instances(uids_to_delete)
+            self.model.set_selection([])
 
     def set_review_tool_panel(self, panel):
         self.review_tool_panel = panel

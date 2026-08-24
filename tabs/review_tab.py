@@ -715,6 +715,8 @@ class ReviewToolPanel(QWidget):
         
         self.init_ui()
         self.model.register_selection_callback(self.on_selection_changed)
+        self.model.register_history_callback(self.update_undo_state)
+        self.update_undo_state()
 
     def init_ui(self):
         self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
@@ -780,7 +782,10 @@ class ReviewToolPanel(QWidget):
         sl.addWidget(self.btn_split_parts)
 
         self.btn_undo = QPushButton("Undo Last Action")
-        self.btn_undo.setToolTip("Undo the last paint, split, or merge action.")
+        self.btn_undo.setToolTip(
+            "Undo the last annotation action, including paint, seeds, split, merge, "
+            "delete, Graph, or Frangi. History resets after save or load."
+        )
         self.btn_undo.clicked.connect(self.model.undo)
         sl.addWidget(self.btn_undo)
         
@@ -858,6 +863,11 @@ class ReviewToolPanel(QWidget):
     def update_brush_size(self, val):
         self.lbl_size_val.setText(f"{val}px")
         self.canvas_tab.set_brush_size(val)
+
+    def update_undo_state(self):
+        self.btn_undo.setEnabled(
+            bool(self.model.history) and not self.model.callbacks_muted
+        )
 
     def on_class_selected(self, item, previous=None):
         if item is not None:
