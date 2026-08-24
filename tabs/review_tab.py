@@ -635,11 +635,22 @@ class ReviewCanvasTab(QWidget):
         self.model.set_selection(list(current_sel))
 
     def handle_marquee_select(self, rect, shift):
-        """Translates geometric bounds into UIDs based on bounding box intersections."""
+        """Select plants whose actual mask pixels touch the marquee."""
         selected_uids = []
         for uid, bbox in self.model.bboxes.items():
             bx, by, bw, bh = bbox
-            if rect.intersects(QRectF(bx, by, bw, bh)):
+            if not rect.intersects(QRectF(bx, by, bw, bh)):
+                continue
+
+            mask = self.model.masks.get(uid)
+            if mask is None:
+                continue
+
+            x1 = max(0, bx, math.floor(rect.left()))
+            y1 = max(0, by, math.floor(rect.top()))
+            x2 = min(mask.shape[1], bx + bw, math.floor(rect.right()) + 1)
+            y2 = min(mask.shape[0], by + bh, math.floor(rect.bottom()) + 1)
+            if x1 < x2 and y1 < y2 and mask[y1:y2, x1:x2].any():
                 selected_uids.append(uid)
                 
         if not selected_uids:
@@ -782,9 +793,9 @@ class ReviewToolPanel(QWidget):
         self.list_classes = QListWidget()
         self.list_classes.setFixedHeight(120)
         self.list_classes.setToolTip("Select which root part label to paint.")
+        self.list_classes.currentItemChanged.connect(self.on_class_selected)
         self.populate_class_palette()
         self.list_classes.setVisible(False)
-        self.list_classes.itemSelectionChanged.connect(self.on_class_selected)
         sl.addWidget(self.list_classes)
         
         sl.addWidget(QLabel("Brush Size:"))
@@ -839,6 +850,8 @@ class ReviewToolPanel(QWidget):
         self.btn_global.setChecked(mode == "GLOBAL") 
         
         self.list_classes.setVisible(mode == "SEMANTIC")
+        if mode == "SEMANTIC":
+            self.on_class_selected(self.list_classes.currentItem())
         self.canvas_tab.set_mode(mode)
         self.setFixedHeight(self.sizeHint().height())
 
@@ -846,10 +859,9 @@ class ReviewToolPanel(QWidget):
         self.lbl_size_val.setText(f"{val}px")
         self.canvas_tab.set_brush_size(val)
 
-    def on_class_selected(self):
-        item = self.list_classes.currentItem()
-        if item:
-            self.canvas_tab.set_active_class(item.data(Qt.UserRole))
+    def on_class_selected(self, item, previous=None):
+        if item is not None:
+            self.canvas_tab.set_active_class(int(item.data(Qt.UserRole)))
 
     def on_selection_changed(self):
         has_active = self.model.active_uid is not None

@@ -1235,6 +1235,8 @@ class PlantImageModel:
         if record_undo:
             self.save_state(target_uids=uid)
             
+        # Keep the live semantic edits as the source for the updated outline.
+        previous_class_patch = self._get_class_patch(uid)
         mask = self.masks[uid]
         color = 0 if is_erase else 1
         circle_radius = max(0, (brush_size - 1) // 2)
@@ -1264,9 +1266,6 @@ class PlantImageModel:
         ex = min(mask.shape[1], max(xs) + brush_size)
         ey = min(mask.shape[0], max(ys) + brush_size)
         
-        # --- FIX: Track if the bounding box expands ---
-        bounds_expanded = False 
-        
         if uid in self.bboxes:
             ox, oy, ow, oh = self.bboxes[uid]
             if not is_erase:
@@ -1275,33 +1274,11 @@ class PlantImageModel:
                 new_w = max(ox + ow, ex) - new_x
                 new_h = max(oy + oh, ey) - new_y
                 self.bboxes[uid] = (new_x, new_y, new_w, new_h)
-                
-                # If the box grew in any direction, flag it
-                if new_x < ox or new_y < oy or new_w > ow or new_h > oh:
-                    bounds_expanded = True
         else:
             self.bboxes[uid] = (sx, sy, ex - sx, ey - sy)
-            bounds_expanded = True
-            
-        # 3. FAST PATCH INJECTION
-        if bounds_expanded:
-            # Drop the cached patch. It will safely regenerate at the new 
-            # size the next time _get_class_patch is called.
-            self.class_patches.pop(uid, None)
-        elif uid in self.class_patches:
-            patch, px, py = self.class_patches[uid]
-            ph, pw = patch.shape
-            
-            local_pts = []
-            for p in points:
-                lx, ly = int(p[0]) - px, int(p[1]) - py
-                if 0 <= lx < pw and 0 <= ly < ph:
-                    local_pts.append([lx, ly])
-                    
-            if len(local_pts) > 1:
-                pts_arr = np.array(local_pts, np.int32).reshape((-1, 1, 2))
-                cv2.polylines(patch, [pts_arr], isClosed=False, color=color, thickness=brush_size)
-            self.class_patches[uid] = (patch, px, py)
+
+        # 3. Preserve semantic edits, clear erased pixels and label new outline pixels.
+        self._sync_class_patch(uid, previous_class_patch, self.bboxes.get(uid))
 
         self.dirty = True
         self._notify_data_changed()
@@ -1344,38 +1321,65 @@ class PlantImageModel:
         self.dirty = True
         self._notify_data_changed()
 
+    def _sync_class_patch(self, uid, source_patch, bounds):
+        """Align semantic labels to the current outline and fill only new holes."""
+        if uid not in self.masks or bounds is None:
+            self.class_patches.pop(uid, None)
+            return None
+
+        x, y, w, h = bounds
+        bin_crop = self.masks[uid][y:y+h, x:x+w]
+        if not np.any(bin_crop):
+            self.class_patches.pop(uid, None)
+            return None
+
+        result = np.zeros_like(bin_crop, dtype=np.uint8)
+        if source_patch is not None:
+            source, source_x, source_y = source_patch
+            source_h, source_w = source.shape
+            overlap_x1 = max(x, source_x)
+            overlap_y1 = max(y, source_y)
+            overlap_x2 = min(x + w, source_x + source_w)
+            overlap_y2 = min(y + h, source_y + source_h)
+
+            if overlap_x1 < overlap_x2 and overlap_y1 < overlap_y2:
+                result[
+                    overlap_y1 - y:overlap_y2 - y,
+                    overlap_x1 - x:overlap_x2 - x,
+                ] = source[
+                    overlap_y1 - source_y:overlap_y2 - source_y,
+                    overlap_x1 - source_x:overlap_x2 - source_x,
+                ]
+
+        result[bin_crop == 0] = 0
+        holes = (bin_crop > 0) & (result == 0)
+        if np.any(holes):
+            valid = result > 0
+            if np.any(valid):
+                indices = distance_transform_edt(
+                    ~valid, return_distances=False, return_indices=True
+                )
+                result[holes] = result[indices[0], indices[1]][holes]
+            else:
+                result[holes] = 3
+
+        self.class_patches[uid] = (result, x, y)
+        return result, x, y
+
     def _get_class_patch(self, uid):
         if uid in self.class_patches: return self.class_patches[uid]
         if uid not in self.masks: return None
         mask = self.masks[uid]
-        
+
         ys, xs = np.where(mask)
         if len(xs) == 0: return None
-        x_ex, y_ex = int(xs.min()), int(ys.min())
-        w_ex, h_ex = int(xs.max() - x_ex + 1), int(ys.max() - y_ex + 1)
-        
-        pad = 10 
-        x1, y1 = max(0, x_ex - pad), max(0, y_ex - pad)
-        x2, y2 = min(mask.shape[1], x_ex + w_ex + pad), min(mask.shape[0], y_ex + h_ex + pad)
-        
-        bin_crop = mask[y1:y2, x1:x2]
-        cls_crop = self.original_multiclass[y1:y2, x1:x2].copy() if self.original_multiclass is not None else np.zeros_like(bin_crop)
-            
-        result = np.zeros_like(bin_crop)
-        result[bin_crop > 0] = cls_crop[bin_crop > 0]
-        holes = (bin_crop > 0) & (result == 0)
-        
-        if np.any(holes):
-            valid = result > 0
-            if np.any(valid):
-                _, indices = distance_transform_edt(~valid, return_indices=True)
-                result[holes] = result[indices[0], indices[1]][holes]
-            else:
-                result[holes] = 1 
-                
-        final_patch = result[(y_ex - y1):(y_ex - y1) + h_ex, (x_ex - x1):(x_ex - x1) + w_ex]
-        self.class_patches[uid] = (final_patch, x_ex, y_ex)
-        return final_patch, x_ex, y_ex
+        x, y = int(xs.min()), int(ys.min())
+        w, h = int(xs.max() - x + 1), int(ys.max() - y + 1)
+
+        source_patch = None
+        if self.original_multiclass is not None:
+            source_patch = (self.original_multiclass[y:y+h, x:x+w], x, y)
+        return self._sync_class_patch(uid, source_patch, (x, y, w, h))
 
     def _flatten_multiclass(self):
         if self.raw_image is None: return None
