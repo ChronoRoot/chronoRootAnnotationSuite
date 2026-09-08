@@ -645,7 +645,11 @@ class PlantImageModel:
         
         # 3. Warm up class patches for faster GUI response
         for uid in self.masks.keys():
-            self._get_class_patch(uid)
+            json_crop = self.class_patches.pop(uid, None)
+            if json_crop is not None:
+                self._sync_class_patch(uid, json_crop, None)
+            else:
+                self._get_class_patch(uid)
 
     # --- Mask validation & spatial sort ---
     def clean_and_validate_masks(self):
@@ -997,8 +1001,9 @@ class PlantImageModel:
         patch, x1, y1 = patch_data
         
         rgba = np.zeros((patch.shape[0], patch.shape[1], 4), dtype=np.uint8)
+        bin_crop = self.masks[uid][y1:y1 + patch.shape[0], x1:x1 + patch.shape[1]]
         for cid, color in self.class_colors.items():
-            if cid != 0: rgba[patch == cid] = [*color[:3], int(255 * opacity)]
+            if cid != 0: rgba[(patch == cid) & (bin_crop > 0)] = [*color[:3], int(255 * opacity)]
             
         return self._pack_for_gui(rgba), x1, y1
 
@@ -1295,8 +1300,8 @@ class PlantImageModel:
         else:
             self.bboxes[uid] = (sx, sy, ex - sx, ey - sy)
 
-        # 3. Preserve semantic edits, clear erased pixels and label new outline pixels.
-        self._sync_class_patch(uid, previous_class_patch, self.bboxes.get(uid))
+        # 3. Preserve live class edits, clear erased pixels and fill new outline pixels.
+        self._sync_class_patch(uid, previous_class_patch, None)
 
         self.dirty = True
         self._notify_data_changed()
@@ -1344,12 +1349,13 @@ class PlantImageModel:
         self._notify_data_changed()
 
     def _sync_class_patch(self, uid, source_patch, bounds):
-        """Align semantic labels to the current outline and fill only new holes."""
-        if uid not in self.masks or bounds is None:
+        """Align live class labels to the tight outline and fill new holes."""
+        box = self._plant_bbox(uid)
+        if uid not in self.masks or box is None:
             self.class_patches.pop(uid, None)
             return None
 
-        x, y, w, h = bounds
+        x, y, w, h = box
         bin_crop = self.masks[uid][y:y+h, x:x+w]
         if not np.any(bin_crop):
             self.class_patches.pop(uid, None)
@@ -1358,11 +1364,10 @@ class PlantImageModel:
         result = np.zeros_like(bin_crop, dtype=np.uint8)
         if source_patch is not None:
             source, source_x, source_y = source_patch
-            source_h, source_w = source.shape
             overlap_x1 = max(x, source_x)
             overlap_y1 = max(y, source_y)
-            overlap_x2 = min(x + w, source_x + source_w)
-            overlap_y2 = min(y + h, source_y + source_h)
+            overlap_x2 = min(x + w, source_x + source.shape[1])
+            overlap_y2 = min(y + h, source_y + source.shape[0])
 
             if overlap_x1 < overlap_x2 and overlap_y1 < overlap_y2:
                 result[
@@ -1374,6 +1379,7 @@ class PlantImageModel:
                 ]
 
         result[bin_crop == 0] = 0
+        result[(result < 1) | (result > 6)] = 0
         holes = (bin_crop > 0) & (result == 0)
         if np.any(holes):
             valid = result > 0

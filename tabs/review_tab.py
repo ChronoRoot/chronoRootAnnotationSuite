@@ -6,7 +6,7 @@ from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QListWidget,
 
 from PyQt5.QtCore import Qt, pyqtSignal, QRectF
 from PyQt5.QtGui import (QImage, QPixmap, QPainter, QPainterPath, QPen, QColor, 
-                         QBrush, QIcon, QFont)
+                         QBrush, QIcon, QFont, QFontMetrics)
 
 from components.ui_help import HELP_ANNOTATION, show_help
 
@@ -47,6 +47,7 @@ class BaseCanvas(QGraphicsView):
         self.scene.addItem(self.overlay_pixmap)
         
         self.is_panning = False
+        self.ruler_pad_w = 0
         self.setRenderHint(QPainter.Antialiasing, False)
         self.setBackgroundBrush(QBrush(QColor(30, 30, 30)))
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -57,7 +58,8 @@ class BaseCanvas(QGraphicsView):
         self.base_pixmap.setPixmap(base_pmap)
         self.overlay_pixmap.setPixmap(overlay_pmap)
         if not base_pmap.isNull():
-            self.scene.setSceneRect(0, 0, base_pmap.width(), base_pmap.height())
+            pad = self.ruler_pad_w or 0
+            self.scene.setSceneRect(-pad, 0, base_pmap.width() + pad, base_pmap.height())
 
     def wheelEvent(self, event):
         if event.angleDelta().y() > 0: self.scale(1.15, 1.15)
@@ -440,8 +442,8 @@ class ReviewCanvasTab(QWidget):
         self.canvas.is_calibrating = state
 
     def set_mode(self, mode):
-        if self.current_mode in ["SELECT", "GLOBAL"] and mode not in ["SELECT", "GLOBAL"]:
-            self.previous_view_mode = self.current_mode
+        if self.current_mode == "SELECT" and mode not in ["SELECT", "GLOBAL"]:
+            self.previous_view_mode = "SELECT"
             
         self.current_mode = mode
         self.canvas.set_mode(mode)
@@ -480,35 +482,57 @@ class ReviewCanvasTab(QWidget):
                 self.canvas.scene.removeItem(item)
         self.scene_ruler_items = []
         
-        if cm_per_px is None or cm_per_px <= 0 or not hasattr(self, '_cached_base_pixmap'): 
+        if cm_per_px is None or cm_per_px <= 0 or not hasattr(self, '_cached_base_pixmap'):
+            self.canvas.ruler_pad_w = 0
             return
             
         img_w = self._cached_base_pixmap.width()
         img_h = self._cached_base_pixmap.height()
         pixels_per_cm = int(1.0 / cm_per_px)
         
-        if pixels_per_cm < 10: return
-        
-        pad_w = 80
+        if pixels_per_cm < 10:
+            self.canvas.ruler_pad_w = 0
+            return
+
+        font_px = max(12, int(0.2 / cm_per_px))
+        font = QFont("Sans Serif")
+        font.setPixelSize(font_px)
+        font.setBold(True)
+        metrics = QFontMetrics(font)
+        label_w = metrics.boundingRect("000cm").width()
+        gutter_pad = max(4, font_px // 5)
+        tick_len = max(10, int(font_px * 0.8))
+        stroke = max(2, font_px // 12)
+        pad_w = gutter_pad + label_w + gutter_pad + tick_len + gutter_pad
+        line_x = -gutter_pad
+
+        self.canvas.ruler_pad_w = pad_w
         self.canvas.scene.setSceneRect(-pad_w, 0, img_w + pad_w, img_h)
-        
+
         bg = self.canvas.scene.addRect(-pad_w, 0, pad_w, img_h, QPen(Qt.NoPen), QBrush(Qt.black))
+        bg.setZValue(2)
         self.scene_ruler_items.append(bg)
-        
-        line = self.canvas.scene.addLine(-15, 0, -15, img_h, QPen(Qt.white, 2))
+
+        pen = QPen(Qt.white, stroke)
+        line = self.canvas.scene.addLine(line_x, 0, line_x, img_h, pen)
+        line.setZValue(3)
         self.scene_ruler_items.append(line)
-        
+
         for cm_val in range(0, int(img_h / pixels_per_cm)):
             y = int(cm_val * pixels_per_cm)
-            tick = self.canvas.scene.addLine(-25, y, -15, y, QPen(Qt.white, 2))
+            tick = self.canvas.scene.addLine(line_x - tick_len, y, line_x, y, pen)
+            tick.setZValue(3)
             self.scene_ruler_items.append(tick)
-            
-            text = self.canvas.scene.addText(f"{cm_val}cm")
-            text.setDefaultTextColor(Qt.white)
-            text.setPos(-pad_w + 5, y - 10)
+
+            text = QGraphicsSimpleTextItem(f"{cm_val}cm")
+            text.setFont(font)
+            text.setBrush(QBrush(Qt.white))
+            text.setPos(-pad_w + gutter_pad, y - metrics.height() / 2)
+            text.setZValue(3)
+            self.canvas.scene.addItem(text)
             self.scene_ruler_items.append(text)
 
-        self.refresh_canvas() # Force text scaling to update with new calibration
+        self.refresh_canvas()
 
     def refresh_canvas(self):
         if not hasattr(self, '_cached_base_pixmap') or getattr(self, '_last_image_path', None) != self.model.image_path:
@@ -832,18 +856,27 @@ class ReviewToolPanel(QWidget):
 
     def toggle_mode(self, target_mode):
         current = self.canvas_tab.current_mode
-        if current == target_mode:
-            self.force_mode(self.canvas_tab.previous_view_mode) 
+        if target_mode == "GLOBAL":
+            if current == "GLOBAL":
+                self.force_mode("SELECT")
+            else:
+                self.model.set_selection([])
+                self.force_mode("GLOBAL")
             return
 
-        if target_mode == "GLOBAL":
-            self.model.set_selection([]) 
-            self.force_mode("GLOBAL")
+        if current == target_mode:
+            restore = self.canvas_tab.previous_view_mode
+            if restore == target_mode:
+                restore = "SELECT"
+            self.force_mode(restore)
             return
 
         if not self.model.active_uid and target_mode != "SELECT":
             QMessageBox.warning(self, "Selection Required", "Please select a plant first.")
-            self.force_mode(self.canvas_tab.previous_view_mode) 
+            restore = self.canvas_tab.previous_view_mode
+            if restore == target_mode:
+                restore = "SELECT"
+            self.force_mode(restore)
             return
             
         self.force_mode(target_mode)
