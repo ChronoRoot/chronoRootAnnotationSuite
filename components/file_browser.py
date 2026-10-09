@@ -1,6 +1,5 @@
 import os
 import json
-import time
 
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                              QLineEdit, QPushButton, QListWidget, QListWidgetItem, QCheckBox,
@@ -8,7 +7,7 @@ from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
 from PyQt5.QtGui import QPainter, QColor
 from PyQt5.QtCore import Qt, pyqtSignal
 
-from core.model import annotation_status_display, analysis_status_display, normalize_annotation_status, _agent_dbg
+from core.model import annotation_status_display, analysis_status_display, normalize_annotation_status
 from components.ui_help import HELP_WORKFLOW, show_help
 
 
@@ -581,9 +580,6 @@ class UnifiedFileBrowser(QWidget):
             self.render_contents(self.folder_cache[self.current_dir], use_cache=False)
 
     def render_contents(self, contents, use_cache=True):
-        # #region agent log
-        _render_t0 = time.perf_counter()
-        # #endregion
         if use_cache:
             self.folder_cache[self.current_dir] = contents
 
@@ -644,14 +640,6 @@ class UnifiedFileBrowser(QWidget):
                 list_item.setSizeHint(widget.sizeHint())
                 self.task_list.addItem(list_item)
                 self.task_list.setItemWidget(list_item, widget)
-
-        # #region agent log
-        _agent_dbg("H2", "file_browser.py:render_contents", "list render", {
-            "entries": len(contents),
-            "shown": self.task_list.count(),
-            "ms": round((time.perf_counter() - _render_t0) * 1000.0, 1),
-        })
-        # #endregion
 
     def render_analyzer_contents(self, contents):
         """Renders the analyzer-style browser (simple folder icons, analyzer file widgets)."""

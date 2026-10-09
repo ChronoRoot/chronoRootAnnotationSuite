@@ -4,7 +4,6 @@ import os
 os.environ["QT_LOGGING_RULES"] = "*.debug=false;*.warning=false"
 
 import json
-import time
 
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
                              QSplitter, QStackedWidget, QMessageBox,
@@ -20,7 +19,6 @@ from core.model import (
     metrics_path,
     topology_path,
     normalize_annotation_status,
-    _agent_dbg,
 )
 from core.analyzer_engine import (
     analyze_single_plant,
@@ -601,23 +599,11 @@ class ChronoRootAnnotationSuite(QMainWindow):
         self._sync_workspace_ui(index)
 
     def _sync_workspace_ui(self, index):
-        # #region agent log
-        _tab_t0 = time.perf_counter()
-        _ensure_ms = 0.0
-        _inspector_ms = 0.0
-        _report_ms = 0.0
-        # #endregion
         if index != 0:
             # Leaving Annotation abandons a seed placement that was never clicked.
             self.panel_phenomics.set_seed_mode(False)
         if index in [0, 1, 2, 3]:
-            # #region agent log
-            _ensure_t = time.perf_counter()
-            # #endregion
             self.ensure_active_plant()
-            # #region agent log
-            _ensure_ms = round((time.perf_counter() - _ensure_t) * 1000.0, 1)
-            # #endregion
 
         is_batch = index == 4
         self.btn_toggle_plates.setVisible(is_batch)
@@ -650,26 +636,14 @@ class ChronoRootAnnotationSuite(QMainWindow):
             self.control_tabs.setCurrentIndex(1)
             if not self._panel_expanded(self.splitter.sizes()[1]) and not self._focus_mode_active:
                 self.expand_middle_panel()
-            # #region agent log
-            _inspector_t = time.perf_counter()
-            # #endregion
             self.sync_inspector()
-            # #region agent log
-            _inspector_ms = round((time.perf_counter() - _inspector_t) * 1000.0, 1)
-            # #endregion
 
         elif index == 4:
             self.control_tabs.setEnabled(False)
             self.middle_stack.setCurrentIndex(1)
             if not self._focus_mode_active and self.splitter.sizes()[1] == 0:
                 self.expand_middle_panel()
-            # #region agent log
-            _report_t = time.perf_counter()
-            # #endregion
             self.refresh_report_plates_if_active()
-            # #region agent log
-            _report_ms = round((time.perf_counter() - _report_t) * 1000.0, 1)
-            # #endregion
 
         elif index == 5:
             self.control_tabs.setEnabled(False)
@@ -680,19 +654,6 @@ class ChronoRootAnnotationSuite(QMainWindow):
                     self._saved_middle_width = sizes[1]
                 self.middle_stack.hide()
                 self._apply_splitter_sizes(sizes[0], 0, sizes[2] + sizes[1])
-
-        # #region agent log
-        if index in (3, 4):
-            _agent_dbg("H6" if index == 3 else "H7", "main.py:_sync_workspace_ui", "tab switch", {
-                "index": index,
-                "tab": "inspector" if index == 3 else "batch",
-                "total_ms": round((time.perf_counter() - _tab_t0) * 1000.0, 1),
-                "ensure_plant_ms": _ensure_ms,
-                "inspector_ms": _inspector_ms,
-                "report_ms": _report_ms,
-                "has_measurements": bool(self.measurements_cache),
-            })
-        # #endregion
 
     def _on_metadata_dirty(self):
         self.metadata_dirty = True
@@ -1198,21 +1159,10 @@ class ChronoRootAnnotationSuite(QMainWindow):
 
         cached = self.browser.get_cached_contents(folder_path)
         if cached is not None and not force_refresh:
-            # #region agent log
-            _agent_dbg("H1", "main.py:scan_directory", "cache hit", {
-                "folder": folder_path,
-                "entries": len(cached),
-            })
-            # #endregion
             self._merge_dataset_index(cached)
             self.browser.render_contents(cached, use_cache=False)
             self._ensure_dataset_index()
             return
-        # #region agent log
-        self._dbg_scan_t0 = time.perf_counter()
-        _agent_dbg("H1", "main.py:scan_directory", "cache miss", {"folder": folder_path})
-        _snap_t0 = time.perf_counter()
-        # #endregion
 
         showed_snapshot = False
         if not force_refresh:
@@ -1221,13 +1171,6 @@ class ChronoRootAnnotationSuite(QMainWindow):
                 self.browser.folder_cache[folder_path] = snapshot
                 self.browser.render_contents(snapshot, use_cache=False)
                 showed_snapshot = True
-                # #region agent log
-                _agent_dbg("H5", "main.py:scan_directory", "snapshot paint", {
-                    "folder": folder_path,
-                    "entries": len(snapshot),
-                    "ms": round((time.perf_counter() - _snap_t0) * 1000.0, 1),
-                })
-                # #endregion
 
         out_dir = self.browser.get_effective_output_dir(folder_path)
         fixed_output = self.config.get("output_mode", "task_folder") == "fixed"
@@ -1243,12 +1186,6 @@ class ChronoRootAnnotationSuite(QMainWindow):
         worker.start()
 
     def _on_scan_finished(self, contents):
-        # #region agent log
-        _ui_t0 = time.perf_counter()
-        _scan_wall = None
-        if getattr(self, "_dbg_scan_t0", None) is not None:
-            _scan_wall = round((time.perf_counter() - self._dbg_scan_t0) * 1000.0, 1)
-        # #endregion
         self.hide_loading()
         worker = self.sender()
         folder = getattr(worker, "scan_folder", self.browser.current_dir) if worker else self.browser.current_dir
@@ -1266,20 +1203,8 @@ class ChronoRootAnnotationSuite(QMainWindow):
         if shown:
             self.browser.render_contents(contents, use_cache=False)
             self._ensure_dataset_index()
-        # #region agent log
-        _after_render = time.perf_counter()
-        # #endregion
         if shown:
             self.refresh_report_plates_if_active()
-        # #region agent log
-        _agent_dbg("H1", "main.py:_on_scan_finished", "scan returned to ui", {
-            "entries": len(contents) if contents else 0,
-            "shown": shown,
-            "worker_wall_ms": _scan_wall,
-            "ui_before_report_ms": round((_after_render - _ui_t0) * 1000.0, 1),
-            "report_ms": round((time.perf_counter() - _after_render) * 1000.0, 1),
-        })
-        # #endregion
 
     def _on_dataset_index(self, totals):
         worker = self.sender()
@@ -1297,7 +1222,7 @@ class ChronoRootAnnotationSuite(QMainWindow):
             self._stats_cancel = None
         self._apply_dataset_index(totals)
 
-    def _on_folder_stats_error(self, err_msg):
+    def _on_folder_stats_error(self, _err_msg):
         worker = self.sender()
         if worker in self.active_workers:
             self.active_workers.remove(worker)
@@ -1305,11 +1230,6 @@ class ChronoRootAnnotationSuite(QMainWindow):
         if self._stats_cancel is getattr(worker, "stats_token", None):
             self._stats_cancel = None
             self._index_running = False
-        # #region agent log
-        _agent_dbg("H1", "main.py:_on_folder_stats_error", "folder stats failed", {
-            "error": str(err_msg),
-        })
-        # #endregion
 
     def _save_prompt_message(self):
         if self.metadata_dirty and not self.global_model.dirty:
@@ -1379,9 +1299,6 @@ class ChronoRootAnnotationSuite(QMainWindow):
         worker.start()
 
     def _on_load_finished(self, _):
-        # #region agent log
-        _ui_t0 = time.perf_counter()
-        # #endregion
         self.hide_loading()
         worker = self.sender()
         if worker in self.active_workers:
@@ -1404,9 +1321,6 @@ class ChronoRootAnnotationSuite(QMainWindow):
 
         uids = self.global_model.plant_uids()
         self.workspaces.canvas_review.begin_batch_refresh()
-        # #region agent log
-        _t = time.perf_counter()
-        # #endregion
         try:
             if uids:
                 self.panel_phenomics.populate_table(
@@ -1415,50 +1329,21 @@ class ChronoRootAnnotationSuite(QMainWindow):
                     preserved_metadata=self.global_model.get_plants_metadata(),
                 )
                 self.panel_phenomics.enable_tools(True)
-                # #region agent log
-                _table_ms = round((time.perf_counter() - _t) * 1000.0, 1)
-                _t = time.perf_counter()
-                # #endregion
                 self.ensure_active_plant()
                 self.workspaces.canvas_graph.refresh_graph_preview()
-                # #region agent log
-                _graph_ms = round((time.perf_counter() - _t) * 1000.0, 1)
-                # #endregion
             else:
                 self.panel_phenomics.clear_table()
-                # #region agent log
-                _table_ms = round((time.perf_counter() - _t) * 1000.0, 1)
-                _graph_ms = 0.0
-                # #endregion
 
             # Notify views only after the metadata table matches the freshly loaded
             # model. Doing this earlier makes the table-vs-model sync see stale UIDs
             # and clear measurements_cache before the restore offer runs.
-            # #region agent log
-            _t = time.perf_counter()
-            # #endregion
             self.global_model._notify_data_changed()
-            # #region agent log
-            _notify_ms = round((time.perf_counter() - _t) * 1000.0, 1)
-            # #endregion
         finally:
-            # #region agent log
-            _t = time.perf_counter()
-            # #endregion
             self.workspaces.canvas_review.end_batch_refresh()
             self.update_canvas_ruler()
-            # #region agent log
-            _canvas_ms = round((time.perf_counter() - _t) * 1000.0, 1)
-            # #endregion
 
         self.metadata_dirty = False
-        # #region agent log
-        _t = time.perf_counter()
-        # #endregion
         self._offer_analysis_restore()
-        # #region agent log
-        _offer_ms = round((time.perf_counter() - _t) * 1000.0, 1)
-        # #endregion
 
         if self._pending_open_annotation_tab:
             self._pending_open_annotation_tab = False
@@ -1466,18 +1351,6 @@ class ChronoRootAnnotationSuite(QMainWindow):
 
         self.workspaces.setCurrentIndex(0)
         self.workspaces.canvas_review.update_info_label()
-        # #region agent log
-        _agent_dbg("H4", "main.py:_on_load_finished", "file open ui", {
-            "base": self.current_base_name,
-            "n_plants": len(uids),
-            "table_ms": _table_ms,
-            "graph_ms": _graph_ms,
-            "notify_ms": _notify_ms,
-            "offer_dialog_ms": _offer_ms,
-            "canvas_and_ruler_ms": _canvas_ms,
-            "ui_total_ms": round((time.perf_counter() - _ui_t0) * 1000.0, 1),
-        })
-        # #endregion
 
     def _offer_analysis_restore(self):
         metrics_path = self._resolve_metrics_path()
@@ -1720,20 +1593,10 @@ class ChronoRootAnnotationSuite(QMainWindow):
 
         if uid in self._inspector_viz_cache:
             if visible:
-                # #region agent log
-                _view_t = time.perf_counter()
-                # #endregion
                 inspector.update_view(
                     uid, data, self.global_model.raw_image, bbox, live_cm_per_px,
                     plant_meta=plant_meta, viz_data=self._inspector_viz_cache[uid],
                 )
-                # #region agent log
-                _agent_dbg("H6", "main.py:sync_inspector", "inspector rebuild", {
-                    "uid": uid, "analyze_ms": 0.0,
-                    "view_ms": round((time.perf_counter() - _view_t) * 1000.0, 1),
-                    "ran_analyze": False, "cache": "hit",
-                })
-                # #endregion
             return
 
         if visible:
@@ -1759,13 +1622,6 @@ class ChronoRootAnnotationSuite(QMainWindow):
         worker.inspector_token = token
         worker.inspector_uid = uid
         worker.inspector_payload = (data, plant_meta, bbox, live_cm_per_px)
-        # #region agent log
-        worker.dbg_t0 = time.perf_counter()
-        _agent_dbg("H6", "main.py:sync_inspector", "inspector rebuild", {
-            "uid": uid, "analyze_ms": 0.0, "view_ms": 0.0,
-            "ran_analyze": False, "cache": "scheduled", "visible": visible,
-        })
-        # #endregion
         self.active_workers.add(worker)
         worker.finished.connect(self._on_inspector_viz)
         worker.error.connect(self._on_inspector_viz_error)
@@ -1781,14 +1637,6 @@ class ChronoRootAnnotationSuite(QMainWindow):
         uid = worker.inspector_uid
         self._inspector_inflight_uid = None
         self._inspector_viz_cache[uid] = viz_data
-        # #region agent log
-        _agent_dbg("H6", "main.py:_on_inspector_viz", "inspector rebuild", {
-            "uid": uid,
-            "analyze_ms": round((time.perf_counter() - worker.dbg_t0) * 1000.0, 1),
-            "cache": "filled",
-            "visible": self.workspaces.currentIndex() == 3,
-        })
-        # #endregion
         if self.workspaces.currentIndex() != 3 or self.global_model.active_uid != uid:
             return
         if uid not in self.measurements_cache:

@@ -1,5 +1,4 @@
 import math
-import time
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QListWidget, 
                              QListWidgetItem, QPushButton, QLabel, QGraphicsView, 
                              QGraphicsScene, QGraphicsPixmapItem, QGraphicsRectItem, 
@@ -10,7 +9,6 @@ from PyQt5.QtGui import (QImage, QPixmap, QPainter, QPainterPath, QPen, QColor,
                          QBrush, QIcon, QFont, QFontMetrics)
 
 from components.ui_help import HELP_ANNOTATION, show_help
-from core.model import _agent_dbg
 
 # ==========================================
 # HELPER: DATA TO GUI TRANSLATION
@@ -549,27 +547,10 @@ class ReviewCanvasTab(QWidget):
     def refresh_canvas(self):
         if self._batch_refresh:
             self._batch_refresh_needed = True
-            # #region agent log
-            _agent_dbg("H4", "review_tab.py:refresh_canvas", "canvas refresh", {
-                "mode": getattr(self, "current_mode", None),
-                "ms": 0.0,
-                "coalesced": True,
-            })
-            # #endregion
             return
-        # #region agent log
-        _canvas_t0 = time.perf_counter()
-        # #endregion
         if not hasattr(self, '_cached_base_pixmap') or getattr(self, '_last_image_path', None) != self.model.image_path:
             raw_data = self.model.get_raw_image_data()
             if not raw_data:
-                # #region agent log
-                _agent_dbg("H4", "review_tab.py:refresh_canvas", "canvas refresh", {
-                    "mode": getattr(self, "current_mode", None),
-                    "ms": round((time.perf_counter() - _canvas_t0) * 1000.0, 1),
-                    "empty": True,
-                })
-                # #endregion
                 return
             self._cached_base_pixmap = _bytes_to_pixmap(raw_data, is_rgba=False)
             self._last_image_path = self.model.image_path
@@ -625,15 +606,6 @@ class ReviewCanvasTab(QWidget):
             else:
                 self.canvas.update_view(base_pixmap, QPixmap())
             self.canvas.update_overlays({}, {}, {}, False, False, True, True, "TEXT")
-
-        # #region agent log
-        _agent_dbg("H4", "review_tab.py:refresh_canvas", "canvas refresh", {
-            "mode": self.current_mode,
-            "ms": round((time.perf_counter() - _canvas_t0) * 1000.0, 1),
-            "n_masks": len(self.model.masks),
-            "shape": list(self.model.raw_image.shape) if self.model.raw_image is not None else None,
-        })
-        # #endregion
 
     def update_info_label(self):
         mode = self.current_mode
