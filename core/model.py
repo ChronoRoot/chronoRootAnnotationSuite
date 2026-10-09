@@ -2,6 +2,8 @@ import os
 import json
 import re
 import copy
+import time
+import threading
 
 import numpy as np
 import nibabel as nib
@@ -110,11 +112,40 @@ def topology_path(directory, base_name):
 PEEK_BYTES = 4096
 _PEEK_CACHE_VERSION = 3
 _file_peek_cache = {}
+_peek_tls = threading.local()
+
+
+def _peek_bucket():
+    stats = getattr(_peek_tls, "stats", None)
+    if stats is None:
+        stats = {"calls": 0, "hits": 0, "misses": 0, "full_scans": 0, "ms": 0.0}
+        _peek_tls.stats = stats
+    return stats
+
+
+def _agent_dbg(hypothesis_id, location, message, data):
+    # #region agent log
+    try:
+        with open(
+            "/home/IPS2/rgaggio/Documents/MultiInstance/chronoRootAnnotationSuite/.cursor/debug-46ecae.log",
+            "a",
+            encoding="utf-8",
+        ) as _f:
+            _f.write(json.dumps({
+                "sessionId": "46ecae",
+                "runId": "post-fix",
+                "hypothesisId": hypothesis_id,
+                "location": location,
+                "message": message,
+                "data": data,
+                "timestamp": int(time.time() * 1000),
+            }) + "\n")
+    except Exception:
+        pass
+    # #endregion
 
 
 def _peek_cache_get(json_path):
-    if not os.path.exists(json_path):
-        return None
     try:
         mtime = os.path.getmtime(json_path)
     except OSError:
@@ -147,6 +178,9 @@ def _detect_annotation_from_compact(compact):
 
 def _count_bytes_marker_in_file(json_path, marker):
     """Count occurrences of a byte marker without loading the full file into memory."""
+    # #region agent log
+    _peek_bucket()["full_scans"] += 1
+    # #endregion
     if not marker:
         return 0
     overlap = max(len(marker) - 1, 0)
@@ -185,11 +219,20 @@ def _parse_plant_count(json_path):
     return _count_bytes_marker_in_file(json_path, b'"segmentation"')
 
 
-def peek_task_summary(json_path, task_dir, base_name, out_dir=None, probe_analysis=False):
+def peek_task_summary(json_path, task_dir, base_name, out_dir=None, probe_analysis=False,
+                       dir_names=None, metrics_names=None):
     """Fast header-only read for directory browsing. Never parses full JSON or NIfTI."""
-    nii_path = os.path.join(task_dir, base_name + ".nii.gz")
-    has_nii = os.path.exists(nii_path)
-    has_json = os.path.exists(json_path)
+    # #region agent log
+    _t0 = time.perf_counter()
+    _peek_bucket()["calls"] += 1
+    # #endregion
+    if dir_names is None:
+        nii_path = os.path.join(task_dir, base_name + ".nii.gz")
+        has_nii = os.path.exists(nii_path)
+        has_json = os.path.exists(json_path)
+    else:
+        has_nii = (base_name + ".nii.gz") in dir_names
+        has_json = (base_name + ".json") in dir_names
 
     result = {
         "annotation_status": "without_annotation",
@@ -198,13 +241,22 @@ def peek_task_summary(json_path, task_dir, base_name, out_dir=None, probe_analys
     }
     if not has_json:
         result["annotation_status"] = "pending" if has_nii else "without_annotation"
+        # #region agent log
+        _peek_bucket()["ms"] += (time.perf_counter() - _t0) * 1000.0
+        # #endregion
         return result
 
     cached = _peek_cache_get(json_path)
     if cached is not None:
+        # #region agent log
+        _peek_bucket()["hits"] += 1
+        # #endregion
         result["annotation_status"] = cached["annotation_status"]
         result["plant_count"] = cached["plant_count"]
     else:
+        # #region agent log
+        _peek_bucket()["misses"] += 1
+        # #endregion
         try:
             with open(json_path, "r", encoding="utf-8") as f:
                 chunk = f.read(PEEK_BYTES)
@@ -216,6 +268,9 @@ def peek_task_summary(json_path, task_dir, base_name, out_dir=None, probe_analys
                 "plant_count": result["plant_count"],
             })
         except OSError:
+            # #region agent log
+            _peek_bucket()["ms"] += (time.perf_counter() - _t0) * 1000.0
+            # #endregion
             return result
 
     if probe_analysis:
@@ -223,10 +278,18 @@ def peek_task_summary(json_path, task_dir, base_name, out_dir=None, probe_analys
         ann = normalize_annotation_status(result["annotation_status"])
         if ann != "completed":
             result["analysis_status"] = "not_applicable"
-        elif metrics_path(metrics_dir, base_name):
-            result["analysis_status"] = "analyzed"
         else:
-            result["analysis_status"] = "not_analyzed"
+            metric_name = canonical_metrics_name(base_name)
+            if metrics_names is not None:
+                has_metrics = metric_name in metrics_names
+            elif dir_names is not None:
+                has_metrics = metric_name in dir_names
+            else:
+                has_metrics = bool(metrics_path(metrics_dir, base_name))
+            result["analysis_status"] = "analyzed" if has_metrics else "not_analyzed"
+    # #region agent log
+    _peek_bucket()["ms"] += (time.perf_counter() - _t0) * 1000.0
+    # #endregion
     return result
 
 
@@ -366,8 +429,10 @@ class PlantImageModel:
         """Bbox from the plant mask, or a fixed marker box for a seed placeholder."""
         mask = self.masks.get(uid)
         if mask is not None:
-            coords = cv2.findNonZero(mask)
-            return cv2.boundingRect(coords) if coords is not None else None
+            _x, _y, bw, bh = cv2.boundingRect(mask)
+            if bw == 0 or bh == 0:
+                return None
+            return (_x, _y, bw, bh)
 
         pos = (self.plants_meta.get(uid) or {}).get("seed_pos")
         if not pos:
@@ -462,117 +527,264 @@ class PlantImageModel:
         self._remap_plants_meta(mapping)
 
     # --- Directory scan ---
+    def _reset_peek_timing(self):
+        bucket = _peek_bucket()
+        bucket["calls"] = 0
+        bucket["hits"] = 0
+        bucket["misses"] = 0
+        bucket["full_scans"] = 0
+        bucket["ms"] = 0.0
+
+    def _peek_timing_snapshot(self, started, folder_path, extra):
+        total_ms = (time.perf_counter() - started) * 1000.0
+        bucket = _peek_bucket()
+        data = {
+            "folder": folder_path,
+            "total_ms": round(total_ms, 1),
+            "peek_ms": round(bucket["ms"], 1),
+            "walk_other_ms": round(total_ms - bucket["ms"], 1),
+            "peek_calls": bucket["calls"],
+            "peek_hits": bucket["hits"],
+            "peek_misses": bucket["misses"],
+            "full_file_scans": bucket["full_scans"],
+        }
+        data.update(extra)
+        return data
+
+    def _metrics_name_set(self, output_dir, fixed_output):
+        if not fixed_output or not output_dir:
+            return None
+        try:
+            return set(os.listdir(output_dir))
+        except OSError:
+            return set()
+
+    def _file_entry(self, root, base, image_path, metrics_dir, dir_names, metrics_names):
+        summary = peek_task_summary(
+            os.path.join(root, base + ".json"),
+            root,
+            base,
+            out_dir=metrics_dir,
+            probe_analysis=True,
+            dir_names=dir_names,
+            metrics_names=metrics_names,
+        )
+        ann = summary["annotation_status"]
+        analysis = summary["analysis_status"]
+        return {
+            "type": "file",
+            "name": base,
+            "path": image_path,
+            "annotation_status": ann,
+            "status": annotation_status_display(ann),
+            "plant_count": summary["plant_count"],
+            "analysis_status": analysis,
+            "analyzer_status": analysis_status_display(analysis),
+        }
+
+    def _empty_dir_record(self, name, full_path, stats_pending):
+        return {
+            "type": "dir",
+            "name": name,
+            "path": full_path,
+            "total": 0,
+            "without_annotation": 0,
+            "pending": 0,
+            "in_progress": 0,
+            "completed": 0,
+            "analyzed": 0,
+            "not_analyzed": 0,
+            "stats_pending": stats_pending,
+        }
+
+    def _add_folder_status(self, bucket, entry):
+        bucket["total"] += 1
+        ann = entry["annotation_status"]
+        if ann == "without_annotation":
+            bucket["without_annotation"] += 1
+        elif ann == "pending":
+            bucket["pending"] += 1
+        elif ann == "completed":
+            bucket["completed"] += 1
+            if entry["analysis_status"] == "analyzed":
+                bucket["analyzed"] += 1
+            elif entry["analysis_status"] == "not_analyzed":
+                bucket["not_analyzed"] += 1
+        else:
+            bucket["in_progress"] += 1
+
     def scan_directory(self, folder_path, output_dir=None, fixed_output=False):
-        """Scans a directory and returns a formatted list of dicts for the GUI without exposing OS/JSON ops."""
+        """List one folder. Nested annotation totals are filled in later."""
+        # #region agent log
+        _scan_t0 = time.perf_counter()
+        self._reset_peek_timing()
+        # #endregion
         contents = []
-        if not os.path.exists(folder_path):
+        if not os.path.isdir(folder_path):
             return contents
 
-        items = sorted(os.listdir(folder_path))
+        dir_names = []
+        file_names = []
+        try:
+            with os.scandir(folder_path) as iterator:
+                for entry in iterator:
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            dir_names.append(entry.name)
+                        elif entry.is_file(follow_symlinks=False):
+                            file_names.append(entry.name)
+                    except OSError:
+                        continue
+        except OSError:
+            return contents
+        dir_names.sort()
+        file_names.sort()
+        name_set = set(file_names)
+
         effective_out = output_dir or folder_path
         file_metrics_dir = effective_out if fixed_output else folder_path
+        metrics_names = self._metrics_name_set(effective_out, fixed_output)
+        file_metrics_names = metrics_names if fixed_output else None
 
-        def file_entry(root, base, image_path, probe_analysis=False, metrics_dir=None):
-            if metrics_dir is None:
-                metrics_dir = effective_out if fixed_output else root
-            json_path = os.path.join(root, base + ".json")
-            summary = peek_task_summary(
-                json_path,
-                root,
-                base,
-                out_dir=metrics_dir,
-                probe_analysis=probe_analysis,
-            )
-            ann = summary["annotation_status"]
-            analysis = summary["analysis_status"]
-            plant_count = summary["plant_count"]
-            display_status = annotation_status_display(ann)
-            return {
-                "type": "file",
-                "name": base,
-                "path": image_path,
-                "annotation_status": ann,
-                "status": display_status,
-                "plant_count": plant_count,
-                "analysis_status": analysis,
-                "analyzer_status": analysis_status_display(analysis),
-            }
+        for item_name in dir_names:
+            contents.append(self._empty_dir_record(
+                item_name, os.path.join(folder_path, item_name), stats_pending=True
+            ))
 
-        # 1. Folders
-        for item_name in items:
-            full_path = os.path.join(folder_path, item_name)
-            if not os.path.isdir(full_path):
-                continue
-
-            total = without_annotation = pending = in_progress = completed = 0
-            analyzed = not_analyzed = 0
-
-            for root, _, files in os.walk(full_path):
-                processed_bases = set()
-                for f in files:
-                    if not f.lower().endswith(('.png', '.jpg', '.jpeg')):
-                        continue
-                    base = os.path.splitext(f)[0]
-                    if base in processed_bases:
-                        continue
-                    processed_bases.add(base)
-
-                    total += 1
-                    image_path = os.path.join(root, f)
-                    entry = file_entry(
-                        root, base, image_path,
-                        probe_analysis=True,
-                        metrics_dir=effective_out if fixed_output else root,
-                    )
-                    ann = entry["annotation_status"]
-                    if ann == "without_annotation":
-                        without_annotation += 1
-                    elif ann == "pending":
-                        pending += 1
-                    elif ann == "completed":
-                        completed += 1
-                        if entry["analysis_status"] == "analyzed":
-                            analyzed += 1
-                        elif entry["analysis_status"] == "not_analyzed":
-                            not_analyzed += 1
-                    else:
-                        in_progress += 1
-
-            contents.append({
-                "type": "dir",
-                "name": item_name,
-                "path": full_path,
-                "total": total,
-                "without_annotation": without_annotation,
-                "pending": pending,
-                "in_progress": in_progress,
-                "completed": completed,
-                "analyzed": analyzed,
-                "not_analyzed": not_analyzed,
-            })
-
-        # 2. Files
         processed_bases = set()
-        for item_name in items:
+        for item_name in file_names:
             if not item_name.lower().endswith(('.png', '.jpg', '.jpeg')):
                 continue
             base = os.path.splitext(item_name)[0]
             if base in processed_bases:
                 continue
             processed_bases.add(base)
-            full_path = os.path.join(folder_path, item_name)
-            contents.append(
-                file_entry(
-                    folder_path, base, full_path,
-                    probe_analysis=True,
-                    metrics_dir=file_metrics_dir,
-                )
-            )
+            contents.append(self._file_entry(
+                folder_path,
+                base,
+                os.path.join(folder_path, item_name),
+                file_metrics_dir,
+                name_set,
+                file_metrics_names,
+            ))
 
+        # #region agent log
+        _agent_dbg("H1", "model.py:scan_directory", "folder scan", self._peek_timing_snapshot(
+            _scan_t0, folder_path, {
+                "mode": "shallow",
+                "entries": len(contents),
+                "dirs": len(dir_names),
+                "files": len(processed_bases),
+            },
+        ))
+        # #endregion
         return contents
+
+    def index_dataset(self, folder_path, output_dir=None, fixed_output=False, cancel=None):
+        """Subtree annotation totals for every directory under the dataset root.
+
+        Returns None if cancelled. Keys are directory paths; values are the same
+        count fields shown on a folder row, including images in nested folders.
+        """
+        # #region agent log
+        _scan_t0 = time.perf_counter()
+        self._reset_peek_timing()
+        # #endregion
+        if not os.path.isdir(folder_path):
+            return {}
+
+        effective_out = output_dir or folder_path
+        metrics_names = self._metrics_name_set(effective_out, fixed_output)
+        direct = {}
+        child_dirs = {}
+
+        def cancelled():
+            return bool(cancel and cancel.get("stop"))
+
+        def counts():
+            return {
+                "total": 0,
+                "without_annotation": 0,
+                "pending": 0,
+                "in_progress": 0,
+                "completed": 0,
+                "analyzed": 0,
+                "not_analyzed": 0,
+            }
+
+        for current, dirnames, files in os.walk(folder_path):
+            if cancelled():
+                # #region agent log
+                _agent_dbg("H1", "model.py:index_dataset", "folder stats", self._peek_timing_snapshot(
+                    _scan_t0, folder_path, {"mode": "dataset", "cancelled": True},
+                ))
+                # #endregion
+                return None
+            bucket = counts()
+            direct[current] = bucket
+            child_dirs[current] = [os.path.join(current, name) for name in dirnames]
+            name_set = set(files)
+            processed_bases = set()
+            metrics_dir = effective_out if fixed_output else current
+            child_metrics = metrics_names if fixed_output else None
+            for filename in files:
+                if cancelled():
+                    # #region agent log
+                    _agent_dbg("H1", "model.py:index_dataset", "folder stats", self._peek_timing_snapshot(
+                        _scan_t0, folder_path, {"mode": "dataset", "cancelled": True},
+                    ))
+                    # #endregion
+                    return None
+                if not filename.lower().endswith(('.png', '.jpg', '.jpeg')):
+                    continue
+                base = os.path.splitext(filename)[0]
+                if base in processed_bases:
+                    continue
+                processed_bases.add(base)
+                entry = self._file_entry(
+                    current, base, os.path.join(current, filename),
+                    metrics_dir, name_set, child_metrics,
+                )
+                self._add_folder_status(bucket, entry)
+
+        totals = {}
+
+        def rollup(path):
+            if path in totals:
+                return totals[path]
+            combined = counts()
+            source = direct.get(path, combined)
+            for key in combined:
+                combined[key] = source.get(key, 0)
+            for child in child_dirs.get(path, []):
+                nested = rollup(child)
+                for key in combined:
+                    combined[key] += nested.get(key, 0)
+            totals[path] = combined
+            return combined
+
+        rollup(folder_path)
+        # #region agent log
+        _agent_dbg("H1", "model.py:index_dataset", "folder stats", self._peek_timing_snapshot(
+            _scan_t0, folder_path, {
+                "mode": "dataset",
+                "cancelled": False,
+                "directories": len(totals),
+            },
+        ))
+        # #endregion
+        return totals
 
     # --- Load / save ---
     def load_task(self, task_path, base_name):
+        # #region agent log
+        _load_t0 = time.perf_counter()
+        _phases = {}
+
+        def _lap(name, started):
+            _phases[name] = round((time.perf_counter() - started) * 1000.0, 1)
+            return time.perf_counter()
+        # #endregion
         if base_name.lower().endswith(('.png', '.jpg', '.jpeg')):
             base_name = os.path.splitext(base_name)[0]
             
@@ -609,47 +821,92 @@ class PlantImageModel:
         nii_path = os.path.join(task_path, f"{base_name}.nii.gz")
         json_path = os.path.join(task_path, f"{base_name}.json")
         
+        # #region agent log
+        _t = time.perf_counter()
+        # #endregion
         img_bgr = cv2.imread(self.image_path)
         if img_bgr is None: raise FileNotFoundError(f"Missing image: {self.image_path}")
         self.raw_image = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
         h, w = self.raw_image.shape[:2]
+        # #region agent log
+        _t = _lap("imread_ms", _t)
+        # #endregion
         
         if os.path.exists(json_path):
             self._load_mask_from_nifti(nii_path, (h, w))
+            # #region agent log
+            _t = _lap("nifti_ms", _t)
+            # #endregion
             self._load_from_json(json_path, (h, w))
+            # #region agent log
+            _t = _lap("json_ms", _t)
+            # #endregion
         else:
             self._load_instances_from_nifti(nii_path, (h, w))
+            # #region agent log
+            _t = _lap("nifti_instances_ms", _t)
+            _phases["json_ms"] = 0.0
+            # #endregion
 
         # Filter out spurious instances (width < 3 or height < 3)
         uids_to_remove = []
         for uid, mask in self.masks.items():
-            coords = cv2.findNonZero(mask)
-            if coords is None:
+            _x, _y, bw, bh = cv2.boundingRect(mask)
+            # Discard empty masks and specks smaller than 3 pixels in either dimension.
+            if bw < 3 or bh < 3:
                 uids_to_remove.append(uid)
-            else:
-                _, _, bw, bh = cv2.boundingRect(coords)
-                # Discard if smaller than 3 pixels in any dimension (treat as noise)
-                if bw < 3 or bh < 3:
-                    uids_to_remove.append(uid)
                     
         for uid in uids_to_remove:
             self.masks.pop(uid, None)
             self.class_patches.pop(uid, None)
         # ---------------------------------------------------------------------
+        # #region agent log
+        _t = _lap("noise_filter_ms", _t)
+        _n_removed = len(uids_to_remove)
+        # #endregion
 
         uids = self.plant_uids()
         self.max_id = max(uids) if uids else 0
         self.regenerate_metadata()
+        # #region agent log
+        _t = _lap("metadata_ms", _t)
+        # #endregion
         self.sort_instances_spatially(row_tolerance=250)
         self.sync_plant_numbers_to_uids()
+        # #region agent log
+        _t = _lap("spatial_sort_ms", _t)
+        _n_json_patch = 0
+        _n_computed_patch = 0
+        # #endregion
         
         # 3. Warm up class patches for faster GUI response
         for uid in self.masks.keys():
             json_crop = self.class_patches.pop(uid, None)
             if json_crop is not None:
+                # #region agent log
+                _n_json_patch += 1
+                # #endregion
                 self._sync_class_patch(uid, json_crop, None)
             else:
+                # #region agent log
+                _n_computed_patch += 1
+                # #endregion
                 self._get_class_patch(uid)
+        # #region agent log
+        _t = _lap("class_patch_ms", _t)
+        _agent_dbg("H3", "model.py:load_task", "file load phases", {
+            "base": base_name,
+            "image": self.image_path,
+            "image_bytes": os.path.getsize(self.image_path) if self.image_path and os.path.exists(self.image_path) else 0,
+            "shape": [int(h), int(w)],
+            "n_masks": len(self.masks),
+            "n_removed": _n_removed,
+            "n_json_patch": _n_json_patch,
+            "n_computed_patch": _n_computed_patch,
+            "total_ms": round((time.perf_counter() - _load_t0) * 1000.0, 1),
+            **_phases,
+        })
+        # #endregion
 
     # --- Mask validation & spatial sort ---
     def clean_and_validate_masks(self):
@@ -1062,7 +1319,7 @@ class PlantImageModel:
 
         mask = self.masks.get(uid)
         self.bboxes[uid] = box
-        self.areas[uid] = int(np.sum(mask > 0)) if mask is not None else 0
+        self.areas[uid] = int(cv2.countNonZero(mask)) if mask is not None else 0
         if uid not in self.color_map:
             self.color_map[uid] = HIGH_CONTRAST_COLORS[uid % len(HIGH_CONTRAST_COLORS)]
         return True

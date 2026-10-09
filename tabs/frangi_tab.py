@@ -1,3 +1,5 @@
+import time
+
 import cv2
 import numpy as np
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QGridLayout, 
@@ -10,6 +12,7 @@ from PyQt5.QtGui import QImage, QPixmap, QColor, QPainter
 from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal
 
 from skimage.filters import frangi, apply_hysteresis_threshold
+from core.model import _agent_dbg
 from core.root_graph_builder import extract_skeleton
 from scipy.ndimage import label, distance_transform_edt
 
@@ -363,7 +366,16 @@ class FrangiCanvasTab(QWidget):
             lbl.setPixmap(black_pixmap)
 
     def on_data_changed(self):
-        if self.isVisible(): self.generate_and_display_proposal()
+        # #region agent log
+        _agent_dbg("H8", "frangi_tab.py:on_data_changed", "frangi data changed", {
+            "visible": self.isVisible(),
+            "uid": self.model.active_uid,
+            "suppressed": bool(getattr(self, "_suppress_regen", False)),
+        })
+        # #endregion
+        if getattr(self, "_suppress_regen", False):
+            return
+        if self.isVisible(): self.generate_and_display_proposal("data_changed")
 
     def on_selection_changed(self):
         if not self.model.active_uid:
@@ -374,7 +386,7 @@ class FrangiCanvasTab(QWidget):
         self.info_label.setText(
             f"Plant {self.model.active_uid} — compare panels, then Apply to this plant if needed."
         )
-        if self.isVisible(): self.generate_and_display_proposal()
+        if self.isVisible(): self.generate_and_display_proposal("selection")
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -439,6 +451,13 @@ class FrangiCanvasTab(QWidget):
             self._frangi_worker = None
         if generation != self._frangi_generation:
             return
+        # #region agent log
+        _agent_dbg("H8", "frangi_tab.py:_on_frangi_finished", "frangi finished", {
+            "generation": generation,
+            "reason": getattr(worker, "dbg_reason", None),
+            "ms": round((time.perf_counter() - getattr(worker, "dbg_t0", time.perf_counter())) * 1000.0, 1),
+        })
+        # #endregion
         self._apply_proposal_result(result)
 
     def _on_frangi_error(self, message):
@@ -465,9 +484,16 @@ class FrangiCanvasTab(QWidget):
         self.img_label_vesselness.setPixmap(self.numpy_to_qpixmap(result["heatmap_rgb"]))
         self.img_label_proposed.setPixmap(self.numpy_to_qpixmap(result["rgb_proposed"]))
 
-    def generate_and_display_proposal(self):
+    def generate_and_display_proposal(self, reason="direct"):
         uid = self.model.active_uid
         raw_image = self.model.raw_image
+        # #region agent log
+        _agent_dbg("H8", "frangi_tab.py:generate_and_display_proposal", "frangi start", {
+            "reason": reason,
+            "uid": uid,
+            "generation_next": self._frangi_generation + 1,
+        })
+        # #endregion
 
         if uid is None or uid not in self.model.masks or raw_image is None:
             self.clear_to_black()
@@ -550,6 +576,10 @@ class FrangiCanvasTab(QWidget):
         self.main_window.show_loading(self.FRANGI_LOADING_MSG)
 
         worker = FrangiWorker(generation, snapshot)
+        # #region agent log
+        worker.dbg_reason = reason
+        worker.dbg_t0 = time.perf_counter()
+        # #endregion
         self._frangi_worker = worker
         self.active_workers.add(worker)
         worker.finished.connect(self._on_frangi_finished)
@@ -558,6 +588,9 @@ class FrangiCanvasTab(QWidget):
 
     def accept_proposal(self):
         uid = self.model.active_uid
+        # #region agent log
+        _accept_t0 = time.perf_counter()
+        # #endregion
         if not uid or self.proposed_tight_patch is None: return
         
         # Save proposed states to local variables
@@ -575,9 +608,24 @@ class FrangiCanvasTab(QWidget):
         self.model.masks[uid] = proposed_full_mask
         self.model.class_patches[uid] = (proposed_tight_patch, proposed_x, proposed_y)
             
-        self.model.update_metadata_for_uid(uid)
-        self.model.dirty = True
+        self._suppress_regen = True
+        self.model.callbacks_muted = True
+        try:
+            self.model.update_metadata_for_uid(uid)
+            self.model.dirty = True
+        finally:
+            self.model.callbacks_muted = False
         self.model._notify_data_changed()
+        applied = self.img_label_proposed._pixmap
+        if applied is not None and not applied.isNull():
+            self.img_label_old.setPixmap(applied)
+        self._suppress_regen = False
+        # #region agent log
+        _agent_dbg("H8", "frangi_tab.py:accept_proposal", "frangi applied", {
+            "uid": uid,
+            "ms": round((time.perf_counter() - _accept_t0) * 1000.0, 1),
+        })
+        # #endregion
 
     def numpy_to_qpixmap(self, img_array):
         h, w, ch = img_array.shape
@@ -833,7 +881,7 @@ class FrangiToolPanel(QWidget):
         self.canvas_tab.p_target_classes = targets
         
         if self.model.active_uid:
-            self.canvas_tab.generate_and_display_proposal()
+            self.canvas_tab.generate_and_display_proposal("params")
             
     def toggle_buttons(self, enabled):
         self.btn_accept.setEnabled(enabled)

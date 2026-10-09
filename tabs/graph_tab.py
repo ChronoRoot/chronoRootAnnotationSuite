@@ -1,3 +1,5 @@
+import time
+
 import cv2
 import numpy as np
 import networkx as nx
@@ -14,6 +16,7 @@ from components.ui_help import HELP_GRAPH, show_help
 
 # Import the isolated builder
 from core.root_graph_builder import extract_skeleton, createGraph, graphInit
+from core.model import _agent_dbg
 
 class AspectRatioLabel(QWidget):
     def __init__(self):
@@ -172,8 +175,8 @@ class GraphCanvasTab(QWidget):
         return num_features > 2
 
     def refresh_graph_preview(self):
-        """Regenerate skeleton preview when model prune or selection is ready."""
-        if self.model.active_uid:
+        """Regenerate skeleton preview when the tracing tab is actually showing."""
+        if self.model.active_uid and self.isVisible():
             self.generate_pipeline()
 
     def reset_user_nodes(self):
@@ -226,9 +229,23 @@ class GraphCanvasTab(QWidget):
         self.update_graph_visuals()
 
     def generate_pipeline(self):
+        # #region agent log
+        _graph_t0 = time.perf_counter()
+        # #endregion
         uid = self.model.active_uid
+        # #region agent log
+        def _log_pipe(stage):
+            _agent_dbg("H4", "graph_tab.py:generate_pipeline", "graph pipeline", {
+                "stage": stage,
+                "uid": uid,
+                "ms": round((time.perf_counter() - _graph_t0) * 1000.0, 1),
+            })
+        # #endregion
         if uid is None or uid not in self.model.masks or self.model.raw_image is None: 
             self.clear_to_black()
+            # #region agent log
+            _log_pipe("no_mask")
+            # #endregion
             return
             
         if uid != self.last_processed_uid or self.p_prune != self.last_prune_val:
@@ -245,11 +262,17 @@ class GraphCanvasTab(QWidget):
                 "or use Split disconnected fragments."
             )
             self.clear_graph_panels()
+            # #region agent log
+            _log_pipe("disconnected")
+            # #endregion
             return
 
         patch_data = self.model._get_class_patch(uid)
         if not patch_data: 
             self.clear_to_black()
+            # #region agent log
+            _log_pipe("no_patch")
+            # #endregion
             return
             
         patch, x_off, y_off = patch_data
@@ -257,6 +280,9 @@ class GraphCanvasTab(QWidget):
         x, y, w, h = self.model.bboxes.get(uid, (0,0,0,0))
         if w == 0: 
             self.clear_to_black()
+            # #region agent log
+            _log_pipe("empty_bbox")
+            # #endregion
             return
         
         img_h, img_w = self.model.raw_image.shape[:2]
@@ -318,6 +344,9 @@ class GraphCanvasTab(QWidget):
                 "Cannot trace this plant. Check Main Root and Lateral Root labels in Annotation."
             )
             self.clear_graph_panels()
+            # #region agent log
+            _log_pipe("invalid_skeleton")
+            # #endregion
             return
             
         self.mc_skel_bin = np.zeros((img_h, img_w), dtype=np.uint8)
@@ -338,6 +367,9 @@ class GraphCanvasTab(QWidget):
                 data['orig_root_type'] = data.get('root_type', 2)
         
         self.update_graph_visuals()
+        # #region agent log
+        _log_pipe("done")
+        # #endregion
 
     def update_graph_visuals(self):
         if not self.current_graph: return

@@ -1,4 +1,5 @@
 import os
+import time
 import json
 import re
 import copy
@@ -14,12 +15,13 @@ from PyQt5.QtWidgets import (
     QTextEdit, QDoubleSpinBox, QStackedWidget, QListWidget,
     QListWidgetItem, QSizePolicy, QCheckBox,
 )
-from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from PyQt5.QtGui import QFontMetrics
 
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.backends.backend_qt5agg import NavigationToolbar2QT as NavigationToolbar
 
+from core.model import _agent_dbg
 from core import convex_hull
 from core import statistics as stats_module
 from components.file_browser import qt_display_text
@@ -456,6 +458,42 @@ def export_report_bundle(target_dir, df, report_queue, color_maps):
     }
 
 
+class _MetricsListWorker(QThread):
+    finished_rows = pyqtSignal(object)
+
+    def __init__(self, main_window):
+        super().__init__()
+        self.main_window = main_window
+        self.discover_ms = 0.0
+        self.peek_ms = 0.0
+
+    def run(self):
+        started = time.perf_counter()
+        metrics_files = discover_metrics_files(self.main_window)
+        self.discover_ms = (time.perf_counter() - started) * 1000.0
+        rows = []
+        peek_ms = 0.0
+        ordered = sorted(
+            metrics_files.keys(),
+            key=lambda path: natural_sort_key(metrics_files[path]["display"]),
+        )
+        for full_path in ordered:
+            peek_started = time.perf_counter()
+            try:
+                peek = peek_metrics_metadata(full_path)
+            except (OSError, json.JSONDecodeError):
+                peek = {
+                    "plate_id": "?",
+                    "condition": "?",
+                    "timepoint": "?",
+                    "plant_count": 0,
+                }
+            peek_ms += (time.perf_counter() - peek_started) * 1000.0
+            rows.append((full_path, metrics_files[full_path], peek))
+        self.peek_ms = peek_ms
+        self.finished_rows.emit(rows)
+
+
 class ReportFileListPanel(QWidget):
     """Metrics file picker with folder tree and metadata columns."""
 
@@ -474,6 +512,10 @@ class ReportFileListPanel(QWidget):
         super().__init__()
         self.main_window = main_window
         self._block_checks = False
+        self._cached_roots = None
+        self._cached_rows = None
+        self._discover_token = 0
+        self._metrics_worker = None
         self.init_ui()
 
     def init_ui(self):
@@ -610,17 +652,68 @@ class ReportFileListPanel(QWidget):
         for i in range(item.childCount()):
             self._collect_checked_files(item.child(i), paths)
 
-    def refresh_file_list(self):
+    def refresh_file_list(self, force=False):
+        # #region agent log
+        _list_t0 = time.perf_counter()
+        # #endregion
+        roots = tuple(_metrics_search_roots(self.main_window))
+        if (
+            not force
+            and self._cached_roots == roots
+            and self._cached_rows is not None
+        ):
+            if self.file_tree.topLevelItemCount() == 0:
+                self._fill_metrics_tree(self._cached_rows)
+            # #region agent log
+            _agent_dbg("H7", "report_tab.py:refresh_file_list", "batch plate list", {
+                "files": len(self._cached_rows),
+                "discover_ms": 0.0,
+                "peek_ms": 0.0,
+                "total_ms": round((time.perf_counter() - _list_t0) * 1000.0, 1),
+                "cache": "hit",
+            })
+            # #endregion
+            return
+
+        self._discover_token += 1
+        token = self._discover_token
+        worker = _MetricsListWorker(self.main_window)
+        worker.list_token = token
+        worker.list_roots = roots
+        worker.finished_rows.connect(self._on_metrics_rows)
+        self._metrics_worker = worker
+        worker.start()
+        # #region agent log
+        _agent_dbg("H7", "report_tab.py:refresh_file_list", "batch plate list", {
+            "files": 0,
+            "discover_ms": 0.0,
+            "peek_ms": 0.0,
+            "total_ms": round((time.perf_counter() - _list_t0) * 1000.0, 1),
+            "cache": "scheduled",
+        })
+        # #endregion
+
+    def _on_metrics_rows(self, rows):
+        worker = self.sender()
+        if getattr(worker, "list_token", None) != self._discover_token:
+            return
+        self._cached_roots = worker.list_roots
+        self._cached_rows = rows
+        self._fill_metrics_tree(rows)
+        # #region agent log
+        _agent_dbg("H7", "report_tab.py:_on_metrics_rows", "batch plate list", {
+            "files": len(rows),
+            "discover_ms": round(worker.discover_ms, 1),
+            "peek_ms": round(worker.peek_ms, 1),
+            "cache": "filled",
+        })
+        # #endregion
+
+    def _fill_metrics_tree(self, rows):
         self._block_checks = True
         self.file_tree.clear()
-        metrics_files = discover_metrics_files(self.main_window)
         folder_nodes = {}
-
-        for full_path in sorted(
-            metrics_files.keys(),
-            key=lambda p: natural_sort_key(metrics_files[p]["display"]),
-        ):
-            meta = metrics_files[full_path]
+        for full_path, meta, peek in rows:
             rel = meta.get("relative_folder", "")
             parts = [p for p in rel.replace("\\", "/").split("/") if p] if rel else []
 
@@ -643,16 +736,6 @@ class ReportFileListPanel(QWidget):
                     parent = folder_item
                 else:
                     parent = folder_nodes[current_path]
-
-            try:
-                peek = peek_metrics_metadata(full_path)
-            except (OSError, json.JSONDecodeError):
-                peek = {
-                    "plate_id": "?",
-                    "condition": "?",
-                    "timepoint": "?",
-                    "plant_count": 0,
-                }
 
             file_item = QTreeWidgetItem(parent)
             file_item.setFlags(
@@ -996,8 +1079,8 @@ class ComparisonReportTab(QWidget):
     def _discover_metrics_files(self):
         return discover_metrics_files(self.main_window)
 
-    def refresh_file_list(self):
-        self.file_panel.refresh_file_list()
+    def refresh_file_list(self, force=False):
+        self.file_panel.refresh_file_list(force=force)
 
     def _stratify_value(self, combo):
         text = combo.currentText()
