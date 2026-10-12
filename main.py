@@ -1,5 +1,6 @@
 import sys
 import os
+import traceback
 
 os.environ["QT_LOGGING_RULES"] = "*.debug=false;*.warning=false"
 
@@ -34,6 +35,7 @@ from components.genotype_manager import GenotypeManagerDialog
 from components.workspace_manager import WorkspaceManager
 from components.instance_list import InstanceListPanel
 from components.loading_overlay import LoadingOverlay
+from components.error_report import install_gui_error_handler, report_error_text
 
 from tabs.review_tab import ReviewToolPanel
 from tabs.frangi_tab import FrangiToolPanel
@@ -60,8 +62,8 @@ class ModelWorker(QThread):
         try:
             result = self.func(*self.args, **self.kwargs)
             self.finished.emit(result)
-        except Exception as e:
-            self.error.emit(str(e))
+        except Exception:
+            self.error.emit(traceback.format_exc())
 
 
 class ChronoRootAnnotationSuite(QMainWindow):
@@ -1222,7 +1224,7 @@ class ChronoRootAnnotationSuite(QMainWindow):
             self._stats_cancel = None
         self._apply_dataset_index(totals)
 
-    def _on_folder_stats_error(self, _err_msg):
+    def _on_folder_stats_error(self, err_msg):
         worker = self.sender()
         if worker in self.active_workers:
             self.active_workers.remove(worker)
@@ -1230,6 +1232,7 @@ class ChronoRootAnnotationSuite(QMainWindow):
         if self._stats_cancel is getattr(worker, "stats_token", None):
             self._stats_cancel = None
             self._index_running = False
+        report_error_text(err_msg, parent=self)
 
     def _save_prompt_message(self):
         if self.metadata_dirty and not self.global_model.dirty:
@@ -1647,13 +1650,14 @@ class ChronoRootAnnotationSuite(QMainWindow):
             plant_meta=plant_meta, viz_data=viz_data,
         )
 
-    def _on_inspector_viz_error(self, _message):
+    def _on_inspector_viz_error(self, message):
         worker = self.sender()
         if worker in self.active_workers:
             self.active_workers.remove(worker)
             worker.deleteLater()
         if getattr(worker, "inspector_token", None) == self._inspector_token:
             self._inspector_inflight_uid = None
+        report_error_text(message, parent=self)
 
     def run_export(self, plate_meta):
         if not self.measurements_cache:
@@ -1776,11 +1780,11 @@ class ChronoRootAnnotationSuite(QMainWindow):
             self.active_workers.remove(worker)
             worker.deleteLater()
 
-        QMessageBox.critical(self, "Processing Error", err_msg)
         self._is_closing = False
         self._pending_load_data = None
         self._pending_export_plate_meta = None
         self._pending_measure = None
+        report_error_text(err_msg, parent=self)
 
     # --- Genotype Management ---
     def open_genotype_manager(self):
@@ -1827,6 +1831,14 @@ class ChronoRootAnnotationSuite(QMainWindow):
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
-    window = ChronoRootAnnotationSuite()
+    install_gui_error_handler()
+    try:
+        window = ChronoRootAnnotationSuite()
+    except Exception:
+        report_error_text(
+            "".join(traceback.format_exception(*sys.exc_info())),
+            still_open=False,
+        )
+        sys.exit(1)
     window.show()
     sys.exit(app.exec_())

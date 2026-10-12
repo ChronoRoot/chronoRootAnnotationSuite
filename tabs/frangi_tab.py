@@ -1,3 +1,5 @@
+import traceback
+
 import cv2
 import numpy as np
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QGridLayout, 
@@ -214,8 +216,8 @@ class FrangiWorker(QThread):
         try:
             result = compute_frangi_proposal(self.snapshot)
             self.finished.emit(self.generation, result)
-        except Exception as e:
-            self.error.emit(str(e))
+        except Exception:
+            self.error.emit(traceback.format_exc())
 
 
 class _NoWheelSpinBox(QSpinBox):
