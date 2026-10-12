@@ -22,7 +22,8 @@ from core.model import (
     normalize_annotation_status,
 )
 from core.analyzer_engine import (
-    analyze_single_plant,
+    analyze_prepared_plant,
+    prepare_plant_analysis,
     extract_plate_metrics,
     export_rsml_and_json,
     load_measurements_from_metrics_json,
@@ -1028,6 +1029,37 @@ class ChronoRootAnnotationSuite(QMainWindow):
             self._loading_show_token += 1
             self._loading_overlay.hide_overlay()
 
+    def _release_worker(self):
+        worker = self.sender()
+        if worker is None:
+            return
+        self.active_workers.discard(worker)
+        worker.deleteLater()
+
+    def _join_background_threads(self):
+        """Let running jobs finish before Qt destroys their threads."""
+        self._cancel_dataset_index()
+        panel = getattr(getattr(self, "workspaces", None), "report_file_panel", None)
+        if panel is not None:
+            panel._metrics_cancel["stop"] = True
+        threads = list(self.active_workers)
+        frangi = getattr(getattr(self, "workspaces", None), "canvas_frangi", None)
+        if frangi is not None:
+            threads.extend(frangi.active_workers)
+        for thread in threads:
+            for signal_name in ("finished", "error", "finished_rows"):
+                signal = getattr(thread, signal_name, None)
+                if signal is None:
+                    continue
+                try:
+                    signal.disconnect()
+                except TypeError:
+                    pass
+        for thread in threads:
+            if thread.isRunning():
+                thread.wait()
+        self.active_workers.clear()
+
     def _read_listing_store(self):
         try:
             with open(LISTING_CACHE_FILE, "r", encoding="utf-8") as handle:
@@ -1182,14 +1214,16 @@ class ChronoRootAnnotationSuite(QMainWindow):
             self.global_model.scan_directory, folder_path, out_dir, fixed_output
         )
         worker.scan_folder = folder_path
+        worker.tracks_loading = not showed_snapshot
         self.active_workers.add(worker)
         worker.finished.connect(self._on_scan_finished)
         worker.error.connect(self._on_thread_error)
         worker.start()
 
     def _on_scan_finished(self, contents):
-        self.hide_loading()
         worker = self.sender()
+        if getattr(worker, "tracks_loading", False):
+            self.hide_loading()
         folder = getattr(worker, "scan_folder", self.browser.current_dir) if worker else self.browser.current_dir
         if worker in self.active_workers:
             self.active_workers.remove(worker)
@@ -1602,10 +1636,12 @@ class ChronoRootAnnotationSuite(QMainWindow):
                 )
             return
 
-        if visible:
-            inspector.show_content_state()
-            inspector.lbl_inspector_img.clear()
-            inspector.refresh_plant_metadata(plant_meta, data, uid)
+        if not visible:
+            return
+
+        inspector.show_content_state()
+        inspector.lbl_inspector_img.clear()
+        inspector.refresh_plant_metadata(plant_meta, data, uid)
 
         if plant_meta.get("ignore", False) or uid not in self.global_model.masks:
             self._inspector_viz_cache[uid] = None
@@ -1614,12 +1650,17 @@ class ChronoRootAnnotationSuite(QMainWindow):
         if self._inspector_inflight_uid == uid:
             return
 
+        prepared = prepare_plant_analysis(self.global_model, uid)
+        if prepared is None:
+            self._inspector_viz_cache[uid] = None
+            return
+
         self._inspector_token += 1
         token = self._inspector_token
         self._inspector_inflight_uid = uid
         worker = ModelWorker(
-            analyze_single_plant,
-            self.global_model, uid, genotype, plant_num, live_cm_per_px,
+            analyze_prepared_plant,
+            prepared, uid, genotype, plant_num, live_cm_per_px,
             self.workspaces.canvas_graph.p_prune,
         )
         worker.inspector_token = token
@@ -1771,11 +1812,12 @@ class ChronoRootAnnotationSuite(QMainWindow):
         )
 
     def _on_thread_error(self, err_msg):
-        self.hide_loading()
+        worker = self.sender()
+        if getattr(worker, "tracks_loading", True):
+            self.hide_loading()
         self.global_model.callbacks_muted = False
         self.panel_review.update_undo_state()
 
-        worker = self.sender()
         if worker in getattr(self, "active_workers", set()):
             self.active_workers.remove(worker)
             worker.deleteLater()
@@ -1803,6 +1845,7 @@ class ChronoRootAnnotationSuite(QMainWindow):
 
     def closeEvent(self, event):
         if self._is_closing:
+            self._join_background_threads()
             self.save_interface_config()
             event.accept()
             return
@@ -1820,11 +1863,13 @@ class ChronoRootAnnotationSuite(QMainWindow):
                 self.save_task(mark_finished=False)
                 event.ignore()
             elif reply == QMessageBox.Discard:
+                self._join_background_threads()
                 self.save_interface_config()
                 event.accept()
             else:
                 event.ignore()
         else:
+            self._join_background_threads()
             self.save_interface_config()
             event.accept()
 

@@ -62,19 +62,44 @@ def scalar_metrics_dict(full_results):
     return {uid: plant_scalar_record(data) for uid, data in full_results.items()}
 
 
-def analyze_single_plant(model, uid, genotype, plant_num, cm_per_px, prune_iters=5):
-    """
-    Run skeleton/graph/metrics pipeline for one plant.
-    Returns a full in-memory dict (scalars + transient viz fields) or None.
-    """
+def prepare_plant_analysis(model, uid):
+    """Copy the pixels one analysis needs so a worker never reads the live model."""
+    if model.raw_image is None or uid not in model.masks:
+        return None
     patch_data = model._get_class_patch(uid)
     if not patch_data:
         return None
     patch, x_off, y_off = patch_data
+    patch = np.array(patch, copy=True)
+    y2 = y_off + patch.shape[0]
+    x2 = x_off + patch.shape[1]
+    image_name = os.path.basename(model.image_path) if model.image_path else "unknown_plate.png"
+    return {
+        "patch": patch,
+        "x_off": int(x_off),
+        "y_off": int(y_off),
+        "bin_crop": np.array(model.masks[uid][y_off:y2, x_off:x2], copy=True),
+        "img_shape": model.raw_image.shape[:2],
+        "image_name": image_name,
+    }
 
-    bin_crop = model.masks[uid][y_off:y_off + patch.shape[0], x_off:x_off + patch.shape[1]]
 
-    img_h, img_w = model.raw_image.shape[:2]
+def analyze_single_plant(model, uid, genotype, plant_num, cm_per_px, prune_iters=5):
+    """Run skeleton/graph/metrics for one plant. Returns scalars plus viz fields, or None."""
+    return analyze_prepared_plant(
+        prepare_plant_analysis(model, uid), uid, genotype, plant_num, cm_per_px, prune_iters,
+    )
+
+
+def analyze_prepared_plant(prepared, uid, genotype, plant_num, cm_per_px, prune_iters=5):
+    if not prepared:
+        return None
+    patch = prepared["patch"]
+    x_off = prepared["x_off"]
+    y_off = prepared["y_off"]
+    bin_crop = prepared["bin_crop"]
+    img_h, img_w = prepared["img_shape"]
+    img_filename = prepared["image_name"]
     root_bin = np.zeros((img_h, img_w), dtype=np.uint8)
     mc_skel = np.zeros((img_h, img_w), dtype=np.uint8)
 
@@ -101,7 +126,6 @@ def analyze_single_plant(model, uid, genotype, plant_num, cm_per_px, prune_iters
         print(f"Skipping UID {uid} - Graph Init failed: {e}")
         return None
 
-    img_filename = os.path.basename(model.image_path) if model.image_path else "unknown_plate.png"
     mock_conf = {
         "fileKey": f"UID_{uid}_{genotype}",
         "sequenceLabel": "Static_Extraction",

@@ -148,10 +148,14 @@ def _metrics_search_roots(main_window):
     return roots
 
 
-def discover_metrics_files(main_window):
+def discover_metrics_files(main_window, cancel=None):
     discovered = {}
     for root in _metrics_search_roots(main_window):
+        if cancel is not None and cancel.get("stop"):
+            return discovered
         for dirpath, _, filenames in os.walk(root):
+            if cancel is not None and cancel.get("stop"):
+                return discovered
             for filename in filenames:
                 if not filename.endswith("_Metrics.json"):
                     continue
@@ -459,18 +463,25 @@ def export_report_bundle(target_dir, df, report_queue, color_maps):
 class _MetricsListWorker(QThread):
     finished_rows = pyqtSignal(object)
 
-    def __init__(self, main_window):
+    def __init__(self, main_window, cancel):
         super().__init__()
         self.main_window = main_window
+        self.cancel = cancel
 
     def run(self):
-        metrics_files = discover_metrics_files(self.main_window)
+        if self.cancel.get("stop"):
+            return
+        metrics_files = discover_metrics_files(self.main_window, self.cancel)
+        if self.cancel.get("stop"):
+            return
         rows = []
         ordered = sorted(
             metrics_files.keys(),
             key=lambda path: natural_sort_key(metrics_files[path]["display"]),
         )
         for full_path in ordered:
+            if self.cancel.get("stop"):
+                return
             try:
                 peek = peek_metrics_metadata(full_path)
             except (OSError, json.JSONDecodeError):
@@ -505,7 +516,7 @@ class ReportFileListPanel(QWidget):
         self._cached_roots = None
         self._cached_rows = None
         self._discover_token = 0
-        self._metrics_worker = None
+        self._metrics_cancel = {"stop": False}
         self.init_ui()
 
     def init_ui(self):
@@ -653,13 +664,15 @@ class ReportFileListPanel(QWidget):
                 self._fill_metrics_tree(self._cached_rows)
             return
 
+        self._metrics_cancel["stop"] = True
+        self._metrics_cancel = {"stop": False}
         self._discover_token += 1
-        token = self._discover_token
-        worker = _MetricsListWorker(self.main_window)
-        worker.list_token = token
+        worker = _MetricsListWorker(self.main_window, self._metrics_cancel)
+        worker.list_token = self._discover_token
         worker.list_roots = roots
+        self.main_window.active_workers.add(worker)
         worker.finished_rows.connect(self._on_metrics_rows)
-        self._metrics_worker = worker
+        worker.finished.connect(self.main_window._release_worker, Qt.QueuedConnection)
         worker.start()
 
     def _on_metrics_rows(self, rows):
