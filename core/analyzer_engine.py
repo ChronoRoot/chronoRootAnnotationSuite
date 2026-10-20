@@ -1,12 +1,21 @@
 import numpy as np
-import cv2
 import xml.etree.ElementTree as ET
 import os
 import json
 
-from .root_graph_builder import extract_skeleton, createGraph, graphInit
-from .rsml import createTree
 from .metrics import compute_metrics
+from .root_topology import (
+    Topology,
+    automatic_topology,
+    build_graph,
+    header_for,
+    import_plant,
+    measurement_geometry,
+    restore_saved,
+    plant_element,
+    read_rsml_plants,
+    set_rsml_pixel_scale,
+)
 
 METRICS_SCHEMA_VERSION = 2
 
@@ -17,6 +26,8 @@ METRICS_SCALAR_KEYS = (
     "germinated",
     "mr_length_mm",
     "lr_length_mm",
+    "lr_mean_mm",
+    "lr_std_mm",
     "tr_length_mm",
     "lr_count",
     "lr_density_cm",
@@ -91,134 +102,133 @@ def analyze_single_plant(model, uid, genotype, plant_num, cm_per_px, prune_iters
     )
 
 
-def analyze_prepared_plant(prepared, uid, genotype, plant_num, cm_per_px, prune_iters=5):
+def analyze_prepared_plant(
+    prepared, uid, genotype, plant_num, cm_per_px, prune_iters=5,
+    topology_record=None, decided=False, plant_xml=None,
+):
+    """Measure one plant from its edge-chain topology.
+
+    An in-memory override wins. Otherwise a matching exported plant is mapped
+    onto the current graph. If that map fails, the automatic tree is used.
+    """
     if not prepared:
         return None
-    patch = prepared["patch"]
+    built = build_graph(
+        prepared["patch"], prepared["x_off"], prepared["y_off"],
+        prepared["bin_crop"], prepared["img_shape"], prune_iters,
+    )
+    if built is None:
+        return None
+    graph, colored_skel, full_skel = built
+    topology, warning, imported = _choose_topology(
+        graph, colored_skel, full_skel, prepared["image_name"], uid, genotype,
+        prune_iters, topology_record, decided, plant_xml,
+    )
+    if topology is None:
+        return None
+
     x_off = prepared["x_off"]
     y_off = prepared["y_off"]
-    bin_crop = prepared["bin_crop"]
-    img_h, img_w = prepared["img_shape"]
-    img_filename = prepared["image_name"]
-    root_bin = np.zeros((img_h, img_w), dtype=np.uint8)
-    mc_skel = np.zeros((img_h, img_w), dtype=np.uint8)
-
-    for cid in [1, 2]:
-        active = (patch == cid) & (bin_crop > 0)
-        p_y, p_x = np.where(active)
-        root_bin[p_y + y_off, p_x + x_off] = 1
-        mc_skel[p_y + y_off, p_x + x_off] = cid
-
-    full_skel, branches, endpoints, is_valid = extract_skeleton(root_bin, prune_iters)
-    if not is_valid:
-        return None
-
-    skel_ys, skel_xs = np.where(full_skel > 0)
-    raw_root_base = [skel_xs[np.argmin(skel_ys)], skel_ys[np.argmin(skel_ys)]]
-
-    graph, actual_base, colored_skel = createGraph(
-        full_skel.copy(), mc_skel, raw_root_base, endpoints, branches
+    patch = prepared["patch"]
+    lateral_pts_list, mr_len_px, lr_len_px, main_points, individual_px = measurement_geometry(topology)
+    metrics = compute_metrics(
+        graph, prepared["bin_crop"], cm_per_px, lateral_pts_list, len(lateral_pts_list),
+        length_px=(mr_len_px, lr_len_px), individual_px=individual_px,
     )
-
-    try:
-        graph = graphInit(graph, main_root_class=1)
-    except Exception as e:
-        print(f"Skipping UID {uid} - Graph Init failed: {e}")
-        return None
-
-    mock_conf = {
-        "fileKey": f"UID_{uid}_{genotype}",
-        "sequenceLabel": "Static_Extraction",
-        "Plant": f"Plant_{uid}_{genotype}",
-    }
-
-    try:
-        rsml_tree, number_lateral_roots = createTree(
-            mock_conf, 0, [img_filename], graph, full_skel, colored_skel
-        )
-    except Exception as e:
-        print(f"RSML generation failed for UID {uid}: {e}")
-        return None
-
-    plant_xml = rsml_tree.find(".//plant")
-    metadata_xml = rsml_tree.find(".//metadata")
-
-    lateral_pts_list = []
-    main_root_elem = plant_xml.find("./root[@label='mainRoot']")
-    if main_root_elem is not None:
-        for child in main_root_elem.findall("./root"):
-            if child.get("label", "").startswith("lat_o1"):
-                l_pts = [
-                    [float(pt.attrib["x"]), float(pt.attrib["y"])]
-                    for pt in child.findall("./geometry/polyline/point")
-                ]
-                if len(l_pts) >= 2:
-                    lateral_pts_list.append(l_pts)
-
-    metrics = compute_metrics(graph, bin_crop, cm_per_px, lateral_pts_list, number_lateral_roots)
-
     hull_pts_list = []
     if len(metrics["_hull_pts_local"]) > 0:
         global_hull = metrics["_hull_pts_local"]
         global_hull[:, 0, 0] += x_off
         global_hull[:, 0, 1] += y_off
         hull_pts_list = global_hull.reshape(-1, 2).tolist()
-
     del metrics["_hull_pts_local"]
-
-    ini_pos = None
-    ftip_pos = None
-    for n, d in graph.nodes(data=True):
-        if d.get("type") == "Ini":
-            ini_pos = list(n)
-        elif d.get("type") == "FTip":
-            ftip_pos = list(n)
 
     colored_skel_crop = colored_skel[
         y_off:y_off + patch.shape[0], x_off:x_off + patch.shape[1]
     ]
     rsml_main_colors = [
-        d.get("color", 0) for u, v, d in graph.edges(data=True) if d.get("root_type") == 10
+        data.get("color", 0) for _u, _v, data in graph.edges(data=True) if data.get("root_type") == 10
     ]
-    ui_edges = [
-        (u, v, 1 if d.get("root_type") == 10 else 2) for u, v, d in graph.edges(data=True)
-    ]
-
     return {
         "uid": int(uid),
         "genotype": str(genotype),
         "plant_num": str(plant_num),
-        "ini_pos": ini_pos,
-        "ftip_pos": ftip_pos,
+        "ini_pos": list(main_points[0]) if main_points else None,
+        "ftip_pos": list(main_points[-1]) if main_points else None,
         **metrics,
-        "rsml_xml": plant_xml,
-        "metadata_xml": metadata_xml,
+        "rsml_xml": plant_element(topology, uid, genotype),
+        "metadata_xml": header_for(prepared["image_name"], uid, genotype),
         "lateral_pts_list": lateral_pts_list,
         "hull_pts": hull_pts_list,
         "colored_skel_crop": colored_skel_crop,
         "crop_offset": (x_off, y_off),
         "semantic_patch": patch,
         "main_root_colors": rsml_main_colors,
-        "graph_edges": ui_edges,
+        "graph_edges": [
+            (u, v, 1 if data.get("root_type") == 10 else 2)
+            for u, v, data in graph.edges(data=True)
+        ],
+        "topology_warning": warning,
+        "imported_record": topology.to_record() if imported else None,
     }
 
 
-def extract_plate_metrics(model, plants_meta, cm_per_px, prune_iters=5):
+def _choose_topology(
+    graph, colored, full_skel, image_name, uid, genotype, prune,
+    topology_record, decided, plant_xml,
+):
+    stale = None
+    if topology_record:
+        restored = restore_saved(
+            graph, colored, full_skel, image_name, uid, genotype, prune, topology_record, plant_xml,
+        )
+        if restored is not None:
+            return restored, None, False
+        stale = f"Plant {uid}: the applied topology no longer matches this skeleton, so the automatic tracing was used."
+    if not decided and plant_xml is not None and stale is None:
+        imported = import_plant(graph, colored, plant_xml, prune)
+        if imported is not None:
+            return imported, None, True
+        return automatic_topology(graph, colored, full_skel, image_name, uid, genotype, prune), (
+            f"Plant {uid}: the exported RSML does not match this skeleton, so the automatic tracing was used."
+        ), False
+    try:
+        return automatic_topology(graph, colored, full_skel, image_name, uid, genotype, prune), stale, False
+    except Exception as exc:
+        print(f"RSML generation failed for UID {uid}: {exc}")
+        return None, str(exc), False
+
+
+def extract_plate_metrics(model, plants_meta, cm_per_px, prune_iters=5, topology_path=None):
     results = {}
+    warnings = []
+    imported = {}
+    saved = read_rsml_plants(topology_path)
+    overrides = getattr(model, "topology_overrides", {})
+    decided = getattr(model, "topology_decided", set())
     for p_meta in plants_meta:
-        uid = p_meta["uid"]
+        uid = int(p_meta["uid"])
         # Ignored plants (contamination, damage, ...) are left out of the results entirely.
         if p_meta.get("ignore", False):
             continue
         if not p_meta.get("germinated", True):
             results[uid] = zero_plant_record(uid, p_meta["genotype"], p_meta["plant_num"])
             continue
-        full = analyze_single_plant(
-            model, uid, p_meta["genotype"], p_meta["plant_num"], cm_per_px, prune_iters
+        full = analyze_prepared_plant(
+            prepare_plant_analysis(model, uid), uid, p_meta["genotype"],
+            p_meta["plant_num"], cm_per_px, prune_iters,
+            topology_record=overrides.get(uid),
+            decided=uid in decided,
+            plant_xml=None if uid in decided or uid in overrides else saved.get(uid),
         )
-        if full:
-            results[uid] = full
-    return results
+        if not full:
+            continue
+        if full.get("topology_warning"):
+            warnings.append(full["topology_warning"])
+        if full.get("imported_record") is not None:
+            imported[uid] = full["imported_record"]
+        results[uid] = full
+    return results, warnings, imported
 
 
 class NumpyEncoder(json.JSONEncoder):
@@ -324,7 +334,10 @@ def load_measurements_from_metrics_json(metrics_path, current_uids, plants_metad
                     f"from UID {plant.get('uid')} to UID {new_uid}."
                 )
 
-    missing_uids = uid_set - set(by_uid.keys())
+    missing_uids = {
+        uid for uid in uid_set - set(by_uid.keys())
+        if not (plants_metadata.get(uid) or {}).get("ignore", False)
+    }
     if missing_uids:
         warnings.append(
             f"{len(missing_uids)} annotated plant(s) have no restored measurements."
@@ -364,6 +377,8 @@ def export_rsml_and_json(out_dir, base_name, plate_meta, measurements_dict):
 
         if "rsml_xml" in data and data["rsml_xml"] is not None:
             scene.append(data["rsml_xml"])
+
+    set_rsml_pixel_scale(master_rsml, plate_meta.get("scale_cm_px"))
 
     json_path = os.path.join(out_dir, f"{base_name}_Metrics.json")
     with open(json_path, "w", encoding="utf-8") as f:

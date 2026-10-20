@@ -1,20 +1,32 @@
 import numpy as np
 import cv2
 
-def compute_metrics(graph, bin_crop, cm_per_px, lateral_pts_list, lr_count):
+def compute_metrics(graph, bin_crop, cm_per_px, lateral_pts_list, lr_count, length_px=None, individual_px=None):
     # Unit conversion: cm to mm
     mm_per_px = cm_per_px * 10.0
     
     # =================================================================
     # 1. BASIC ARCHITECTURE
-    # Using Euclidean edge weights directly from the graph
+    # Automatic plants use graph edge weights. A manual RSML passes
+    # polyline lengths instead, so a segment in two roots counts twice.
     # =================================================================
-    mr_len_px = sum(d.get('weight', 0.0) for u, v, d in graph.edges(data=True) if d.get('root_type') == 10)
-    lr_len_px = sum(d.get('weight', 0.0) for u, v, d in graph.edges(data=True) if d.get('root_type') != 10)
+    if length_px is None:
+        mr_len_px = sum(d.get('weight', 0.0) for u, v, d in graph.edges(data=True) if d.get('root_type') == 10)
+        lr_len_px = sum(d.get('weight', 0.0) for u, v, d in graph.edges(data=True) if d.get('root_type') != 10)
+    else:
+        mr_len_px, lr_len_px = length_px
     
     mr_len_mm = float(mr_len_px * mm_per_px)
     lr_len_mm = float(lr_len_px * mm_per_px)
     tr_len_mm = mr_len_mm + lr_len_mm
+    # Mean and std of each non-main root on its own. Not the total divided by the count.
+    if individual_px:
+        each_mm = np.asarray(individual_px, dtype=float) * mm_per_px
+        lr_mean_mm = float(np.mean(each_mm))
+        lr_std_mm = float(np.std(each_mm)) if len(each_mm) > 1 else 0.0
+    else:
+        lr_mean_mm = 0.0
+        lr_std_mm = 0.0
     
     # Discrete LR Density: 10 * Number of LRs / MR Length (mm) -> equivalent to LRs/cm
     lr_density = (10.0 * lr_count / mr_len_mm) if mr_len_mm > 0 else 0.0
@@ -67,6 +79,8 @@ def compute_metrics(graph, bin_crop, cm_per_px, lateral_pts_list, lr_count):
         # Basic Architecture
         "mr_length_mm": mr_len_mm,
         "lr_length_mm": lr_len_mm,
+        "lr_mean_mm": lr_mean_mm,
+        "lr_std_mm": lr_std_mm,
         "tr_length_mm": tr_len_mm,
         "lr_count": int(lr_count),
         "lr_density_cm": lr_density,

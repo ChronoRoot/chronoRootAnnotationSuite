@@ -1,3 +1,5 @@
+from collections import deque
+
 import numpy as np
 import cv2
 import networkx as nx
@@ -90,16 +92,6 @@ def get_roi_bounding_box(mask, padding=5):
 def extract_skeleton(binary_mask, prune_iters=5):
     """Generates skeleton and topological points directly from a numpy array."""
 
-    # Clean up mask with morphological operations 
-    morph_kernel_size = 3
-    morph_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (morph_kernel_size, morph_kernel_size))
-    binary_mask = cv2.dilate(binary_mask, morph_kernel)
-    binary_mask = cv2.erode(binary_mask, morph_kernel)
-    
-    morph_kernel_size = 3
-    morph_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (morph_kernel_size, morph_kernel_size))
-    binary_mask = cv2.erode(binary_mask, morph_kernel)
-    binary_mask = cv2.dilate(binary_mask, morph_kernel)
     
     roi_slice, offset = get_roi_bounding_box(binary_mask)
     if roi_slice is None:
@@ -494,3 +486,72 @@ def graphInit(graph, main_root_class=1):
             print(f"Warning: Disconnected graph structure between {ini_node} and {ftip_node}.")
 
     return graph
+
+
+def _as_point(point):
+    return (int(point[0]), int(point[1]))
+
+
+def _point_key(point):
+    x, y = _as_point(point)
+    return (y, x)
+
+
+def assign_edge_polylines(graph, colored_skeleton):
+    """Give every graph edge one stable id and one ordered pixel polyline.
+
+    The polyline runs from the endpoint with the smaller (y, x) to the other.
+    A positive reference follows that direction; a negative one reverses it.
+    """
+    ordered = sorted(
+        graph.edges(data=True),
+        key=lambda item: tuple(sorted((_point_key(item[0]), _point_key(item[1])))),
+    )
+    by_color = {}
+    if colored_skeleton is not None:
+        rows, cols = np.where(colored_skeleton > 2)
+        for y, x in zip(rows, cols):
+            by_color.setdefault(int(colored_skeleton[y, x]), []).append((int(x), int(y)))
+
+    for edge_id, (start, end, data) in enumerate(ordered, start=1):
+        a, b = _as_point(start), _as_point(end)
+        if _point_key(b) < _point_key(a):
+            a, b = b, a
+        pixels = by_color.get(int(data.get("color", 0)), [])
+        points = _polyline_between(a, b, pixels)
+        data["edge_id"] = edge_id
+        data["points"] = points
+        data["canonical_start"] = points[0]
+        data["canonical_end"] = points[-1]
+
+
+def _polyline_between(start, end, pixels):
+    pool = set(pixels)
+    pool.add(start)
+    pool.add(end)
+    if start == end:
+        return [start]
+    previous = {start: None}
+    queue = deque([start])
+    found = False
+    while queue:
+        current = queue.popleft()
+        if current == end:
+            found = True
+            break
+        x, y = current
+        for ny in range(y - 1, y + 2):
+            for nx in range(x - 1, x + 2):
+                nxt = (nx, ny)
+                if nxt in pool and nxt not in previous:
+                    previous[nxt] = current
+                    queue.append(nxt)
+    if not found:
+        return [start, end]
+    path = []
+    current = end
+    while current is not None:
+        path.append(current)
+        current = previous[current]
+    path.reverse()
+    return path

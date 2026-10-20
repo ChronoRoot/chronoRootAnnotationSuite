@@ -151,7 +151,24 @@ The white **skeleton** may look fine, but the colored **main root path** may be 
 When skeleton and main-root path look correct for every plant, proceed to **Finish Annotation**. You are done here unless you continue to trait measurement.
 
 
-## 7. Measurement & Export (optional)
+## 7. RSML Lateral Root Fixes (optional)
+
+Skip this tab when the automatic root tracing is already right.
+
+Use **RSML Lateral Root Fixes** when a lateral crosses another root and everything past the cross is stored as a tertiary, or when two laterals running in parallel were skeletonized as one thick root.
+
+1. Select the plant.
+2. The view matches Phenomics review: **Raw image**, **Dense segmentation**, **RSML**, or **Each lateral root**. **Each lateral root** is the default. The list names every root. Segments that are not in a root yet are under **Available segments**. **Show only the selected root** hides the others.
+3. The mouse wheel zooms. Ctrl-drag or the middle button pans.
+4. Click a row to select it. Ctrl or Shift selects a second row: the first is the target and the second is the source.
+5. **Show direction** draws arrows from the beginning of each root to its end. **Show nodes** draws the joins. **Show only the selected root** hides the others. The selected root is drawn on top.
+6. A click selects one segment. Shift-click or Ctrl-click adds a second. **Connect** joins them only when they share an endpoint.
+7. **Split** on the main root copies the next segment and leaves the main root connected. On a lateral, the tip side becomes a child of that lateral. **Reverse direction** is only for a root that begins and ends at a branch, not one that reaches a tip.
+8. **Reuse segment** keeps the segment in its root and adds a copy to Available segments, for a lateral that runs along the same thick shaft. **Remove copy** deletes an extra copy. The last copy stays.
+9. **Keep fixes for this plant** keeps the edit in memory. It does not write a file. **Export** writes every active plant into `Topology.rsml`.
+
+
+## 8. Measurement & Export (optional)
 
 Skip this section unless you need phenotypic traits or batch comparisons.
 
@@ -175,7 +192,7 @@ Open the middle panel sub-tab **Plant Metadata** (beside Annotation Controls).
 2. **Export** — writes trait outputs for this plate.
 
 
-## 8. Phenomics Inspector & Batch Reports (optional)
+## 9. Phenomics Inspector & Batch Reports (optional)
 
 ### Phenomics Inspector
 

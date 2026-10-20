@@ -28,6 +28,8 @@ from components.ui_help import HELP_BATCH, show_help
 METRIC_MAPPING = {
     "mr_length_mm": "Main Root Length (mm)",
     "lr_length_mm": "Lateral Root Length (mm)",
+    "lr_mean_mm": "Mean Individual LR Length (mm)",
+    "lr_std_mm": "Individual LR Length SD (mm)",
     "tr_length_mm": "Total Root Length (mm)",
     "lr_count": "Lateral Root Count",
     "lr_density_cm": "LR Density (LRs/cm)",

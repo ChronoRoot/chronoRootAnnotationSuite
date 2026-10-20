@@ -375,9 +375,20 @@ def add_point(polyline, point):
     """Helper to add an XML point"""
     ET.SubElement(polyline, 'point', {'x': str(point[0]), 'y': str(point[1])}).tail = '\n\t\t\t\t'
 
+def rsml_template_path():
+    """Header template shipped with the app, with the legacy relative path first."""
+    candidates = [
+        os.path.join("analysis", "default.rsml"),
+        os.path.join(os.path.dirname(__file__), "default.rsml"),
+    ]
+    for path in candidates:
+        if os.path.isfile(path):
+            return path
+    return candidates[-1]
+
+
 def createHeader(conf, i, images):
-    rsml_file = "analysis/default.rsml"
-    tree = ET.parse(rsml_file)
+    tree = ET.parse(rsml_template_path())
     root = tree.getroot()
     metadata = root[0]
     scene = root[1]   

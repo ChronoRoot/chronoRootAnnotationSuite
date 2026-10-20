@@ -13,7 +13,8 @@ HELP_WORKFLOW = """<b>How to use this app</b><br><br>
 <b>Annotation path</b><br>
 • <b>Annotation</b> — select a plant, fix masks and root-part labels.<br>
 • <b>Centerline Cleanup</b> — compare panels; <b>Apply to this plant</b> if refinement looks better.<br>
-• <b>Root Tracing Check</b> — confirm skeleton and main-root path per plant.<br><br>
+• <b>Root Tracing Check</b> — confirm skeleton and main-root path per plant.<br>
+• <b>RSML Lateral Root Fixes</b> — optional. Fix crossings and shared laterals before measuring.<br><br>
 <b>Traits path</b><br>
 • <b>Plant Metadata</b> — plate fields, scale, genotypes.<br>
 • <b>Run Measurements</b>, then <b>Save Results</b>.<br>
@@ -32,7 +33,7 @@ HELP_ANNOTATION = """<b>Annotation</b><br><br>
 • <b>Shape Paint</b> — left adds outline, right erases.<br>
 • <b>Split (Knife)</b> — cut fused plants; double-click to finish the line.<br>
 • <b>Split disconnected fragments</b> — one ID split into separate plants.<br>
-• <b>Undo Last Action</b> — undo the last paint, seed, split, merge, delete, Graph, or Frangi action. History resets after save or load.<br>
+• <b>Undo Last Action</b> — undo the last paint, seed, split, merge, delete, Graph, Frangi, or saved RSML action. History resets after save or load.<br>
 • <b>Multi-Class Paint</b> — Main Root, Lateral Root, Hypocotyl, and other root-part labels.<br><br>
 <b>Brush Size</b> and <b>Overlay Opacity</b> — adjust paint brush and mask transparency.<br><br>
 <b>Navigation:</b> Ctrl+drag to pan, wheel to zoom."""
@@ -92,6 +93,53 @@ Select each plant and confirm skeleton and main-root path look correct.<br><br>
 Disconnected masks — use <b>Split disconnected fragments</b> or fix in Annotation.<br>
 Click <b>Save root tracing for this plant</b> to commit colors to the mask."""
 
+HELP_RSML = """<b>RSML lateral root fixes</b><br><br>
+Optional. Use this when a crossing turns the rest of a lateral into tertiaries,
+or when two laterals running side by side were traced as one thick root.
+Skip it when the automatic RSML is already right.<br><br>
+
+The list names every root. Segments that are not in a root yet are listed under
+<b>Available segments</b>.<br><br>
+
+The view is the same as Phenomics review:<br>
+• <b>Raw image</b><br>
+• <b>Dense segmentation</b><br>
+• <b>RSML</b> — one color per branching level<br>
+• <b>Each lateral root</b> — the default. Main root red, every other root its own color.
+<b>Show only the selected root</b> hides the others.
+<b>Show direction</b> draws arrows from the beginning of each root to its end.
+<b>Show nodes</b> draws the joins between segments.<br><br>
+
+The mouse wheel zooms. Ctrl-drag or the middle button pans.<br><br>
+
+<b>Select</b> — click a segment or a row. Shift or Ctrl adds a second one.
+Double-click a segment to select its whole root.
+A plain click shows only that root, drawn on top of the others.<br>
+<b>Connect</b> — Shift or Ctrl selects the second piece. They are joined only
+when an endpoint is shared. The first root keeps its direction. Pieces that do
+not touch stay apart, and the message says where each one begins and ends.<br>
+<b>Reverse direction</b> — swap the beginning and the end, only when both ends
+are branching nodes. A root that reaches a tip keeps its direction.<br>
+<b>Split at intersection</b> — select a lateral segment that is joined to other
+segments, then press the button. That segment is split off. A segment that is
+already on its own is left unchanged. The main root cannot be split this way.<br>
+<b>Generate a split point</b> — press the button, then click a point on a segment,
+including the main root. The segment is cut there and the shorter piece stays
+selected, so Copy segment can take only that part. The main root stays connected.<br>
+<b>Copy segment</b> — select a root, or click one segment, then copy it.
+The original root keeps that segment. A copy that begins on the main root becomes
+a new lateral; any other copy appears in Available segments, drawn with a yellow border.<br>
+<b>Line width</b> — thickness of the root lines, in pixels. Use a thin line when zoomed out.<br>
+<b>Remove copy</b> — remove an extra copy. The last copy of a segment stays.<br>
+<b>Undo</b> — undo the last edit in this view.<br>
+<b>Reset</b> — discard the topology kept for this plant and trace it again.<br><br>
+
+<b>Keep fixes for this plant</b> keeps the result in memory. It does not write
+a file. Measure and Export use it. Export writes every active plant into
+Topology.rsml. A segment that belongs to two roots counts once in each root.<br><br>
+
+If a segment is still unused, Keep fixes explains why it cannot be stored yet."""
+
 HELP_METADATA = """<b>Plate information &amp; scale</b><br><br>
 Fill plate ID, condition, timepoint, and image scale.<br>
 Enter genotype and plant number in the table.<br><br>
@@ -118,11 +166,12 @@ Click <b>Save Results</b> to write trait outputs for this plate."""
 
 HELP_INSPECTOR = """<b>Phenomics review</b><br><br>
 
-<b>Root Representation</b><br>
-• <b>Colored root parts (annotation)</b> — semantic labels from Annotation.<br>
-• <b>Colored skeleton</b> — mask pixels validated by Root Tracing Check.<br>
-• <b>RSML architecture preview</b> — topology overlay.<br>
-• <b>Raw image only</b> — scanner image without overlays.<br><br>
+<b>View</b><br>
+• <b>Raw image</b> — scanner image without overlays.<br>
+• <b>Dense segmentation</b> — main root and lateral root labels from Annotation.<br>
+• <b>RSML</b> — main red, lateral green, tertiary cyan, quaternary magenta.<br>
+• <b>Each lateral root</b> — main root in red, every other root in its own color.
+This is the default.<br><br>
 
 <b>Biological Features</b><br>
 • <b>Hide Angles</b>, <b>Lateral emergence angle (2 mm)</b>, or <b>Overall Tip Angles</b>.<br>

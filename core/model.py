@@ -302,6 +302,10 @@ class PlantImageModel:
         self.class_patches = {}
         self.plants_meta = {}
         self.plate_meta = {}
+        # Applied RSML edge chains. RAM only; Export is what writes Topology.rsml.
+        self.topology_overrides = {}
+        self.topology_decided = set()
+        self.content_epoch = 0
         self.class_colors = {
             0: (0, 0, 0, 0),        
             1: (255, 0, 0, 255),    
@@ -404,7 +408,7 @@ class PlantImageModel:
         """Inject per-plant and plate metadata before save."""
         if plants_meta is not None:
             self.plants_meta = {
-                int(uid): normalize_plant_meta(meta, uid)
+                int(uid): normalize_plant_meta(meta, int(uid))
                 for uid, meta in plants_meta.items()
             }
         if plate_meta is not None:
@@ -470,6 +474,10 @@ class PlantImageModel:
         self.max_id = max(mapping.values())
         self.clear_history()
         self._remap_plants_meta(mapping)
+        self.topology_overrides = {
+            mapping.get(uid, uid): record for uid, record in self.topology_overrides.items()
+        }
+        self.topology_decided = {mapping.get(uid, uid) for uid in self.topology_decided}
 
     # --- Directory scan ---
     def _metrics_name_set(self, output_dir, fixed_output):
@@ -678,6 +686,8 @@ class PlantImageModel:
         self.class_patches.clear()
         self.plants_meta.clear()
         self.plate_meta.clear()
+        self.topology_overrides.clear()
+        self.topology_decided.clear()
         
         # Load new data
         self.status = "pending"
@@ -734,6 +744,7 @@ class PlantImageModel:
                 self._sync_class_patch(uid, json_crop, None)
             else:
                 self._get_class_patch(uid)
+        self.content_epoch += 1
 
     # --- Mask validation & spatial sort ---
     def clean_and_validate_masks(self):

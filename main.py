@@ -1,3 +1,4 @@
+import hashlib
 import sys
 import os
 import traceback
@@ -17,16 +18,19 @@ from PyQt5.QtCore import Qt, QThread, pyqtSignal, QSize, QTimer
 from core.model import (
     PlantImageModel,
     annotation_status_display,
+    canonical_topology_name,
     metrics_path,
     topology_path,
     normalize_annotation_status,
 )
+from core.root_topology import read_rsml_plants
 from core.analyzer_engine import (
     analyze_prepared_plant,
     prepare_plant_analysis,
     extract_plate_metrics,
     export_rsml_and_json,
     load_measurements_from_metrics_json,
+    plant_scalar_record,
     scalar_metrics_dict,
 )
 
@@ -41,6 +45,7 @@ from components.error_report import install_gui_error_handler, report_error_text
 from tabs.review_tab import ReviewToolPanel
 from tabs.frangi_tab import FrangiToolPanel
 from tabs.graph_tab import GraphToolPanel
+from tabs.topology_tab import RsmlToolPanel
 
 APP_NAME = "chronoRootAnnotationSuite"
 CONFIG_DIR = os.path.expanduser(f"~/.config/{APP_NAME}")
@@ -79,6 +84,7 @@ class ChronoRootAnnotationSuite(QMainWindow):
         self.global_model = PlantImageModel()
         self.active_workers = set()
         self.measurements_cache = {}
+        self._measured_fingerprint = None
         self.is_calibrating = False
         self.metadata_dirty = False
 
@@ -163,7 +169,14 @@ class ChronoRootAnnotationSuite(QMainWindow):
             sizes = list(self.splitter.sizes())
             if not self._focus_mode_active:
                 ws = self.workspaces.currentIndex()
-                if sizes[1] == 0 and ws in (0, 1, 2, 3, 5):
+                if sizes[1] == 0 and ws in (
+                    WorkspaceManager.TAB_ANNOTATION,
+                    WorkspaceManager.TAB_CENTERLINE,
+                    WorkspaceManager.TAB_TRACING,
+                    WorkspaceManager.TAB_RSML,
+                    WorkspaceManager.TAB_INSPECTOR,
+                    WorkspaceManager.TAB_ABOUT,
+                ):
                     sizes[1] = self._saved_middle_width or 320
                 elif sizes[1] > 0:
                     self._saved_middle_width = sizes[1]
@@ -278,6 +291,13 @@ class ChronoRootAnnotationSuite(QMainWindow):
         self.panel_graph = GraphToolPanel(
             self.global_model, self.workspaces.canvas_graph
         )
+        self.panel_rsml = RsmlToolPanel(
+            self.global_model, self.workspaces.canvas_rsml
+        )
+        self.workspaces.canvas_rsml.path_provider = self._topology_write_path
+        self.workspaces.canvas_rsml.prune_provider = lambda: self.workspaces.canvas_graph.p_prune
+        self.workspaces.canvas_rsml.scale_provider = self._plate_cm_per_px
+        self.workspaces.canvas_rsml.topology_applied.connect(self._on_topology_applied)
 
         self.instance_list = InstanceListPanel(
             self.global_model, self.workspaces, review_tool_panel=self.panel_review, annotation_tab_index=0
@@ -301,6 +321,7 @@ class ChronoRootAnnotationSuite(QMainWindow):
         self.tool_stack.addWidget(self.panel_review)
         self.tool_stack.addWidget(self.panel_frangi)
         self.tool_stack.addWidget(self.panel_graph)
+        self.tool_stack.addWidget(self.panel_rsml)
         self.tool_stack.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
         al.addWidget(self.tool_stack, stretch=0)
 
@@ -456,7 +477,7 @@ class ChronoRootAnnotationSuite(QMainWindow):
             self.browser.set_browser_controls_visible(True)
 
     def toggle_middle_panel(self):
-        if self._focus_mode_active or self.workspaces.currentIndex() != 4:
+        if self._focus_mode_active or self.workspaces.currentIndex() != WorkspaceManager.TAB_BATCH:
             return
         sizes = self._splitter_sizes()
         if self._panel_expanded(sizes[1]):
@@ -537,6 +558,7 @@ class ChronoRootAnnotationSuite(QMainWindow):
         graph.p_target_classes = g_cfg.get("target_classes", [1, 2])
 
     def wire_signals(self):
+        self._workspace_index = WorkspaceManager.TAB_ANNOTATION
         self.workspaces.workspace_changed.connect(self._on_workspace_changed)
 
         self.browser.refresh_requested.connect(self.scan_directory)
@@ -586,7 +608,7 @@ class ChronoRootAnnotationSuite(QMainWindow):
     def _ensure_middle_panel_visible_on_startup(self):
         if self._focus_mode_active:
             return
-        if self.workspaces.currentIndex() == 5:
+        if self.workspaces.currentIndex() == WorkspaceManager.TAB_ABOUT:
             return
         if not self._panel_expanded(self.splitter.sizes()[1]):
             self.expand_middle_panel()
@@ -599,16 +621,39 @@ class ChronoRootAnnotationSuite(QMainWindow):
             self._set_panel_toggle_appearance(self.btn_toggle_files, expanded=True)
 
     def _on_workspace_changed(self, index):
+        if getattr(self, "_workspace_guard", False):
+            return
+        previous = getattr(self, "_workspace_index", None)
+        if (
+            previous == WorkspaceManager.TAB_RSML
+            and index != previous
+            and self.workspaces.canvas_rsml.has_unsaved_edits()
+        ):
+            self._workspace_guard = True
+            self.workspaces.setCurrentIndex(previous)
+            self._workspace_guard = False
+            if not self.workspaces.canvas_rsml.confirm_leave():
+                return
+            self._workspace_guard = True
+            self.workspaces.setCurrentIndex(index)
+            self._workspace_guard = False
+        self._workspace_index = index
         self._sync_workspace_ui(index)
 
     def _sync_workspace_ui(self, index):
-        if index != 0:
+        if index != WorkspaceManager.TAB_ANNOTATION:
             # Leaving Annotation abandons a seed placement that was never clicked.
             self.panel_phenomics.set_seed_mode(False)
-        if index in [0, 1, 2, 3]:
+        if index in (
+            WorkspaceManager.TAB_ANNOTATION,
+            WorkspaceManager.TAB_CENTERLINE,
+            WorkspaceManager.TAB_TRACING,
+            WorkspaceManager.TAB_RSML,
+            WorkspaceManager.TAB_INSPECTOR,
+        ):
             self.ensure_active_plant()
 
-        is_batch = index == 4
+        is_batch = index == WorkspaceManager.TAB_BATCH
         self.btn_toggle_plates.setVisible(is_batch)
         self.btn_toggle_plates.setEnabled(is_batch and not self._focus_mode_active)
         if is_batch:
@@ -619,21 +664,26 @@ class ChronoRootAnnotationSuite(QMainWindow):
 
         self.instance_list.sync_toolbar_for_tab(index)
 
-        if index in [0, 1, 2]:
+        if index in (
+            WorkspaceManager.TAB_ANNOTATION,
+            WorkspaceManager.TAB_CENTERLINE,
+            WorkspaceManager.TAB_TRACING,
+            WorkspaceManager.TAB_RSML,
+        ):
             self.control_tabs.setEnabled(True)
             self.middle_stack.setCurrentIndex(0)
             self.tool_stack.setCurrentIndex(index)
-            if index in [1, 2]:
+            if index != WorkspaceManager.TAB_ANNOTATION:
                 self.control_tabs.setCurrentIndex(0)
             if not self._panel_expanded(self.splitter.sizes()[1]) and not self._focus_mode_active:
                 self.expand_middle_panel()
 
-            if index == 0:
+            if index == WorkspaceManager.TAB_ANNOTATION:
                 self.panel_review.force_mode("SELECT")
                 if self.global_model.active_uid:
                     self.workspaces.canvas_review.zoom_to_plant(self.global_model.active_uid)
 
-        elif index == 3:
+        elif index == WorkspaceManager.TAB_INSPECTOR:
             self.control_tabs.setEnabled(True)
             self.middle_stack.setCurrentIndex(0)
             self.control_tabs.setCurrentIndex(1)
@@ -641,14 +691,14 @@ class ChronoRootAnnotationSuite(QMainWindow):
                 self.expand_middle_panel()
             self.sync_inspector()
 
-        elif index == 4:
+        elif index == WorkspaceManager.TAB_BATCH:
             self.control_tabs.setEnabled(False)
             self.middle_stack.setCurrentIndex(1)
             if not self._focus_mode_active and self.splitter.sizes()[1] == 0:
                 self.expand_middle_panel()
             self.refresh_report_plates_if_active()
 
-        elif index == 5:
+        elif index == WorkspaceManager.TAB_ABOUT:
             self.control_tabs.setEnabled(False)
             self.middle_stack.setCurrentIndex(0)
             if not self._focus_mode_active:
@@ -708,6 +758,48 @@ class ChronoRootAnnotationSuite(QMainWindow):
             return False
         return self.global_model.dirty or self.metadata_dirty
 
+    def _measurement_fingerprint(self):
+        """Segmentation and RSML state the current measurements were built from."""
+        model = self.global_model
+        rsml = self.workspaces.canvas_rsml
+        parts = []
+        for uid in sorted(model.plant_uids()):
+            parts.append(str(uid).encode())
+            parts.append((rsml._content_token(uid) or "").encode())
+            record = model.topology_overrides.get(uid)
+            parts.append(json.dumps(record, sort_keys=True, default=str).encode() if record else b"-")
+            parts.append(b"1" if uid in model.topology_decided else b"0")
+        if rsml.has_unsaved_edits() and rsml.topology is not None:
+            parts.append(json.dumps(rsml.topology.to_record(), sort_keys=True, default=str).encode())
+        return hashlib.sha1(b"\0".join(parts)).hexdigest()
+
+    def _note_measurements_current(self):
+        self._measured_fingerprint = (
+            self._measurement_fingerprint() if self.measurements_cache else None
+        )
+
+    def _measurements_are_stale(self):
+        if not self.measurements_cache or not self._measured_fingerprint:
+            return False
+        return self._measurement_fingerprint() != self._measured_fingerprint
+
+    def _confirm_leave_stale_measurements(self):
+        """True when the user leaves. Stay keeps the current image open."""
+        if not self._measurements_are_stale():
+            return True
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle("Measurements out of date")
+        box.setText(
+            "Phenomics measurements were generated with old data. "
+            "The segmentation or the RSML has changed since they were measured."
+        )
+        stay = box.addButton("Stay", QMessageBox.RejectRole)
+        leave = box.addButton("Leave", QMessageBox.AcceptRole)
+        box.setDefaultButton(stay)
+        box.exec_()
+        return box.clickedButton() == leave
+
     def _resolve_metrics_path(self, task_dir=None, base_name=None):
         task_dir = task_dir or self.current_task_path
         base_name = base_name or self.current_base_name
@@ -731,6 +823,73 @@ class ChronoRootAnnotationSuite(QMainWindow):
         if not path and out_dir != task_dir:
             path = topology_path(task_dir, base_name)
         return path
+
+    def _plate_cm_per_px(self):
+        shape = self.global_model.raw_image.shape if self.global_model.raw_image is not None else None
+        return self.panel_phenomics.get_cm_per_px(shape)
+
+    def _topology_write_path(self, task_dir=None, base_name=None):
+        """Where a hand-edited RSML is stored, even when the file does not exist yet."""
+        existing = self._resolve_topology_path(task_dir, base_name)
+        if existing:
+            return existing
+        task_dir = task_dir or self.current_task_path
+        base_name = base_name or self.current_base_name
+        if not task_dir or not base_name:
+            return None
+        out_dir = self.browser.get_effective_output_dir(task_dir) or task_dir
+        return os.path.join(out_dir, canonical_topology_name(base_name))
+
+    def _on_topology_applied(self, uid):
+        """Measure and the inspector read the topology kept in memory."""
+        uid = int(uid)
+        self._inspector_viz_cache.pop(uid, None)
+        if uid not in self.measurements_cache:
+            self.sync_inspector()
+            return
+        meta = self.global_model.plants_meta.get(uid) or {}
+        prepared = prepare_plant_analysis(self.global_model, uid)
+        if prepared is None:
+            self.sync_inspector()
+            return
+        shape = self.global_model.raw_image.shape if self.global_model.raw_image is not None else None
+        cm_per_px = self.panel_phenomics.get_cm_per_px(shape) or 1.0
+        worker = ModelWorker(
+            analyze_prepared_plant,
+            prepared, uid, meta.get("genotype") or "Unknown",
+            meta.get("plant_num") or str(uid), cm_per_px,
+            self.workspaces.canvas_graph.p_prune,
+            self.global_model.topology_overrides.get(uid),
+            uid in self.global_model.topology_decided,
+            None,
+        )
+        worker.tracks_loading = False
+        self.active_workers.add(worker)
+        worker.finished.connect(self._on_topology_refreshed)
+        worker.error.connect(self._on_thread_error)
+        worker.start()
+
+    def _on_topology_refreshed(self, viz):
+        worker = self.sender()
+        if worker in self.active_workers:
+            self.active_workers.remove(worker)
+            worker.deleteLater()
+        if not viz:
+            return
+        uid = int(viz["uid"])
+        self.measurements_cache[uid] = plant_scalar_record(viz)
+        self._note_measurements_current()
+        self._inspector_viz_cache[uid] = viz
+        self.sync_inspector()
+
+    def _remember_imported_topology(self, imported):
+        """Keep a file that mapped onto the current graph, until the user resets it."""
+        for uid, record in (imported or {}).items():
+            uid = int(uid)
+            if uid in self.global_model.topology_decided:
+                continue
+            if uid not in self.global_model.topology_overrides:
+                self.global_model.topology_overrides[uid] = record
 
     @staticmethod
     def _is_identity_uid_mapping(mapping):
@@ -756,7 +915,7 @@ class ChronoRootAnnotationSuite(QMainWindow):
         return "not_applicable"
 
     def refresh_report_plates_if_active(self):
-        if self.workspaces.currentIndex() == 4:
+        if self.workspaces.currentIndex() == WorkspaceManager.TAB_BATCH:
             self.workspaces.report_file_panel.refresh_file_list()
 
     def _on_input_dir_changed(self, path):
@@ -851,11 +1010,13 @@ class ChronoRootAnnotationSuite(QMainWindow):
 
         if topology_changed:
             self.measurements_cache.clear()
+            self._measured_fingerprint = None
             self._clear_inspector_viz()
             self.panel_phenomics.reset_measurements()
             self.workspaces.inspector_tab.show_no_measurements_state()
         elif mapping_changed:
             self._remap_measurements_cache(uid_mapping)
+            self._note_measurements_current()
             self.sync_inspector()
 
     def _clear_inspector_viz(self):
@@ -1276,6 +1437,7 @@ class ChronoRootAnnotationSuite(QMainWindow):
         return "Save annotation changes?"
 
     def load_file(self, data):
+        discarded_unsaved = False
         if self._is_task_dirty():
             reply = QMessageBox.question(
                 self, "Save?",
@@ -1289,6 +1451,10 @@ class ChronoRootAnnotationSuite(QMainWindow):
             if reply == QMessageBox.Cancel:
                 self._pending_open_annotation_tab = False
                 return
+            discarded_unsaved = True
+        if not discarded_unsaved and not self._confirm_leave_stale_measurements():
+            self._pending_open_annotation_tab = False
+            return
 
         self._execute_load(data)
 
@@ -1349,6 +1515,7 @@ class ChronoRootAnnotationSuite(QMainWindow):
         )
 
         self.measurements_cache.clear()
+        self._measured_fingerprint = None
         self._clear_inspector_viz()
         self.panel_phenomics.reset_measurements()
         self.workspaces.inspector_tab.show_no_measurements_state()
@@ -1394,23 +1561,6 @@ class ChronoRootAnnotationSuite(QMainWindow):
         if not metrics_path:
             return
 
-        reply = QMessageBox.question(
-            self,
-            "Existing Analysis",
-            f"Found prior analysis export:\n{os.path.basename(metrics_path)}\n\n"
-            "• Yes — restore measurements into the inspector\n"
-            "• No — delete previous analysis files\n"
-            "• Cancel — keep files on disk but do not load them now",
-            QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
-            QMessageBox.Yes,
-        )
-
-        if reply == QMessageBox.Cancel:
-            return
-        if reply == QMessageBox.No:
-            self._delete_previous_analysis_files(metrics_path)
-            return
-
         self._restore_analysis_from_metrics(metrics_path)
 
     def _delete_previous_analysis_files(self, metrics_path):
@@ -1428,6 +1578,7 @@ class ChronoRootAnnotationSuite(QMainWindow):
                 return
 
         self.measurements_cache.clear()
+        self._measured_fingerprint = None
         self._clear_inspector_viz()
         self.panel_phenomics.reset_measurements()
         self.workspaces.inspector_tab.show_no_measurements_state()
@@ -1456,6 +1607,7 @@ class ChronoRootAnnotationSuite(QMainWindow):
             return
 
         self.measurements_cache = restored
+        self._note_measurements_current()
         self.panel_phenomics.btn_export.setEnabled(True)
         self.sync_inspector()
 
@@ -1528,7 +1680,8 @@ class ChronoRootAnnotationSuite(QMainWindow):
         elif self._pending_load_data:
             data_to_load = self._pending_load_data
             self._pending_load_data = None
-            self._execute_load(data_to_load)
+            if self._confirm_leave_stale_measurements():
+                self._execute_load(data_to_load)
         elif self.current_file_path:
             ann_display = annotation_status_display(self.global_model.status)
             self.browser.update_file_status_in_cache(
@@ -1579,27 +1732,35 @@ class ChronoRootAnnotationSuite(QMainWindow):
             plants_meta,
             cm_per_px,
             self.workspaces.canvas_graph.p_prune,
+            self._topology_write_path(),
         )
         self.active_workers.add(worker)
         worker.finished.connect(self._on_measure_finished)
         worker.error.connect(self._on_thread_error)
         worker.start()
 
-    def _on_measure_finished(self, results_dict):
+    def _on_measure_finished(self, payload):
         self.hide_loading()
         worker = self.sender()
         if worker in self.active_workers:
             self.active_workers.remove(worker)
             worker.deleteLater()
 
+        results_dict, warnings, imported = payload
+        self._remember_imported_topology(imported)
         self.measurements_cache = scalar_metrics_dict(results_dict)
+        self._note_measurements_current()
         self.panel_phenomics.btn_export.setEnabled(True)
-        self.workspaces.setCurrentIndex(3)
+        self.workspaces.setCurrentIndex(WorkspaceManager.TAB_INSPECTOR)
         self.sync_inspector()
+        if warnings:
+            QMessageBox.warning(
+                self, "Topology", "\n".join(warnings)
+            )
 
     def sync_inspector(self):
         inspector = self.workspaces.inspector_tab
-        visible = self.workspaces.currentIndex() == 3
+        visible = self.workspaces.currentIndex() == WorkspaceManager.TAB_INSPECTOR
         if not self.measurements_cache:
             if visible:
                 inspector.show_no_measurements_state()
@@ -1655,6 +1816,12 @@ class ChronoRootAnnotationSuite(QMainWindow):
             self._inspector_viz_cache[uid] = None
             return
 
+        record = self.global_model.topology_overrides.get(uid)
+        decided = uid in self.global_model.topology_decided
+        plant_xml = None
+        if record is None and not decided:
+            plant_xml = read_rsml_plants(self._topology_write_path()).get(uid)
+
         self._inspector_token += 1
         token = self._inspector_token
         self._inspector_inflight_uid = uid
@@ -1662,6 +1829,9 @@ class ChronoRootAnnotationSuite(QMainWindow):
             analyze_prepared_plant,
             prepared, uid, genotype, plant_num, live_cm_per_px,
             self.workspaces.canvas_graph.p_prune,
+            record,
+            decided,
+            plant_xml,
         )
         worker.inspector_token = token
         worker.inspector_uid = uid
@@ -1680,8 +1850,10 @@ class ChronoRootAnnotationSuite(QMainWindow):
             return
         uid = worker.inspector_uid
         self._inspector_inflight_uid = None
+        if viz_data and viz_data.get("imported_record") is not None:
+            self._remember_imported_topology({uid: viz_data["imported_record"]})
         self._inspector_viz_cache[uid] = viz_data
-        if self.workspaces.currentIndex() != 3 or self.global_model.active_uid != uid:
+        if self.workspaces.currentIndex() != WorkspaceManager.TAB_INSPECTOR or self.global_model.active_uid != uid:
             return
         if uid not in self.measurements_cache:
             return
@@ -1782,19 +1954,28 @@ class ChronoRootAnnotationSuite(QMainWindow):
         worker.start()
 
     def _export_analysis_bundle(self, out_dir, export_base_name, plate_meta, plants_meta, cm_per_px, prune_iters):
-        full_results = extract_plate_metrics(self.global_model, plants_meta, cm_per_px, prune_iters)
+        full_results, warnings, imported = extract_plate_metrics(
+            self.global_model, plants_meta, cm_per_px, prune_iters,
+            topology_path=self._topology_write_path(),
+        )
         export_rsml_and_json(out_dir, export_base_name, plate_meta, full_results)
-        return scalar_metrics_dict(full_results)
+        return scalar_metrics_dict(full_results), warnings, imported
 
-    def _on_export_finished(self, scalar_results):
+    def _on_export_finished(self, payload):
         self.hide_loading()
         worker = self.sender()
         if worker in self.active_workers:
             self.active_workers.remove(worker)
             worker.deleteLater()
 
+        scalar_results, warnings, imported = payload
+        self._remember_imported_topology(imported)
+        if warnings:
+            QMessageBox.warning(self, "Topology", "\n".join(warnings))
+
         if scalar_results:
             self.measurements_cache = scalar_results
+            self._note_measurements_current()
             self.panel_phenomics.btn_export.setEnabled(True)
 
         out_dir = self.browser.get_effective_output_dir(self.current_task_path)
@@ -1845,6 +2026,10 @@ class ChronoRootAnnotationSuite(QMainWindow):
 
     def closeEvent(self, event):
         if self._is_closing:
+            if not self._confirm_leave_stale_measurements():
+                self._is_closing = False
+                event.ignore()
+                return
             self._join_background_threads()
             self.save_interface_config()
             event.accept()
@@ -1868,6 +2053,8 @@ class ChronoRootAnnotationSuite(QMainWindow):
                 event.accept()
             else:
                 event.ignore()
+        elif not self._confirm_leave_stale_measurements():
+            event.ignore()
         else:
             self._join_background_threads()
             self.save_interface_config()

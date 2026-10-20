@@ -5,11 +5,20 @@ from PyQt5.QtCore import pyqtSignal
 from tabs.review_tab import ReviewCanvasTab
 from tabs.frangi_tab import FrangiCanvasTab
 from tabs.graph_tab import GraphCanvasTab
+from tabs.topology_tab import RsmlCanvasTab
 from tabs.inspector_tab import PhenomicsInspectorTab
 from tabs.report_tab import ComparisonReportTab, ReportFileListPanel
 from tabs.about_tab import AboutTab
 
 class WorkspaceManager(QTabWidget):
+    TAB_ANNOTATION = 0
+    TAB_CENTERLINE = 1
+    TAB_TRACING = 2
+    TAB_RSML = 3
+    TAB_INSPECTOR = 4
+    TAB_BATCH = 5
+    TAB_ABOUT = 6
+
     workspace_changed = pyqtSignal(int)
     
     # NEW: Added main_window argument
@@ -31,12 +40,16 @@ class WorkspaceManager(QTabWidget):
         # 3. Topology Graphing
         self.canvas_graph = GraphCanvasTab(self.model)
         self.addTab(self.canvas_graph, "Root Tracing Check")
-        
-        # 4. Phenomics Inspector
+
+        # 4. Optional RSML connection editor
+        self.canvas_rsml = RsmlCanvasTab(self.model)
+        self.addTab(self.canvas_rsml, "RSML Lateral Root Fixes")
+
+        # 5. Phenomics Inspector
         self.inspector_tab = PhenomicsInspectorTab()
         self.addTab(self.inspector_tab, "Phenomics Inspector")
-        
-        # 5. Batch Reports
+
+        # 6. Batch Reports
         self.report_file_panel = ReportFileListPanel(self.main_window)
         self.report_tab = ComparisonReportTab(self.main_window, self.report_file_panel)
         self.addTab(self.report_tab, "Batch Reports")

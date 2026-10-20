@@ -11,6 +11,21 @@ from PyQt5.QtSvg import QSvgGenerator
 
 from components.ui_help import HELP_INSPECTOR, show_help
 
+# Distinct colors for non-main roots. The main root stays red.
+_ROOT_COLORS = [
+    (31, 119, 180), (255, 127, 14), (44, 160, 44), (148, 103, 189),
+    (140, 86, 75), (227, 119, 194), (127, 127, 127), (188, 189, 34),
+    (23, 190, 207), (174, 199, 232), (255, 187, 120), (152, 223, 138),
+    (197, 176, 213), (196, 156, 148), (247, 182, 210), (199, 199, 199),
+    (219, 219, 141), (158, 218, 229),
+]
+
+
+def _color_for_root(index, order):
+    if order == 0:
+        return (255, 0, 0)
+    return _ROOT_COLORS[(index - 1) % len(_ROOT_COLORS)]
+
 class AspectRatioLabel(QWidget):
     def __init__(self):
         super().__init__()
@@ -107,18 +122,18 @@ class PhenomicsInspectorTab(QWidget):
         group_view = QGroupBox("Root Representation")
         vbox_view = QVBoxLayout()
         
-        self.rad_view_model = QRadioButton("Colored root parts (annotation)")
-        self.rad_view_model.setToolTip("Semantic labels painted in Annotation.")
-        self.rad_view_graph_mask = QRadioButton("Colored skeleton")
-        self.rad_view_graph_mask.setToolTip("Mask pixels validated by the root tracing graph.")
-        self.rad_view_rsml = QRadioButton("RSML architecture preview")
-        self.rad_view_rsml.setToolTip("RSML architecture overlay.")
-        self.rad_view_none = QRadioButton("Raw image only")
+        self.rad_view_none = QRadioButton("Raw image")
         self.rad_view_none.setToolTip("Scanner image without overlays.")
-        self.rad_view_model.setChecked(True)
+        self.rad_view_model = QRadioButton("Dense segmentation")
+        self.rad_view_model.setToolTip("Main root and lateral root labels painted in Annotation.")
+        self.rad_view_rsml = QRadioButton("RSML")
+        self.rad_view_rsml.setToolTip("Main red, lateral green, tertiary cyan, quaternary magenta.")
+        self.rad_view_graph_mask = QRadioButton("Each lateral root")
+        self.rad_view_graph_mask.setToolTip("Main root in red. Every other root has its own color.")
+        self.rad_view_graph_mask.setChecked(True)
 
         self.view_group = QButtonGroup()
-        for rad in [self.rad_view_model, self.rad_view_graph_mask, self.rad_view_rsml, self.rad_view_none]:
+        for rad in [self.rad_view_none, self.rad_view_model, self.rad_view_rsml, self.rad_view_graph_mask]:
             self.view_group.addButton(rad)
             rad.toggled.connect(self._trigger_redraw)
             vbox_view.addWidget(rad)
@@ -216,6 +231,9 @@ class PhenomicsInspectorTab(QWidget):
         report += "=== BASIC ARCHITECTURE ===\n"
         report += f"Main Root Length (MR):       {data.get('mr_length_mm', 0.0):.2f} mm\n"
         report += f"Lateral Root Length (LR):    {data.get('lr_length_mm', 0.0):.2f} mm\n"
+        mean_lr = data.get("lr_mean_mm", 0.0)
+        std_lr = data.get("lr_std_mm", 0.0)
+        report += f"Mean individual LR length:   {mean_lr:.2f} ± {std_lr:.2f} mm\n"
         report += f"Total Root Length (TR):      {data.get('tr_length_mm', 0.0):.2f} mm\n"
         report += f"Number of Lateral Roots:     {data.get('lr_count', 0)} count\n"
         report += f"Discrete LR Density:         {data.get('lr_density_cm', 0.0):.2f} LRs/cm\n"
@@ -344,20 +362,14 @@ class PhenomicsInspectorTab(QWidget):
             
             padded_rgb[0:y2-y1, pad_ruler:pad_ruler+x2-x1] = crop_rgb
 
-        # --- MODE 2: GRAPH VALIDATED MASK ---
-        elif self.rad_view_graph_mask.isChecked() and "colored_skel_crop" in viz:
-            skel_crop = viz["colored_skel_crop"]
-            kernel = np.ones((line_w, line_w), np.uint8)
-            main_mask = cv2.dilate((np.isin(skel_crop, viz["main_root_colors"])).astype(np.uint8), kernel)
-            lat_mask = cv2.dilate((~np.isin(skel_crop, viz["main_root_colors"]) & (skel_crop > 0)).astype(np.uint8), kernel)
-            
-            for mask, color in [(main_mask, [255, 0, 0]), (lat_mask, [0, 255, 0])]:
-                s_ys, s_xs = np.where(mask > 0)
-                for sy, sx in zip(s_ys, s_xs):
-                    gx, gy = sx + cx_off, sy + cy_off
-                    px, py = gx - x1 + pad_ruler, gy - y1
-                    if 0 <= px < w_img and 0 <= py < h_img:
-                        padded_rgb[py, px] = color
+        # --- MODE 2: ONE COLOR PER ROOT ---
+        elif self.rad_view_graph_mask.isChecked() and self.loaded_rsml_roots:
+            for index, root_segment in enumerate(self.loaded_rsml_roots):
+                pts = root_segment["points"]
+                color = _color_for_root(index, root_segment.get("order", 1))
+                shifted = [self._get_shifted_coord(point, x1, y1, pad_ruler) for point in pts]
+                for start, end in zip(shifted, shifted[1:]):
+                    cv2.line(padded_rgb, start, end, color, line_w, cv2.LINE_AA)
 
         # --- MODE 3: LIVE RSML OVERLAY ---
         elif self.rad_view_rsml.isChecked() and self.loaded_rsml_roots:
@@ -445,6 +457,14 @@ class PhenomicsInspectorTab(QWidget):
         painter.drawImage(0, 0, qimg_bg)
         
         line_w = self.spin_width.value()
+
+        if self.rad_view_graph_mask.isChecked() and self.loaded_rsml_roots:
+            for index, root_segment in enumerate(self.loaded_rsml_roots):
+                color = _color_for_root(index, root_segment.get("order", 1))
+                painter.setPen(QPen(QColor(*color), line_w))
+                shifted_pts = [self._get_shifted_coord(point, x1, y1, pad_ruler) for point in root_segment["points"]]
+                for start, end in zip(shifted_pts, shifted_pts[1:]):
+                    painter.drawLine(start[0], start[1], end[0], end[1])
 
         # LIVE RSML SVG Export
         if self.rad_view_rsml.isChecked() and self.loaded_rsml_roots:
