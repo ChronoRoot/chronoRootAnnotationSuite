@@ -312,8 +312,8 @@ class Topology:
             raise TopologyError("Click a point along the segment, not an end.")
         first_id = (max(self.edges) + 1) if self.edges else 1
         second_id = first_id + 1
-        self.edges[first_id] = _Edge(left_points[0], left_points[-1], left_points)
-        self.edges[second_id] = _Edge(right_points[0], right_points[-1], right_points)
+        self.edges[first_id] = _Edge(left_points[0], left_points[-1], left_points, edge.root_type)
+        self.edges[second_id] = _Edge(right_points[0], right_points[-1], right_points, edge.root_type)
         if signed > 0:
             replacement = [first_id, second_id]
         else:
@@ -596,7 +596,7 @@ def edges_from_graph(graph):
         points = [_point(point) for point in data.get("points") or []]
         if len(points) < 2:
             continue
-        edges[int(data["edge_id"])] = _Edge(points[0], points[-1], points)
+        edges[int(data["edge_id"])] = _Edge(points[0], points[-1], points, data.get("root_type"))
     merged, _mapping = _merge_unbranched_edges(edges)
     return merged
 
@@ -612,6 +612,7 @@ def _merge_unbranched_edges(edges):
     parts = {edge_id: [(edge_id, 1)] for edge_id in edges}
     next_id = (max(edges) + 1) if edges else 1
     merged_any = False
+    skipped = set()
     while True:
         incident = {}
         for edge_id, edge in edges.items():
@@ -619,10 +620,17 @@ def _merge_unbranched_edges(edges):
                 continue
             incident.setdefault(edge.u, []).append(edge_id)
             incident.setdefault(edge.v, []).append(edge_id)
-        node = next(
-            (point for point, ids in incident.items() if len(ids) == 2 and ids[0] != ids[1]),
-            None,
-        )
+        node = None
+        for point, ids in incident.items():
+            if point in skipped or len(ids) != 2 or ids[0] == ids[1]:
+                continue
+            if not _same_tissue(edges[ids[0]], edges[ids[1]]):
+                # A class change on a straight root is not a branch. Joining
+                # those edges would hand the main-root side to the lateral.
+                skipped.add(point)
+                continue
+            node = point
+            break
         if node is None:
             break
         left_id, right_id = incident[node]
@@ -635,7 +643,7 @@ def _merge_unbranched_edges(edges):
             break
         del edges[left_id]
         del edges[right_id]
-        edges[next_id] = _Edge(points[0], points[-1], points)
+        edges[next_id] = _Edge(points[0], points[-1], points, _joined_tissue(left, right))
         parts[next_id] = (
             [(old, sign * left_sign) for old, sign in parts.pop(left_id)]
             + [(old, sign * right_sign) for old, sign in parts.pop(right_id)]
@@ -729,11 +737,29 @@ def _join_at(left, right, node):
     return head + tail
 
 
+def _tissue(root_type):
+    """Main-path edges are marked 10, but they are the same tissue as class 1."""
+    if root_type in (1, 10):
+        return 1
+    return root_type
+
+
+def _same_tissue(left, right):
+    return _tissue(getattr(left, "root_type", None)) == _tissue(getattr(right, "root_type", None))
+
+
+def _joined_tissue(left, right):
+    if 10 in (getattr(left, "root_type", None), getattr(right, "root_type", None)):
+        return 10
+    return getattr(left, "root_type", None)
+
+
 class _Edge:
-    def __init__(self, u, v, points):
+    def __init__(self, u, v, points, root_type=None):
         self.u = u
         self.v = v
         self.points = points
+        self.root_type = root_type
 
 
 def _step_index(edge):
