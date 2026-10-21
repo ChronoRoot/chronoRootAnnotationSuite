@@ -351,11 +351,8 @@ def load_measurements_from_metrics_json(metrics_path, current_uids, plants_metad
     return by_uid, warnings
 
 
-def export_rsml_and_json(out_dir, base_name, plate_meta, measurements_dict):
+def _rsml_document(measurements_dict, cm_per_px):
     master_rsml = ET.Element("rsml")
-
-    # Non-germinated plants carry no RSML, so take the header from the first
-    # measured plant rather than simply the first record.
     header = next(
         (d["metadata_xml"] for d in measurements_dict.values() if d.get("metadata_xml") is not None),
         None,
@@ -365,8 +362,26 @@ def export_rsml_and_json(out_dir, base_name, plate_meta, measurements_dict):
     else:
         metadata = ET.SubElement(master_rsml, "metadata")
         ET.SubElement(metadata, "version").text = "1.0"
-
     scene = ET.SubElement(master_rsml, "scene")
+    for data in measurements_dict.values():
+        if data.get("rsml_xml") is not None:
+            scene.append(data["rsml_xml"])
+    set_rsml_pixel_scale(master_rsml, cm_per_px)
+    return master_rsml
+
+
+def write_topology_rsml(out_dir, base_name, measurements_dict, cm_per_px):
+    """Write Topology.rsml from already built plant elements. Metrics are left untouched."""
+    tree = ET.ElementTree(_rsml_document(measurements_dict, cm_per_px))
+    if hasattr(ET, "indent"):
+        ET.indent(tree, space="\t", level=0)
+    rsml_path = os.path.join(out_dir, f"{base_name}_Topology.rsml")
+    tree.write(rsml_path, encoding="utf-8", xml_declaration=True)
+    return rsml_path
+
+
+def export_rsml_and_json(out_dir, base_name, plate_meta, measurements_dict):
+    master_rsml = _rsml_document(measurements_dict, plate_meta.get("scale_cm_px"))
 
     export_data = plate_meta.copy()
     export_data["metrics_schema_version"] = METRICS_SCHEMA_VERSION
@@ -374,11 +389,6 @@ def export_rsml_and_json(out_dir, base_name, plate_meta, measurements_dict):
 
     for uid, data in measurements_dict.items():
         export_data["plants"].append(plant_scalar_record(data))
-
-        if "rsml_xml" in data and data["rsml_xml"] is not None:
-            scene.append(data["rsml_xml"])
-
-    set_rsml_pixel_scale(master_rsml, plate_meta.get("scale_cm_px"))
 
     json_path = os.path.join(out_dir, f"{base_name}_Metrics.json")
     with open(json_path, "w", encoding="utf-8") as f:

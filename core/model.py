@@ -881,6 +881,24 @@ class PlantImageModel:
         # Return the mapping dictionary so the GUI knows how to update itself!
         return mapping
 
+    def update_annotation_document(self, task_path, base_name, mark_finished=False):
+        """Update the annotation JSON without rewriting the masks.
+
+        Used when only the status, the plate metadata, or the root organization changed.
+        """
+        if mark_finished:
+            self.status = "completed"
+        else:
+            self.status = "in_progress"
+        json_path = os.path.join(task_path, f"{base_name}.json")
+        data = self._build_annotation_document()
+        tmp_path = json_path + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8") as handle:
+            json.dump(data, handle, indent=2)
+        os.replace(tmp_path, json_path)
+        self.invalidate_peek_cache(json_path)
+        return {uid: uid for uid in self.plant_uids()}
+
     # --- Annotation JSON helpers ---
     def _load_mask_from_nifti(self, nii_path, shape):
         try:

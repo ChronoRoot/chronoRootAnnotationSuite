@@ -1,3 +1,4 @@
+import copy
 import hashlib
 import os
 
@@ -10,7 +11,7 @@ from PyQt5.QtWidgets import (
     QAbstractItemView, QApplication, QMessageBox, QSpinBox,
 )
 from PyQt5.QtGui import QImage, QPixmap, QColor, QPainter, QIcon
-from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtCore import Qt, pyqtSignal, QThread
 
 from components.ui_help import HELP_RSML, show_help
 from core.root_topology import (
@@ -118,6 +119,55 @@ class _RsmlView(QGraphicsView):
         self.clicked.emit(int(round(scene.x())), int(round(scene.y())), int(mods))
 
 
+class _TraceWorker(QThread):
+    """Build one plant's RSML off the interface thread."""
+
+    ready = pyqtSignal(int, object)
+    failed = pyqtSignal(int, str, bool)
+
+    def __init__(self, serial, func, args):
+        super().__init__()
+        self.serial = serial
+        self.func = func
+        self.args = args
+
+    def run(self):
+        try:
+            self.ready.emit(self.serial, self.func(*self.args))
+        except TopologyError as exc:
+            self.failed.emit(self.serial, str(exc), True)
+        except Exception as exc:
+            self.failed.emit(self.serial, str(exc), False)
+
+
+def _trace_plant(
+    patch, x_off, y_off, bin_crop, img_shape, prune, image_name, genotype, uid,
+    record, decided, rsml_path,
+):
+    built = build_graph(patch, x_off, y_off, bin_crop, img_shape, prune)
+    if built is None:
+        raise TopologyError("This plant has no skeleton to trace.")
+    graph, colored, full_skel = built
+    note = ""
+    if record:
+        plant_xml = read_rsml_plants(rsml_path).get(int(uid)) if rsml_path else None
+        restored = restore_saved(
+            graph, colored, full_skel, image_name, uid, genotype, prune, record, plant_xml,
+        )
+        if restored is not None:
+            return {"uid": uid, "topology": restored, "note": "", "store": None}
+        note = "The applied topology no longer matches this skeleton. Showing the automatic tracing."
+    if not decided:
+        plant_xml = read_rsml_plants(rsml_path).get(int(uid)) if rsml_path else None
+        if plant_xml is not None:
+            imported = import_plant(graph, colored, plant_xml, prune)
+            if imported is not None:
+                return {"uid": uid, "topology": imported, "note": note, "store": imported.to_record()}
+            note = "The exported RSML does not match this skeleton. Showing the automatic tracing."
+    topology = automatic_topology(graph, colored, full_skel, image_name, uid, genotype, prune)
+    return {"uid": uid, "topology": topology, "note": note, "store": None}
+
+
 def _swatch(color):
     pixmap = QPixmap(14, 14)
     pixmap.fill(QColor(*color))
@@ -143,6 +193,9 @@ class RsmlCanvasTab(QWidget):
         self._click_point = None
         self.line_width = 2
         self._tool = None
+        self._load_serial = 0
+        self._trace_workers = []
+        self._topology_cache = {}
         self.split_mode = False
         self.isolate = False
         self.view_mode = "lateral"
@@ -246,6 +299,7 @@ class RsmlCanvasTab(QWidget):
             self._seen_token = {
                 uid: self._content_token(uid) for uid in self.model.plant_uids()
             }
+            self._topology_cache.clear()
             self.topology = None
             self._baseline = None
             self._baseline_topology = None
@@ -275,6 +329,7 @@ class RsmlCanvasTab(QWidget):
         self.model.topology_overrides.pop(uid, None)
         self.model.topology_decided.add(uid)
         self._seen_token.pop(uid, None)
+        self._topology_cache.pop(uid, None)
         if uid != self._loaded_uid:
             return
         self._undo = []
@@ -375,6 +430,8 @@ class RsmlCanvasTab(QWidget):
 
     def load_plant(self):
         uid = self.model.active_uid
+        self._load_serial += 1
+        serial = self._load_serial
         self.selected_ids = []
         self.selected_edge = None
         self._click_point = None
@@ -398,30 +455,98 @@ class RsmlCanvasTab(QWidget):
             )
             self.state_changed.emit()
             return
+        patch_data = self.model._get_class_patch(uid)
+        if not patch_data:
+            self._clear()
+            self._set_info("")
+            self._popup("This plant has no root-part labels.")
+            self.state_changed.emit()
+            return
         token = self._content_token(uid)
         skeleton_changed = uid in self._seen_token and self._seen_token[uid] != token
-        try:
-            self.topology = self._topology_for(uid, ignore_saved=skeleton_changed)
-            self._seen_token[uid] = token
-        except TopologyError as exc:
-            self._clear()
-            self._set_info("")
-            self._popup(str(exc))
-            self.state_changed.emit()
+        if skeleton_changed:
+            self._topology_cache.pop(uid, None)
+        cached = self._topology_cache.get(uid)
+        if cached is not None and cached["token"] == token and not skeleton_changed:
+            self._show_cached(uid, cached)
             return
-        except Exception as exc:
-            self._clear()
-            self._set_info("")
-            self._popup(f"Could not build the RSML: {exc}")
-            self.state_changed.emit()
+        if skeleton_changed:
+            self.model.topology_overrides.pop(uid, None)
+            self.model.topology_decided.add(uid)
+        patch, x_off, y_off = patch_data
+        patch = np.array(patch, copy=True)
+        y2 = y_off + patch.shape[0]
+        x2 = x_off + patch.shape[1]
+        bin_crop = np.array(self.model.masks[uid][y_off:y2, x_off:x2], copy=True)
+        meta = self.model.plants_meta.get(uid) or {}
+        record = None if skeleton_changed else copy.deepcopy(self.model.topology_overrides.get(uid))
+        self._clear()
+        self._set_info("Building the RSML…")
+        self.state_changed.emit()
+        worker = _TraceWorker(serial, _trace_plant, (
+            patch, x_off, y_off, bin_crop, self.model.raw_image.shape[:2], self._prune(),
+            _basename(self.model.image_path), meta.get("genotype") or "Unknown", uid,
+            record, uid in self.model.topology_decided,
+            self.path_provider() if self.path_provider else None,
+        ))
+        worker.ready.connect(self._on_trace_ready)
+        worker.failed.connect(self._on_trace_failed)
+        worker.finished.connect(self._drop_trace_worker)
+        self._trace_workers.append(worker)
+        worker.start()
+
+    def _on_trace_ready(self, serial, payload):
+        if serial != self._load_serial or payload.get("uid") != self._loaded_uid:
             return
+        if payload.get("store") is not None:
+            self.model.topology_overrides[payload["uid"]] = payload["store"]
+        self._seen_token[payload["uid"]] = self._content_token(payload["uid"])
+        self._note = payload.get("note") or ""
+        self.topology = payload["topology"]
+        self._prepare_view(payload["uid"])
+        self._colors = self._build_colors()
+        self._baseline = self.topology.to_record()
+        self._baseline_topology = self.topology.clone()
+        self._remember_topology(payload["uid"])
+        self._refresh_status()
+        self._redraw()
+        self.state_changed.emit()
+
+    def _show_cached(self, uid, cached):
+        self._note = cached.get("note") or ""
+        self.topology = cached["topology"].clone()
         self._prepare_view(uid)
         self._colors = self._build_colors()
         self._baseline = self.topology.to_record()
         self._baseline_topology = self.topology.clone()
+        self._seen_token[uid] = cached["token"]
         self._refresh_status()
         self._redraw()
         self.state_changed.emit()
+
+    def _remember_topology(self, uid):
+        """Keep the tracing that should reopen: a kept edit, otherwise the generated one."""
+        if self.topology is None or uid is None:
+            return
+        self._topology_cache[uid] = {
+            "token": self._content_token(uid),
+            "note": self._note,
+            "topology": self.topology.clone(),
+        }
+
+    def _on_trace_failed(self, serial, message, is_topology_error):
+        if serial != self._load_serial:
+            return
+        self._clear()
+        self._set_info("")
+        self._popup(message if is_topology_error else f"Could not build the RSML: {message}")
+        self.state_changed.emit()
+
+    def _drop_trace_worker(self):
+        worker = self.sender()
+        if worker in self._trace_workers:
+            self._trace_workers.remove(worker)
+        worker.deleteLater()
 
     def _content_token(self, uid):
         """Changes when the mask, the root-part labels, or the prune setting change."""
@@ -432,57 +557,6 @@ class RsmlCanvasTab(QWidget):
         if patch_data is not None:
             parts.append(np.ascontiguousarray(patch_data[0]).tobytes())
         return hashlib.sha1(b"\0".join(parts)).hexdigest()
-
-    def _topology_for(self, uid, ignore_saved=False):
-        built = self._build(uid)
-        if built is None:
-            raise TopologyError("This plant has no skeleton to trace.")
-        graph, colored, full_skel = built
-        if ignore_saved:
-            # The drawing changed, so an applied chain or an older export is the wrong tracing.
-            self.model.topology_overrides.pop(uid, None)
-            self.model.topology_decided.add(uid)
-        record = None if ignore_saved else self.model.topology_overrides.get(uid)
-        if record:
-            path = self.path_provider() if self.path_provider else None
-            plant_xml = None if ignore_saved else read_rsml_plants(path).get(int(uid))
-            meta = self.model.plants_meta.get(uid) or {}
-            restored = restore_saved(
-                graph, colored, full_skel, _basename(self.model.image_path), uid,
-                meta.get("genotype") or "Unknown", self._prune(), record, plant_xml,
-            )
-            if restored is not None:
-                return restored
-            self._note = "The applied topology no longer matches this skeleton. Showing the automatic tracing."
-        if not ignore_saved and uid not in self.model.topology_decided:
-            path = self.path_provider() if self.path_provider else None
-            plant_xml = read_rsml_plants(path).get(int(uid))
-            if plant_xml is not None:
-                imported = import_plant(graph, colored, plant_xml, self._prune())
-                if imported is not None:
-                    self.model.topology_overrides[uid] = imported.to_record()
-                    return imported
-                self._note = (
-                    "The exported RSML does not match this skeleton. "
-                    "Showing the automatic tracing."
-                )
-        meta = self.model.plants_meta.get(uid) or {}
-        return automatic_topology(
-            graph, colored, full_skel, _basename(self.model.image_path),
-            uid, meta.get("genotype") or "Unknown", self._prune(),
-        )
-
-    def _build(self, uid):
-        patch_data = self.model._get_class_patch(uid)
-        if not patch_data:
-            raise TopologyError("This plant has no root-part labels.")
-        patch, x_off, y_off = patch_data
-        y2 = y_off + patch.shape[0]
-        x2 = x_off + patch.shape[1]
-        bin_crop = self.model.masks[uid][y_off:y2, x_off:x2]
-        return build_graph(
-            patch, x_off, y_off, bin_crop, self.model.raw_image.shape[:2], self._prune(),
-        )
 
     def _prune(self):
         return self.prune_provider() if self.prune_provider else 5
@@ -643,6 +717,7 @@ class RsmlCanvasTab(QWidget):
             return
         self.model.topology_overrides.pop(uid, None)
         self.model.topology_decided.add(uid)
+        self._topology_cache.pop(uid, None)
         self.load_plant()
         self.topology_applied.emit(int(uid))
 
@@ -662,6 +737,7 @@ class RsmlCanvasTab(QWidget):
         self.model.topology_decided.add(uid)
         self._baseline = record
         self._baseline_topology = self.topology.clone()
+        self._remember_topology(uid)
         self._refresh_status()
         self.state_changed.emit()
         self.topology_applied.emit(int(uid))

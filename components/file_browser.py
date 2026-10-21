@@ -3,9 +3,9 @@ import json
 
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                              QLineEdit, QPushButton, QListWidget, QListWidgetItem, QCheckBox,
-                             QFileDialog, QStyle, QApplication, QMessageBox)
-from PyQt5.QtGui import QPainter, QColor
-from PyQt5.QtCore import Qt, pyqtSignal
+                             QFileDialog, QStyle, QApplication, QMessageBox, QMenu)
+from PyQt5.QtGui import QPainter, QColor, QDesktopServices
+from PyQt5.QtCore import Qt, pyqtSignal, QUrl
 
 from core.model import annotation_status_display, analysis_status_display, normalize_annotation_status
 from components.ui_help import HELP_WORKFLOW, show_help
@@ -219,6 +219,7 @@ class UnifiedFileBrowser(QWidget):
         self.unified_file_stats = unified_file_stats
         self.output_mode = output_mode
         self.folder_cache = {}
+        self._open_file_path = ""
 
         self.init_ui()
         self.apply_tooltips()
@@ -248,10 +249,19 @@ class UnifiedFileBrowser(QWidget):
         in_layout.addWidget(self.btn_browse_in)
         layout.addLayout(in_layout)
 
-        self.lbl_current_dir = QLabel(f"Browsing: {self.current_dir}")
+        self.lbl_current_dir = QLabel(f"Folder: {self._relative_to_dataset(self.current_dir)}")
         self.lbl_current_dir.setWordWrap(True)
+        self.lbl_current_dir.setAlignment(Qt.AlignLeft)
         self.lbl_current_dir.setStyleSheet("color: #555; font-size: 11px;")
         layout.addWidget(self.lbl_current_dir)
+
+        self.lbl_current_file = QLabel("Currently Open: " + (self._relative_to_dataset(self.current_dir) or "none"))
+        self.lbl_current_file.setWordWrap(True)
+        self.lbl_current_file.setAlignment(Qt.AlignLeft)
+        self.lbl_current_file.setStyleSheet("color: #333; font-size: 11px;")
+        self.lbl_current_file.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.lbl_current_file.customContextMenuRequested.connect(self._current_file_menu)
+        layout.addWidget(self.lbl_current_file)
 
         layout.addWidget(QLabel("<b>Output Directory:</b>"))
         self.chk_output_with_input = QCheckBox("Store outputs with input image folder")
@@ -297,6 +307,8 @@ class UnifiedFileBrowser(QWidget):
         self.task_list = QListWidget()
         self.task_list.itemDoubleClicked.connect(self.on_item_double_clicked)
         self.task_list.itemClicked.connect(self.on_item_clicked)
+        self.task_list.viewport().setContextMenuPolicy(Qt.CustomContextMenu)
+        self.task_list.viewport().customContextMenuRequested.connect(self._list_menu)
         layout.addWidget(self.task_list)
 
         if self.show_save_actions:
@@ -333,11 +345,14 @@ class UnifiedFileBrowser(QWidget):
         )
         if self.btn_save_progress:
             self.btn_save_progress.setToolTip(
-                "<b>Save Progress</b><br>Save current edits. Resume later from the same plate."
+                "<b>Save Progress</b><br>Write changed masks and any kept root organization. "
+                "The plate stays in progress."
             )
         if self.btn_finish:
             self.btn_finish.setToolTip(
-                "<b>Finish Annotation</b><br>Mark this plate completed and write final masks."
+                "<b>Finish</b><br>Mark this plate finished. A segmentation-only plate "
+                "does not need measurements or an RSML. If measurements were already run, "
+                "they must match the current segmentation and RSML."
             )
 
     def set_browser_controls_visible(self, expanded):
@@ -410,8 +425,29 @@ class UnifiedFileBrowser(QWidget):
         self._apply_output_mode_ui()
         self.output_mode_changed.emit(self.output_mode)
 
+    def _relative_to_dataset(self, path):
+        if not path:
+            return ""
+        root = os.path.abspath(self.in_dir)
+        target = os.path.abspath(path)
+        try:
+            relative = os.path.relpath(target, root)
+        except ValueError:
+            return target
+        if relative == ".":
+            return os.path.basename(root)
+        return relative
+
+    def _refresh_open_label(self):
+        shown = self._open_file_path or self.current_dir
+        text = self._relative_to_dataset(shown) or "none"
+        self.lbl_current_file.setText(f"Currently Open: {text}")
+        self.lbl_current_file.setToolTip(shown or "")
+
     def _update_current_dir_label(self):
-        self.lbl_current_dir.setText(f"Browsing: {self.current_dir}")
+        self.lbl_current_dir.setText(f"Folder: {self._relative_to_dataset(self.current_dir)}")
+        if not self._open_file_path:
+            self._refresh_open_label()
 
     def get_effective_output_dir(self, task_path=None):
         if self.output_mode == "task_folder":
@@ -607,6 +643,7 @@ class UnifiedFileBrowser(QWidget):
                 list_item.setSizeHint(widget.sizeHint())
                 self.task_list.addItem(list_item)
                 self.task_list.setItemWidget(list_item, widget)
+                self._bind_row_menu(widget, list_item)
 
             elif item["type"] == "file":
                 annotation_status = item.get("annotation_status") or item.get("status", "without_annotation")
@@ -640,6 +677,8 @@ class UnifiedFileBrowser(QWidget):
                 list_item.setSizeHint(widget.sizeHint())
                 self.task_list.addItem(list_item)
                 self.task_list.setItemWidget(list_item, widget)
+                self._bind_row_menu(widget, list_item)
+        self.select_open_file(self._open_file_path)
 
     def render_analyzer_contents(self, contents):
         """Renders the analyzer-style browser (simple folder icons, analyzer file widgets)."""
@@ -671,6 +710,69 @@ class UnifiedFileBrowser(QWidget):
                 list_item.setSizeHint(widget.sizeHint())
                 self.task_list.addItem(list_item)
                 self.task_list.setItemWidget(list_item, widget)
+                self._bind_row_menu(widget, list_item)
+        self.select_open_file(self._open_file_path)
+
+    def _bind_row_menu(self, widget, list_item):
+        widget.setContextMenuPolicy(Qt.CustomContextMenu)
+        widget.customContextMenuRequested.connect(
+            lambda pos, item=list_item, row=widget: self._menu_for_item(item, row.mapToGlobal(pos))
+        )
+
+    def set_current_file(self, path):
+        self._open_file_path = path or ""
+        self._refresh_open_label()
+
+    def select_open_file(self, path):
+        """Highlight the open plate. Clear the highlight when that plate is not in this folder."""
+        target = os.path.normpath(path) if path else ""
+        if not target:
+            self.task_list.clearSelection()
+            self.task_list.setCurrentItem(None)
+            return
+        for index in range(self.task_list.count()):
+            item = self.task_list.item(index)
+            data = item.data(Qt.UserRole) or {}
+            item_path = data.get("path") or ""
+            if data.get("type") == "file" and os.path.normpath(item_path) == target:
+                self.task_list.setCurrentItem(item)
+                return
+        self.task_list.clearSelection()
+        self.task_list.setCurrentItem(None)
+
+    def _current_file_menu(self, pos):
+        path = self._open_file_path or self.current_dir
+        if not path:
+            return
+        self._path_menu(
+            self.lbl_current_file.mapToGlobal(pos),
+            path,
+            is_dir=not self._open_file_path,
+        )
+
+    def _list_menu(self, pos):
+        item = self.task_list.itemAt(pos)
+        if item is None:
+            return
+        self._menu_for_item(item, self.task_list.viewport().mapToGlobal(pos))
+
+    def _menu_for_item(self, item, global_pos):
+        data = item.data(Qt.UserRole) or {}
+        path = data.get("path")
+        if not path:
+            return
+        self._path_menu(global_pos, path, is_dir=(data.get("type") == "dir"))
+
+    def _path_menu(self, global_pos, path, is_dir):
+        menu = QMenu(self)
+        copy_action = menu.addAction("Copy path" if is_dir else "Copy file path")
+        open_action = menu.addAction("Open folder")
+        chosen = menu.exec_(global_pos)
+        if chosen == copy_action:
+            QApplication.clipboard().setText(path)
+        elif chosen == open_action:
+            folder = path if is_dir else os.path.dirname(path)
+            QDesktopServices.openUrl(QUrl.fromLocalFile(folder))
 
     def on_item_double_clicked(self, item):
         data = item.data(Qt.UserRole)

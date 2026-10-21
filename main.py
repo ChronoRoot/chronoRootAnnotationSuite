@@ -30,6 +30,7 @@ from core.analyzer_engine import (
     extract_plate_metrics,
     export_rsml_and_json,
     load_measurements_from_metrics_json,
+    write_topology_rsml,
     plant_scalar_record,
     scalar_metrics_dict,
 )
@@ -85,6 +86,7 @@ class ChronoRootAnnotationSuite(QMainWindow):
         self.active_workers = set()
         self.measurements_cache = {}
         self._measured_fingerprint = None
+        self._rsml_disk_token = None
         self.is_calibrating = False
         self.metadata_dirty = False
 
@@ -563,7 +565,7 @@ class ChronoRootAnnotationSuite(QMainWindow):
 
         self.browser.refresh_requested.connect(self.scan_directory)
         self.browser.file_selected.connect(self.load_file)
-        self.browser.save_progress_requested.connect(lambda: self.save_task(mark_finished=False))
+        self.browser.save_progress_requested.connect(self._on_save_progress_requested)
         self.browser.finish_annotation_requested.connect(self._on_finish_annotation_requested)
         self.browser.input_dir_changed.connect(self._on_input_dir_changed)
         self.browser.output_dir_changed.connect(self._on_output_dir_changed)
@@ -1429,31 +1431,92 @@ class ChronoRootAnnotationSuite(QMainWindow):
             self._index_running = False
         report_error_text(err_msg, parent=self)
 
-    def _save_prompt_message(self):
-        if self.metadata_dirty and not self.global_model.dirty:
-            return "Save unsaved annotation metadata (genotypes, plate fields)?"
-        if self.metadata_dirty and self.global_model.dirty:
-            return "Save unsaved annotation changes and metadata?"
-        return "Save annotation changes?"
+    def _rsml_token(self):
+        model = self.global_model
+        tab = self.workspaces.canvas_rsml
+        payload = {
+            "overrides": {str(uid): model.topology_overrides[uid] for uid in sorted(model.topology_overrides)},
+            "decided": sorted(int(uid) for uid in model.topology_decided),
+        }
+        if tab.has_unsaved_edits() and tab.topology is not None and tab._loaded_uid is not None:
+            payload["open"] = {str(tab._loaded_uid): tab.topology.to_record()}
+        return hashlib.sha1(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()
+
+    def _rsml_needs_write(self):
+        if not self._has_open_task():
+            return False
+        tab = self.workspaces.canvas_rsml
+        if tab.has_unsaved_edits():
+            return True
+        if not self.global_model.topology_overrides and not self.global_model.topology_decided:
+            return False
+        return self._rsml_token() != self._rsml_disk_token
+
+    def _needs_save(self):
+        return self._is_task_dirty() or self._rsml_needs_write()
+
+    def _measurements_block_finish(self):
+        """A plate with no measurements can still be finished. A measured plate cannot, once the data has changed."""
+        return bool(self.measurements_cache) and self._measurements_are_stale()
+
+    def _keep_open_rsml_edits(self):
+        tab = self.workspaces.canvas_rsml
+        if not tab.has_unsaved_edits():
+            return True
+        return bool(tab.apply_edit())
+
+    def _ask_how_to_save(self):
+        """'finished', 'progress', 'discard', or 'cancel'."""
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Question)
+        box.setWindowTitle("Save")
+        box.setText("Save this plate?")
+        finished = box.addButton("Save as finished", QMessageBox.AcceptRole)
+        progress = box.addButton("Save as in progress", QMessageBox.AcceptRole)
+        discard = box.addButton("Don't save", QMessageBox.DestructiveRole)
+        box.addButton(QMessageBox.Cancel)
+        box.setDefaultButton(progress)
+        box.exec_()
+        chosen = box.clickedButton()
+        if chosen == finished:
+            return "finished"
+        if chosen == progress:
+            return "progress"
+        if chosen == discard:
+            return "discard"
+        return "cancel"
+
+    def _offer_in_progress_instead(self):
+        reply = QMessageBox.question(
+            self,
+            "Measurements out of date",
+            "Measurements were made from an older segmentation or RSML, "
+            "so this plate cannot be marked finished until they are measured again.\n\n"
+            "Save as in progress instead?",
+            QMessageBox.Yes | QMessageBox.Cancel,
+            QMessageBox.Yes,
+        )
+        return reply == QMessageBox.Yes
 
     def load_file(self, data):
         discarded_unsaved = False
-        if self._is_task_dirty():
-            reply = QMessageBox.question(
-                self, "Save?",
-                self._save_prompt_message(),
-                QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel
-            )
-            if reply == QMessageBox.Yes:
-                self._pending_load_data = data
-                self.save_task(mark_finished=False)
-                return
-            if reply == QMessageBox.Cancel:
+        if self._needs_save():
+            choice = self._ask_how_to_save()
+            if choice == "cancel":
                 self._pending_open_annotation_tab = False
+                self.browser.select_open_file(self.current_file_path)
                 return
-            discarded_unsaved = True
+            if choice == "discard":
+                discarded_unsaved = True
+            else:
+                self._pending_load_data = data
+                if not self.save_task(mark_finished=(choice == "finished")):
+                    self._pending_load_data = None
+                    self.browser.select_open_file(self.current_file_path)
+                return
         if not discarded_unsaved and not self._confirm_leave_stale_measurements():
             self._pending_open_annotation_tab = False
+            self.browser.select_open_file(self.current_file_path)
             return
 
         self._execute_load(data)
@@ -1513,6 +1576,8 @@ class ChronoRootAnnotationSuite(QMainWindow):
         self.setWindowTitle(
             f"ChronoRoot Annotation Suite | {self.current_base_name} [{self.global_model.status.upper()}]"
         )
+        self.browser.set_current_file(self.current_file_path)
+        self.browser.select_open_file(self.current_file_path)
 
         self.measurements_cache.clear()
         self._measured_fingerprint = None
@@ -1620,12 +1685,32 @@ class ChronoRootAnnotationSuite(QMainWindow):
                 + ("\n• …" if len(warnings) > 12 else "")
             )
 
+    def _on_save_progress_requested(self):
+        self.save_task(mark_finished=False)
+
     def _on_finish_annotation_requested(self):
         self.save_task(mark_finished=True)
 
     def save_task(self, mark_finished=False):
         if not self.global_model.masks:
-            return
+            return False
+        if not self._keep_open_rsml_edits():
+            return False
+        if mark_finished and self._measurements_block_finish():
+            if not self._offer_in_progress_instead():
+                return False
+            mark_finished = False
+
+        write_masks = bool(self.global_model.dirty)
+        write_rsml = self._rsml_needs_write()
+        status_changes = (
+            (mark_finished and normalize_annotation_status(self.global_model.status) != "completed")
+            or (not mark_finished and normalize_annotation_status(self.global_model.status) == "completed"
+                and (write_masks or write_rsml or self.metadata_dirty))
+        )
+        write_document = (self.metadata_dirty or status_changes) and not write_masks
+        if not write_masks and not write_document and not write_rsml:
+            return False
 
         shape = self.global_model.raw_image.shape if self.global_model.raw_image is not None else None
         plate_meta = self.panel_phenomics.capture_plate_meta(shape)
@@ -1633,24 +1718,68 @@ class ChronoRootAnnotationSuite(QMainWindow):
             self.panel_phenomics.capture_metadata(),
             plate_meta,
         )
+        cm_per_px = plate_meta.get("scale_cm_px")
+        if cm_per_px is None:
+            cm_per_px = self.panel_phenomics.get_cm_per_px(shape)
+        plants_meta = self.panel_phenomics.build_plants_meta_list()
+        out_dir = self.browser.get_effective_output_dir(self.current_task_path) or self.current_task_path
+        os.makedirs(out_dir, exist_ok=True)
 
         self.global_model.callbacks_muted = True
         self.panel_review.update_undo_state()
-        self.show_loading("Saving progress...\n(Saving masks…)")
+        if write_masks:
+            self.show_loading("Saving progress...\n(Saving masks…)")
+        elif write_rsml:
+            self.show_loading("Saving root organization…")
+        else:
+            self.show_loading("Saving…")
         self._pending_mark_finished = mark_finished
 
         worker = ModelWorker(
-            self.global_model.save_current_task,
+            self._save_bundle,
             self.current_task_path,
             self.current_base_name,
-            mark_finished=mark_finished,
+            out_dir,
+            mark_finished,
+            write_masks,
+            write_document,
+            write_rsml,
+            plants_meta,
+            cm_per_px,
+            self.workspaces.canvas_graph.p_prune,
         )
         self.active_workers.add(worker)
         worker.finished.connect(self._on_save_finished)
         worker.error.connect(self._on_thread_error)
         worker.start()
+        return True
 
-    def _on_save_finished(self, mapping):
+    def _save_bundle(
+        self, task_path, base_name, out_dir, mark_finished,
+        write_masks, write_document, write_rsml, plants_meta, cm_per_px, prune,
+    ):
+        mapping = {uid: uid for uid in self.global_model.plant_uids()}
+        warnings = []
+        if write_masks:
+            mapping = self.global_model.save_current_task(
+                task_path, base_name, mark_finished=mark_finished,
+            )
+        elif write_document:
+            mapping = self.global_model.update_annotation_document(
+                task_path, base_name, mark_finished=mark_finished,
+            )
+        if write_rsml:
+            results, warnings, _imported = extract_plate_metrics(
+                self.global_model, plants_meta, cm_per_px or 1.0, prune,
+                topology_path=os.path.join(out_dir, f"{base_name}_Topology.rsml"),
+            )
+            write_topology_rsml(out_dir, base_name, results, cm_per_px)
+        return {"mapping": mapping, "warnings": warnings, "wrote_rsml": write_rsml}
+
+    def _on_save_finished(self, payload):
+        mapping = payload.get("mapping") if isinstance(payload, dict) else payload
+        wrote_rsml = bool(payload.get("wrote_rsml")) if isinstance(payload, dict) else False
+        warnings = payload.get("warnings") if isinstance(payload, dict) else None
         self.hide_loading()
         self.global_model.callbacks_muted = False
         self.panel_review.update_undo_state()
@@ -1674,6 +1803,10 @@ class ChronoRootAnnotationSuite(QMainWindow):
             f"ChronoRoot Annotation Suite | {self.current_base_name} [{self.global_model.status.upper()}]"
         )
         self.metadata_dirty = False
+        if wrote_rsml:
+            self._rsml_disk_token = self._rsml_token()
+        if warnings:
+            QMessageBox.warning(self, "Topology", "\n".join(warnings))
 
         if self._is_closing:
             self.close()
@@ -1708,12 +1841,13 @@ class ChronoRootAnnotationSuite(QMainWindow):
 
     # --- Analysis Engine ---
     def run_measurements(self, plants_meta, cm_per_px):
+        if not self._keep_open_rsml_edits():
+            return
         if self._is_task_dirty():
             reply = QMessageBox.question(
                 self,
                 "Unsaved Changes",
-                "We need to save before doing the measure.\n\n"
-                + self._save_prompt_message(),
+                "The segmentation has unsaved changes. Save them before measuring?",
                 QMessageBox.Save | QMessageBox.Cancel,
                 QMessageBox.Save,
             )
@@ -1881,23 +2015,8 @@ class ChronoRootAnnotationSuite(QMainWindow):
             QMessageBox.warning(self, "Error", "Invalid Calibration Value.")
             return
 
-        is_completed = normalize_annotation_status(self.global_model.status) == "completed"
-        mark_finished = False
-        if not is_completed:
-            finish_box = QMessageBox(
-                QMessageBox.Question,
-                "Finish Annotation",
-                "We need to finish annotation before exporting.",
-                QMessageBox.NoButton,
-                self,
-            )
-            finish_btn = finish_box.addButton("Finish annotation", QMessageBox.AcceptRole)
-            finish_box.addButton(QMessageBox.Cancel)
-            finish_box.setDefaultButton(finish_btn)
-            finish_box.exec_()
-            if finish_box.clickedButton() != finish_btn:
-                return
-            mark_finished = True
+        if not self._keep_open_rsml_edits():
+            return
 
         out_dir = self.browser.get_effective_output_dir(self.current_task_path)
         os.makedirs(out_dir, exist_ok=True)
@@ -1916,12 +2035,12 @@ class ChronoRootAnnotationSuite(QMainWindow):
             if reply == QMessageBox.No:
                 return
 
-        self._start_export_pipeline(plate_meta, mark_finished=mark_finished)
+        self._start_export_pipeline(plate_meta)
 
     def _start_export_pipeline(self, plate_meta, mark_finished=False):
-        if mark_finished or self._is_task_dirty():
+        if self._is_task_dirty():
             self._pending_export_plate_meta = plate_meta
-            self.save_task(mark_finished=mark_finished)
+            self.save_task(mark_finished=False)
         else:
             self._run_export_worker(plate_meta)
 
@@ -1976,6 +2095,7 @@ class ChronoRootAnnotationSuite(QMainWindow):
         if scalar_results:
             self.measurements_cache = scalar_results
             self._note_measurements_current()
+            self._rsml_disk_token = self._rsml_token()
             self.panel_phenomics.btn_export.setEnabled(True)
 
         out_dir = self.browser.get_effective_output_dir(self.current_task_path)
@@ -2035,19 +2155,14 @@ class ChronoRootAnnotationSuite(QMainWindow):
             event.accept()
             return
 
-        if self._is_task_dirty():
-            reply = QMessageBox.question(
-                self,
-                "Unsaved Changes",
-                self._save_prompt_message() + "\nDo you want to save before exiting?",
-                QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel,
-                QMessageBox.Save,
-            )
-            if reply == QMessageBox.Save:
+        if self._needs_save():
+            choice = self._ask_how_to_save()
+            if choice in ("finished", "progress"):
                 self._is_closing = True
-                self.save_task(mark_finished=False)
+                if not self.save_task(mark_finished=(choice == "finished")):
+                    self._is_closing = False
                 event.ignore()
-            elif reply == QMessageBox.Discard:
+            elif choice == "discard":
                 self._join_background_threads()
                 self.save_interface_config()
                 event.accept()
