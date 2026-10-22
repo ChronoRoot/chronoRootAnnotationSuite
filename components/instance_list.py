@@ -13,6 +13,7 @@ class SortableTreeItem(QTreeWidgetItem):
 
 class InstanceListPanel(QWidget):
     zoom_requested = pyqtSignal(int)
+    reset_plant_ids_requested = pyqtSignal()
 
     def __init__(self, shared_model, workspaces, review_tool_panel=None, annotation_tab_index=0):
         super().__init__()
@@ -63,6 +64,10 @@ class InstanceListPanel(QWidget):
         btn_layout.addWidget(self.btn_del)
         layout.addLayout(btn_layout)
 
+        self.btn_reset_ids = QPushButton("Reset Plant IDs")
+        self.btn_reset_ids.clicked.connect(self.action_reset_plant_ids)
+        layout.addWidget(self.btn_reset_ids)
+
         self.apply_tooltips()
 
     def apply_tooltips(self):
@@ -71,6 +76,10 @@ class InstanceListPanel(QWidget):
             "Select 2+ plants with Shift+click in the list, then merge into one plant."
         )
         self.btn_del.setToolTip("Delete the selected plant(s).")
+        self.btn_reset_ids.setToolTip(
+            "Reassign plant ids and Plant # in rows, left to right. "
+            "The genotype stays on the same plant."
+        )
         self.list_instances.setToolTip(
             "Select plants to edit. Multi-selection is only available in the Annotation tab."
         )
@@ -84,6 +93,7 @@ class InstanceListPanel(QWidget):
         enabled = workspace_index == self.annotation_tab_index
         self.btn_new.setEnabled(enabled)
         self.btn_merge.setEnabled(enabled)
+        self.btn_reset_ids.setEnabled(enabled)
         self.btn_del.setEnabled(enabled)
 
     def populate_list(self):
@@ -222,6 +232,15 @@ class InstanceListPanel(QWidget):
         new_id = self.model.merge_instances(list(self.model.selected_uids))
         if new_id is not None:
             self.model.set_selection([new_id])
+
+    def action_reset_plant_ids(self):
+        if not self._is_annotation_tab_active():
+            QMessageBox.warning(
+                self, "Action Restricted",
+                "Please switch to the Annotation tab to reset plant ids."
+            )
+            return
+        self.reset_plant_ids_requested.emit()
 
     def action_delete(self):
         if self.model.selected_uids:

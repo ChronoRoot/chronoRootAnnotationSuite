@@ -104,6 +104,8 @@ class ChronoRootAnnotationSuite(QMainWindow):
         self._dataset_index = None
         self._index_root = None
         self._index_running = False
+        self._status_revision = 0
+        self._file_status_overrides = {}
         self._inspector_viz_cache = {}
         self._inspector_token = 0
         self._inspector_inflight_uid = None
@@ -575,6 +577,7 @@ class ChronoRootAnnotationSuite(QMainWindow):
         self.panel_phenomics.measure_requested.connect(self.run_measurements)
         self.panel_phenomics.export_requested.connect(self.run_export)
         self.panel_phenomics.selection_changed.connect(self._on_phenomics_table_selection)
+        self.instance_list.reset_plant_ids_requested.connect(self._on_reset_plant_ids)
         self.panel_phenomics.set_calib_ruler_requested.connect(self.start_calibration_flow)
         self.panel_phenomics.test_ruler_toggled.connect(self.toggle_ruler_mode)
         self.panel_phenomics.calibration_changed.connect(self.validate_and_update_ruler)
@@ -884,15 +887,6 @@ class ChronoRootAnnotationSuite(QMainWindow):
         self._inspector_viz_cache[uid] = viz
         self.sync_inspector()
 
-    def _remember_imported_topology(self, imported):
-        """Keep a file that mapped onto the current graph, until the user resets it."""
-        for uid, record in (imported or {}).items():
-            uid = int(uid)
-            if uid in self.global_model.topology_decided:
-                continue
-            if uid not in self.global_model.topology_overrides:
-                self.global_model.topology_overrides[uid] = record
-
     @staticmethod
     def _is_identity_uid_mapping(mapping):
         return not mapping or all(old == new for old, new in mapping.items())
@@ -1010,21 +1004,62 @@ class ChronoRootAnnotationSuite(QMainWindow):
         else:
             self.panel_phenomics.clear_table()
 
-        if topology_changed:
+        if mapping_changed:
+            self._remap_measurements_cache(uid_mapping)
+            self._note_measurements_current()
+            self.sync_inspector()
+        elif topology_changed:
             self.measurements_cache.clear()
             self._measured_fingerprint = None
             self._clear_inspector_viz()
             self.panel_phenomics.reset_measurements()
             self.workspaces.inspector_tab.show_no_measurements_state()
-        elif mapping_changed:
-            self._remap_measurements_cache(uid_mapping)
-            self._note_measurements_current()
-            self.sync_inspector()
 
     def _clear_inspector_viz(self):
         self._inspector_viz_cache.clear()
         self._inspector_token += 1
         self._inspector_inflight_uid = None
+
+    def _on_reset_plant_ids(self):
+        """Reassign ids and Plant # in row order. The genotype stays on each plant."""
+        model = self.global_model
+        if not model.plant_uids():
+            return
+        model.set_task_metadata(plants_meta=self.panel_phenomics.capture_metadata())
+        for uid in model.plant_uids():
+            model._refresh_bbox_for_uid(uid)
+        mapping = model.sort_instances_spatially(row_tolerance=250)
+        if not mapping:
+            return
+        ids_changed = any(old != new for old, new in mapping.items())
+        numbers_changed = False
+        for uid in model.plant_uids():
+            entry = model.plants_meta.get(uid)
+            if entry is None:
+                continue
+            if str(entry.get("plant_num", "")).strip() != str(uid):
+                entry["plant_num"] = str(uid)
+                numbers_changed = True
+        if not ids_changed and not numbers_changed:
+            return
+        if ids_changed:
+            model.dirty = True
+        self.metadata_dirty = True
+        if ids_changed:
+            model.selected_uids = {mapping[uid] for uid in model.selected_uids if uid in mapping}
+            if model.active_uid is not None:
+                model.active_uid = mapping.get(model.active_uid)
+            self.workspaces.canvas_rsml.remap_tracking(mapping)
+        self._sync_metadata_table_with_model(uid_mapping=mapping)
+        # The table rebuild keeps the previous Plant #. The new id is the number.
+        for uid in model.plant_uids():
+            entry = model.plants_meta.get(uid)
+            if entry is not None:
+                entry["plant_num"] = str(uid)
+        self.panel_phenomics.apply_plant_numbers(model.get_plants_metadata())
+        model._notify_data_changed()
+        model._notify_selection_changed()
+        self.update_overlay_labels()
 
     def _on_model_data_changed(self):
         self._clear_inspector_viz()
@@ -1233,17 +1268,38 @@ class ChronoRootAnnotationSuite(QMainWindow):
             pass
         return {}
 
+    def _dir_key(self, path):
+        if not path:
+            return path
+        return os.path.normpath(os.path.abspath(path))
+
+    def _rekey_folder_cache(self, folder_path):
+        """One spelling per folder, so Up and a later save hit the same entry."""
+        wanted = self._dir_key(folder_path)
+        for key in list(self.browser.folder_cache):
+            if key != wanted and self._dir_key(key) == wanted:
+                self.browser.folder_cache[wanted] = self.browser.folder_cache.pop(key)
+        return wanted
+
     def _listing_snapshot(self, folder_path):
-        contents = self._read_listing_store().get(folder_path)
-        if isinstance(contents, list):
-            return contents
+        data = self._read_listing_store()
+        wanted = self._dir_key(folder_path)
+        direct = data.get(wanted)
+        if isinstance(direct, list):
+            return direct
+        for key, contents in data.items():
+            if self._dir_key(key) == wanted and isinstance(contents, list):
+                return contents
         return None
 
     def _save_listing_snapshot(self, folder_path, contents):
         if not folder_path or contents is None:
             return
+        folder_path = self._dir_key(folder_path)
         data = self._read_listing_store()
-        data.pop(folder_path, None)
+        for key in list(data):
+            if self._dir_key(key) == folder_path:
+                data.pop(key, None)
         data[folder_path] = contents
         while len(data) > LISTING_CACHE_LIMIT:
             data.pop(next(iter(data)))
@@ -1260,7 +1316,7 @@ class ChronoRootAnnotationSuite(QMainWindow):
         """A fresh listing has no nested totals yet. Keep totals already on screen."""
         previous = self.browser.get_cached_contents(folder_path) or []
         known = {
-            item.get("path"): item
+            self._dir_key(item.get("path")): item
             for item in previous
             if item.get("type") == "dir" and not item.get("stats_pending")
         }
@@ -1273,7 +1329,7 @@ class ChronoRootAnnotationSuite(QMainWindow):
         for item in fresh:
             if item.get("type") != "dir" or not item.get("stats_pending"):
                 continue
-            old = known.get(item.get("path"))
+            old = known.get(self._dir_key(item.get("path")))
             if not old:
                 continue
             for key in count_keys:
@@ -1299,6 +1355,12 @@ class ChronoRootAnnotationSuite(QMainWindow):
             if item.get("type") != "dir":
                 continue
             found = totals.get(item.get("path"))
+            if not found:
+                wanted = self._dir_key(item.get("path"))
+                found = next(
+                    (value for key, value in totals.items() if self._dir_key(key) == wanted),
+                    None,
+                )
             if not found:
                 continue
             for key in count_keys:
@@ -1330,6 +1392,7 @@ class ChronoRootAnnotationSuite(QMainWindow):
         )
         worker.stats_token = token
         worker.index_root = root
+        worker.status_revision = self._status_revision
         self.active_workers.add(worker)
         worker.finished.connect(self._on_dataset_index)
         worker.error.connect(self._on_folder_stats_error)
@@ -1346,8 +1409,9 @@ class ChronoRootAnnotationSuite(QMainWindow):
             self.browser.render_contents(cached, use_cache=False)
 
     def scan_directory(self, folder_path, force_refresh=False):
+        folder_path = self._rekey_folder_cache(folder_path)
         self.browser.current_dir = folder_path
-        self._ensure_dataset_index(force=force_refresh and folder_path == self.browser.root_dir)
+        self._ensure_dataset_index(force=force_refresh and self._dir_key(folder_path) == self._dir_key(self.browser.root_dir))
 
         if force_refresh:
             keys_to_delete = [k for k in self.browser.folder_cache if k.startswith(folder_path)]
@@ -1383,17 +1447,83 @@ class ChronoRootAnnotationSuite(QMainWindow):
         worker.error.connect(self._on_thread_error)
         worker.start()
 
+    def _shift_indexed_counts(self, folder_path, deltas):
+        """Add a file's status change to every folder total already counted."""
+        if not self._dataset_index or not deltas or not any(deltas.values()):
+            return
+        by_key = {self._dir_key(key): key for key in self._dataset_index}
+        current = self._dir_key(folder_path)
+        root = self._dir_key(self.browser.root_dir) if self.browser.root_dir else ""
+        while current:
+            key = by_key.get(current)
+            if key is not None:
+                bucket = self._dataset_index[key]
+                for name, amount in deltas.items():
+                    if amount:
+                        bucket[name] = max(0, bucket.get(name, 0) + amount)
+            if not current or (root and current == root):
+                break
+            parent = self._dir_key(os.path.dirname(current))
+            if parent == current:
+                break
+            current = parent
+
+    def _publish_listed_file(self, file_path, new_status=None, new_plant_count=None, new_analysis_status=None):
+        """Keep the open folder, its parents, and the saved listing in step with a save."""
+        self._rekey_folder_cache(os.path.dirname(file_path))
+        change = self.browser.update_file_status_in_cache(
+            file_path,
+            new_status=new_status,
+            new_plant_count=new_plant_count,
+            new_analysis_status=new_analysis_status,
+        )
+        if not change:
+            return
+        self._status_revision += 1
+        self._file_status_overrides[self._dir_key(change["file_path"])] = change["fields"]
+        self._shift_indexed_counts(change["file_dir"], change["deltas"])
+        current = change["file_dir"]
+        root = self._dir_key(self.browser.root_dir) if self.browser.root_dir else ""
+        seen = set()
+        while current and self._dir_key(current) not in seen:
+            seen.add(self._dir_key(current))
+            key = next(
+                (cached for cached in self.browser.folder_cache if self._dir_key(cached) == self._dir_key(current)),
+                None,
+            )
+            if key is not None:
+                self._save_listing_snapshot(key, self.browser.folder_cache[key])
+            if root and self._dir_key(current) == root:
+                break
+            parent = os.path.dirname(current)
+            if parent == current:
+                break
+            current = parent
+
+    def _overlay_listed_files(self, contents):
+        """A folder scan that started before a save must not put the old status back."""
+        for item in contents or []:
+            if item.get("type") != "file":
+                continue
+            fields = self._file_status_overrides.get(self._dir_key(item.get("path", "")))
+            if fields:
+                item.update(fields)
+
     def _on_scan_finished(self, contents):
         worker = self.sender()
         if getattr(worker, "tracks_loading", False):
             self.hide_loading()
-        folder = getattr(worker, "scan_folder", self.browser.current_dir) if worker else self.browser.current_dir
+        folder = self._dir_key(
+            getattr(worker, "scan_folder", self.browser.current_dir) if worker else self.browser.current_dir
+        )
+        self._rekey_folder_cache(folder)
         if worker in self.active_workers:
             self.active_workers.remove(worker)
             worker.deleteLater()
 
         if contents is None:
             contents = []
+        self._overlay_listed_files(contents)
         contents = self._keep_known_folder_stats(folder, contents)
         contents = self._merge_dataset_index(contents)
         self.browser.folder_cache[folder] = contents
@@ -1419,6 +1549,10 @@ class ChronoRootAnnotationSuite(QMainWindow):
         self._index_running = False
         if self._stats_cancel is token:
             self._stats_cancel = None
+        if getattr(worker, "status_revision", 0) != self._status_revision:
+            # The walk started before a plate was saved, so its totals are stale.
+            self._ensure_dataset_index(force=True)
+            return
         self._apply_dataset_index(totals)
 
     def _on_folder_stats_error(self, err_msg):
@@ -1612,6 +1746,7 @@ class ChronoRootAnnotationSuite(QMainWindow):
             self.update_canvas_ruler()
 
         self.metadata_dirty = False
+        self._rsml_disk_token = None
         self._offer_analysis_restore()
 
         if self._pending_open_annotation_tab:
@@ -1648,7 +1783,7 @@ class ChronoRootAnnotationSuite(QMainWindow):
         self.panel_phenomics.reset_measurements()
         self.workspaces.inspector_tab.show_no_measurements_state()
         if self.current_file_path:
-            self.browser.update_file_status_in_cache(
+            self._publish_listed_file(
                 self.current_file_path,
                 new_analysis_status="not_analyzed",
             )
@@ -1796,7 +1931,17 @@ class ChronoRootAnnotationSuite(QMainWindow):
 
         new_selection = [mapping[uid] for uid in self.global_model.selected_uids if uid in mapping]
         self.global_model.set_selection(new_selection)
+        saved_numbers = {
+            uid: meta.get("plant_num")
+            for uid, meta in self.global_model.plants_meta.items()
+        }
         self._sync_metadata_table_with_model(uid_mapping=mapping)
+        for uid, number in saved_numbers.items():
+            entry = self.global_model.plants_meta.get(uid)
+            if entry is not None:
+                entry["plant_num"] = number
+        self.panel_phenomics.apply_plant_numbers(self.global_model.get_plants_metadata())
+        self.update_overlay_labels()
         self.global_model._notify_data_changed()
         self.ensure_active_plant()
         self.setWindowTitle(
@@ -1808,6 +1953,14 @@ class ChronoRootAnnotationSuite(QMainWindow):
         if warnings:
             QMessageBox.warning(self, "Topology", "\n".join(warnings))
 
+        if self.current_file_path:
+            self._publish_listed_file(
+                self.current_file_path,
+                new_status=annotation_status_display(self.global_model.status),
+                new_plant_count=len(self.global_model.plant_uids()),
+                new_analysis_status=self._current_analysis_status_for_cache(),
+            )
+
         if self._is_closing:
             self.close()
         elif self._pending_load_data:
@@ -1815,14 +1968,6 @@ class ChronoRootAnnotationSuite(QMainWindow):
             self._pending_load_data = None
             if self._confirm_leave_stale_measurements():
                 self._execute_load(data_to_load)
-        elif self.current_file_path:
-            ann_display = annotation_status_display(self.global_model.status)
-            self.browser.update_file_status_in_cache(
-                self.current_file_path,
-                new_status=ann_display,
-                new_plant_count=len(self.global_model.plant_uids()),
-                new_analysis_status=self._current_analysis_status_for_cache(),
-            )
 
         if self.measurements_cache:
             self.panel_phenomics.btn_export.setEnabled(True)
@@ -1880,8 +2025,7 @@ class ChronoRootAnnotationSuite(QMainWindow):
             self.active_workers.remove(worker)
             worker.deleteLater()
 
-        results_dict, warnings, imported = payload
-        self._remember_imported_topology(imported)
+        results_dict, warnings, _imported = payload
         self.measurements_cache = scalar_metrics_dict(results_dict)
         self._note_measurements_current()
         self.panel_phenomics.btn_export.setEnabled(True)
@@ -1984,8 +2128,6 @@ class ChronoRootAnnotationSuite(QMainWindow):
             return
         uid = worker.inspector_uid
         self._inspector_inflight_uid = None
-        if viz_data and viz_data.get("imported_record") is not None:
-            self._remember_imported_topology({uid: viz_data["imported_record"]})
         self._inspector_viz_cache[uid] = viz_data
         if self.workspaces.currentIndex() != WorkspaceManager.TAB_INSPECTOR or self.global_model.active_uid != uid:
             return
@@ -2087,8 +2229,7 @@ class ChronoRootAnnotationSuite(QMainWindow):
             self.active_workers.remove(worker)
             worker.deleteLater()
 
-        scalar_results, warnings, imported = payload
-        self._remember_imported_topology(imported)
+        scalar_results, warnings, _imported = payload
         if warnings:
             QMessageBox.warning(self, "Topology", "\n".join(warnings))
 
@@ -2101,7 +2242,7 @@ class ChronoRootAnnotationSuite(QMainWindow):
         out_dir = self.browser.get_effective_output_dir(self.current_task_path)
 
         if self.current_file_path:
-            self.browser.update_file_status_in_cache(
+            self._publish_listed_file(
                 self.current_file_path,
                 new_analysis_status="analyzed",
             )

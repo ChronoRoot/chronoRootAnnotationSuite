@@ -176,6 +176,18 @@ class GenotypeHelper:
         """
         raw_text = combo.currentText().strip()
         if not raw_text:
+            # Leave the cell blank. Restoring the previous name made a genotype impossible to remove.
+            combo.blockSignals(True)
+            blank = next(
+                (index for index in range(combo.count()) if not combo.itemText(index).strip()),
+                -1,
+            )
+            combo.setCurrentIndex(blank)
+            if combo.lineEdit() is not None:
+                combo.lineEdit().clear()
+            combo.blockSignals(False)
+            if on_text_resolved:
+                on_text_resolved()
             return None
 
         resolved = GenotypeHelper.resolve_genotype_text(raw_text, genotypes)

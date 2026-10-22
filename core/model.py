@@ -421,7 +421,7 @@ class PlantImageModel:
         }
 
     def sync_plant_numbers_to_uids(self):
-        """Give every plant a default Plant # equal to its UID, keeping user edits."""
+        """Fill a blank Plant # with the UID. A number already stored is never changed."""
         for uid in self.plant_uids():
             entry = self.plants_meta.setdefault(uid, normalize_plant_meta({}, uid))
             if not str(entry.get("plant_num", "")).strip():
@@ -849,7 +849,7 @@ class PlantImageModel:
                 "Connect them in Annotation with Shape Paint, or split into separate plants."
             )
 
-        # 2. Spatially order UIDs (left-to-right rows); preserve user plant numbers
+        # 2. Spatially order internal ids. Plant # and genotype stay on the same plant.
         mapping = self.sort_instances_spatially(row_tolerance=250)
         self.sync_plant_numbers_to_uids()
 

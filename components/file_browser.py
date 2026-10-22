@@ -11,6 +11,13 @@ from core.model import annotation_status_display, analysis_status_display, norma
 from components.ui_help import HELP_WORKFLOW, show_help
 
 
+def _same_dir(left, right):
+    """True when two paths name the same folder, ignoring spelling differences."""
+    if not left or not right:
+        return False
+    return os.path.normpath(os.path.abspath(left)) == os.path.normpath(os.path.abspath(right))
+
+
 def qt_display_text(text):
     """Escape '&' for Qt widgets that treat it as a keyboard mnemonic marker."""
     return str(text).replace("&", "&&")
@@ -508,6 +515,11 @@ class UnifiedFileBrowser(QWidget):
     ):
         """Update cached file entry and propagate folder annotation/analysis aggregates."""
         file_dir = os.path.dirname(file_path)
+        if file_dir not in self.folder_cache:
+            file_dir = next(
+                (key for key in self.folder_cache if _same_dir(key, file_dir)),
+                None,
+            )
 
         delta_without = delta_pending = delta_in_progress = delta_completed = 0
         delta_analyzed = delta_not_analyzed = 0
@@ -523,16 +535,16 @@ class UnifiedFileBrowser(QWidget):
                 return "in_progress"
             return normalize_annotation_status(display_or_raw)
 
-        if file_dir not in self.folder_cache:
-            return
+        if file_dir is None:
+            return None
 
         target = None
         for item in self.folder_cache[file_dir]:
-            if item["type"] == "file" and item["path"] == file_path:
+            if item["type"] == "file" and _same_dir(item["path"], file_path):
                 target = item
                 break
         if target is None:
-            return
+            return None
 
         old_ann = ann_key(target.get("annotation_status") or target.get("status"))
         old_analysis = target.get("analysis_status", "not_applicable")
@@ -546,7 +558,7 @@ class UnifiedFileBrowser(QWidget):
         count_changed = new_plant_count is not None and old_plant_count != new_plant_count
 
         if not ann_changed and not analysis_changed and not count_changed:
-            return
+            return None
 
         target["annotation_status"] = new_ann
         target["status"] = annotation_status_display(new_ann)
@@ -597,9 +609,13 @@ class UnifiedFileBrowser(QWidget):
             current_iter_dir = file_dir
             while True:
                 parent_dir = os.path.dirname(current_iter_dir)
-                if parent_dir in self.folder_cache:
-                    for item in self.folder_cache[parent_dir]:
-                        if item["type"] == "dir" and item["path"] == current_iter_dir:
+                parent_key = next(
+                    (key for key in self.folder_cache if _same_dir(key, parent_dir)),
+                    None,
+                )
+                if parent_key is not None:
+                    for item in self.folder_cache[parent_key]:
+                        if item["type"] == "dir" and _same_dir(item.get("path"), current_iter_dir):
                             item["without_annotation"] = item.get("without_annotation", 0) + delta_without
                             item["pending"] = item.get("pending", 0) + delta_pending
                             item["in_progress"] = item.get("in_progress", 0) + delta_in_progress
@@ -608,12 +624,31 @@ class UnifiedFileBrowser(QWidget):
                             item["not_analyzed"] = item.get("not_analyzed", 0) + delta_not_analyzed
                             break
 
-                if current_iter_dir == self.root_dir or parent_dir == current_iter_dir:
+                if _same_dir(current_iter_dir, self.root_dir) or parent_dir == current_iter_dir:
                     break
                 current_iter_dir = parent_dir
 
         if self.current_dir in self.folder_cache:
             self.render_contents(self.folder_cache[self.current_dir], use_cache=False)
+        return {
+            "file_path": target["path"],
+            "file_dir": file_dir,
+            "deltas": {
+                "without_annotation": delta_without,
+                "pending": delta_pending,
+                "in_progress": delta_in_progress,
+                "completed": delta_completed,
+                "analyzed": delta_analyzed,
+                "not_analyzed": delta_not_analyzed,
+            },
+            "fields": {
+                "annotation_status": target.get("annotation_status"),
+                "status": target.get("status"),
+                "plant_count": target.get("plant_count", 0),
+                "analysis_status": target.get("analysis_status"),
+                "analyzer_status": target.get("analyzer_status"),
+            },
+        }
 
     def render_contents(self, contents, use_cache=True):
         if use_cache:

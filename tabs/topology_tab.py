@@ -155,17 +155,19 @@ def _trace_plant(
             graph, colored, full_skel, image_name, uid, genotype, prune, record, plant_xml,
         )
         if restored is not None:
-            return {"uid": uid, "topology": restored, "note": "", "store": None}
+            return {"uid": uid, "topology": restored, "note": ""}
         note = "The applied topology no longer matches this skeleton. Showing the automatic tracing."
     if not decided:
         plant_xml = read_rsml_plants(rsml_path).get(int(uid)) if rsml_path else None
         if plant_xml is not None:
             imported = import_plant(graph, colored, plant_xml, prune)
             if imported is not None:
-                return {"uid": uid, "topology": imported, "note": note, "store": imported.to_record()}
+                # The file is already on disk. Keeping this record only for the view;
+                # copying it into the overrides would make the plate look unsaved.
+                return {"uid": uid, "topology": imported, "note": note}
             note = "The exported RSML does not match this skeleton. Showing the automatic tracing."
     topology = automatic_topology(graph, colored, full_skel, image_name, uid, genotype, prune)
-    return {"uid": uid, "topology": topology, "note": note, "store": None}
+    return {"uid": uid, "topology": topology, "note": note}
 
 
 def _swatch(color):
@@ -286,6 +288,19 @@ class RsmlCanvasTab(QWidget):
         self._image = None
         self.root_list.clear()
         self._colors = {}
+
+    def remap_tracking(self, mapping):
+        """Move cached tracings with the plants when ids are reassigned."""
+        if not mapping:
+            return
+
+        def carry(store):
+            return {mapping.get(uid, uid): value for uid, value in store.items()}
+
+        self._seen_token = carry(self._seen_token)
+        self._topology_cache = carry(self._topology_cache)
+        if self._loaded_uid is not None:
+            self._loaded_uid = mapping.get(self._loaded_uid, self._loaded_uid)
 
     def on_data_changed(self):
         if self.model.callbacks_muted or self._suspend:
@@ -498,8 +513,6 @@ class RsmlCanvasTab(QWidget):
     def _on_trace_ready(self, serial, payload):
         if serial != self._load_serial or payload.get("uid") != self._loaded_uid:
             return
-        if payload.get("store") is not None:
-            self.model.topology_overrides[payload["uid"]] = payload["store"]
         self._seen_token[payload["uid"]] = self._content_token(payload["uid"])
         self._note = payload.get("note") or ""
         self.topology = payload["topology"]

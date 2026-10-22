@@ -25,7 +25,8 @@ HELP_ANNOTATION = """<b>Annotation</b><br><br>
 <b>Plant list</b><br>
 • <b>+ New</b> — paint in a missed plant.<br>
 • <b>Merge</b> — join fragments (select 2+ plants first).<br>
-• <b>Delete</b> — remove a plant.<br><br>
+• <b>Delete</b> — remove a plant.<br>
+• <b>Reset Plant IDs</b> — number the ids and Plant # again in rows, left to right. The genotype stays on the same plant.<br><br>
 <b>Tools</b><br>
 • <b>Clear Selection</b> — deselect all plants.<br>
 • <b>Bounding Boxes</b> — show or hide plant boxes.<br>

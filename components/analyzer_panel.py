@@ -14,6 +14,8 @@ from components.ui_help import HELP_METADATA, show_help
 
 BULK_ENTER_NEW_LABEL = "Enter new genotype…"
 BULK_ENTER_NEW_ROLE = "enter_new_genotype"
+# A real blank entry collapses in the dropdown, so this is a blank row with height.
+ROW_BLANK_GENOTYPE = " "
 
 # The Plant # cell carries the row identity: Qt.UserRole holds the model UID, which the
 # user never sees, and ROLE_SEED_POS the plate position of a seed that never germinated.
@@ -431,6 +433,19 @@ class PhenomicsControlPanel(QWidget):
             }, uid)
         return metadata
 
+    def apply_plant_numbers(self, plants_metadata):
+        """Show Plant # from the model without marking the table as edited."""
+        self.table_plants.blockSignals(True)
+        for row in range(self.table_plants.rowCount()):
+            item = self.table_plants.item(row, COL_PLANT_NUM)
+            if item is None:
+                continue
+            meta = (plants_metadata or {}).get(item.data(Qt.UserRole))
+            if not meta:
+                continue
+            item.setText(str(meta.get("plant_num", "")))
+        self.table_plants.blockSignals(False)
+
     def _genotype_file_path(self, save):
         """Ask for a genotype file, defaulting to <plate id>.json beside the plate."""
         default = os.path.join(
@@ -674,10 +689,14 @@ class PhenomicsControlPanel(QWidget):
 
             combo = QComboBox()
             combo.setEditable(True)
-            combo.addItems(genotypes)
+            combo.setToolTip("Choose a genotype, or the blank row to clear it.")
+            self._fill_row_genotype_combo(combo, genotypes)
             self._select_genotype_in_combo(combo, saved["genotype"])
             combo.lineEdit().editingFinished.connect(
                 lambda c=combo: self._on_genotype_line_edited(c)
+            )
+            combo.currentIndexChanged.connect(
+                lambda _index, c=combo: self._clear_blank_genotype_line(c)
             )
             combo.currentIndexChanged.connect(self.update_overlay_labels)
             combo.currentIndexChanged.connect(self.metadata_dirty_changed.emit)
@@ -728,12 +747,32 @@ class PhenomicsControlPanel(QWidget):
                     GenotypeHelper.resolve_genotype_text(current, genotypes) if current else ""
                 )
                 combo.blockSignals(True)
-                combo.clear()
-                combo.addItems(genotypes)
+                self._fill_row_genotype_combo(combo, genotypes)
                 self._select_genotype_in_combo(combo, resolved_row)
                 combo.blockSignals(False)
 
         self.update_overlay_labels()
+
+    @staticmethod
+    def _clear_blank_genotype_line(combo):
+        """The blank dropdown row is a space so it stays clickable. The cell itself stays empty."""
+        line = combo.lineEdit()
+        if line is None or combo.currentIndex() < 0:
+            return
+        if combo.itemText(combo.currentIndex()).strip() or not line.text():
+            return
+        line.blockSignals(True)
+        line.clear()
+        line.blockSignals(False)
+
+    @staticmethod
+    def _fill_row_genotype_combo(combo, genotypes):
+        """Saved names, with a blank row first so this plant can have no genotype."""
+        combo.clear()
+        combo.addItem(ROW_BLANK_GENOTYPE)
+        for name in genotypes:
+            if str(name).strip():
+                combo.addItem(name)
 
     @staticmethod
     def _select_genotype_in_combo(combo, genotype):
@@ -742,8 +781,11 @@ class PhenomicsControlPanel(QWidget):
         An empty value leaves the combo blank instead of silently falling back to the
         first saved genotype, which would rewrite every unassigned plant.
         """
-        if not genotype:
-            combo.setCurrentIndex(-1)
+        if not str(genotype or "").strip():
+            blank = combo.findText(ROW_BLANK_GENOTYPE)
+            combo.setCurrentIndex(blank if blank >= 0 else -1)
+            if combo.lineEdit() is not None:
+                combo.lineEdit().clear()
             return
         if combo.findText(genotype) < 0:
             combo.addItem(genotype)
