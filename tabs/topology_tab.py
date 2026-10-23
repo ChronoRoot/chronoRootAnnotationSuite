@@ -444,6 +444,10 @@ class RsmlCanvasTab(QWidget):
             self._redraw()
 
     def load_plant(self):
+        if self.model.content_epoch != self._content_epoch:
+            # A new plate can select a plant before this tab has dropped the
+            # previous plate. That is not a segmentation edit.
+            return
         uid = self.model.active_uid
         self._load_serial += 1
         serial = self._load_serial
@@ -1057,11 +1061,6 @@ class RsmlCanvasTab(QWidget):
             for child_id in children:
                 add(child_id)
 
-        if self.topology.main_id in self.topology.roots:
-            add(self.topology.main_id)
-        for root_id in sorted(self.topology.roots):
-            if root_id not in names:
-                add(root_id)
         if self.topology.available:
             rows.append((None, "Available segments", None))
             for index in range(len(self.topology.available)):
@@ -1069,6 +1068,11 @@ class RsmlCanvasTab(QWidget):
                     ("avail", index), f"Segment {index + 1}",
                     self._colors.get(("avail", index), _TAB20[index % len(_TAB20)]),
                 ))
+        if self.topology.main_id in self.topology.roots:
+            add(self.topology.main_id)
+        for root_id in sorted(self.topology.roots):
+            if root_id not in names:
+                add(root_id)
         return rows
 
     def _fill_list(self):

@@ -99,8 +99,8 @@ Optional. Use this when a crossing turns the rest of a lateral into tertiaries,
 or when two laterals running side by side were traced as one thick root.
 Skip it when the automatic RSML is already right.<br><br>
 
-The list names every root. Segments that are not in a root yet are listed under
-<b>Available segments</b>.<br><br>
+The list names every root. Segments that are not in a root yet are listed above
+the main root, under <b>Available segments</b>.<br><br>
 
 The view is the same as Phenomics review:<br>
 • <b>Raw image</b><br>
@@ -128,8 +128,8 @@ already on its own is left unchanged. The main root cannot be split this way.<br
 including the main root. The segment is cut there and the shorter piece stays
 selected, so Copy segment can take only that part. The main root stays connected.<br>
 <b>Copy segment</b> — select a root, or click one segment, then copy it.
-The original root keeps that segment. A copy that begins on the main root becomes
-a new lateral; any other copy appears in Available segments, drawn with a yellow border.<br>
+The original root keeps that segment. The copy is listed above the main root,
+under Available segments, and drawn with a yellow border.<br>
 <b>Line width</b> — thickness of the root lines, in pixels. Use a thin line when zoomed out.<br>
 <b>Remove copy</b> — remove an extra copy. The last copy of a segment stays.<br>
 <b>Undo</b> — undo the last edit in this view.<br>

@@ -1411,7 +1411,7 @@ class ChronoRootAnnotationSuite(QMainWindow):
     def scan_directory(self, folder_path, force_refresh=False):
         folder_path = self._rekey_folder_cache(folder_path)
         self.browser.current_dir = folder_path
-        self._ensure_dataset_index(force=force_refresh and self._dir_key(folder_path) == self._dir_key(self.browser.root_dir))
+        self._ensure_dataset_index(force=force_refresh)
 
         if force_refresh:
             keys_to_delete = [k for k in self.browser.folder_cache if k.startswith(folder_path)]
@@ -1831,6 +1831,7 @@ class ChronoRootAnnotationSuite(QMainWindow):
             return False
         if not self._keep_open_rsml_edits():
             return False
+        self._keep_live_root_edges()
         if mark_finished and self._measurements_block_finish():
             if not self._offer_in_progress_instead():
                 return False
@@ -1888,6 +1889,22 @@ class ChronoRootAnnotationSuite(QMainWindow):
         worker.error.connect(self._on_thread_error)
         worker.start()
         return True
+
+    def _keep_live_root_edges(self):
+        """The kept record must carry the split segments, not only their ids."""
+        tab = self.workspaces.canvas_rsml
+        live = {}
+        for uid, item in tab._topology_cache.items():
+            topology = item.get("topology")
+            if topology is not None:
+                live[int(uid)] = topology
+        if tab.topology is not None and tab._loaded_uid is not None:
+            live[int(tab._loaded_uid)] = tab.topology
+        overrides = self.global_model.topology_overrides
+        for uid in list(overrides):
+            topology = live.get(int(uid))
+            if topology is not None:
+                overrides[uid] = topology.to_record()
 
     def _save_bundle(
         self, task_path, base_name, out_dir, mark_finished,

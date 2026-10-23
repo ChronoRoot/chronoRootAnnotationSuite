@@ -130,6 +130,17 @@ class Topology:
             and _links(self, current)
         )
 
+    def _rewrite_spine(self, signed, replacement):
+        updated = []
+        for item in self.main_spine:
+            if item == signed:
+                updated.extend(replacement)
+            elif item == -signed:
+                updated.extend(-piece for piece in reversed(replacement))
+            else:
+                updated.append(item)
+        return updated
+
     def reconnect_main(self):
         """Put the original main-root segments back. Copies used by laterals stay."""
         if self.main_id not in self.roots or not self.main_spine or not self._main_is_open():
@@ -185,10 +196,12 @@ class Topology:
             target, source = source, target
         if isinstance(target_id, str) and isinstance(source_id, str):
             return self._join_available(target_id, source_id, target, source)
-        if not isinstance(source_id, str) and source_id == self.main_id:
-            raise TopologyError(
-                "The main root stays in one piece. Copy the segment, then connect that copy to the lateral."
-            )
+        if (
+            not isinstance(target_id, str)
+            and not isinstance(source_id, str)
+            and (target_id == self.main_id or source_id == self.main_id)
+        ):
+            raise TopologyError("Make a copy to be able to connect.")
         owned_by_target = {abs(signed) for signed in target}
         if not isinstance(target_id, str) and source and all(abs(signed) in owned_by_target for signed in source):
             raise TopologyError(
@@ -255,14 +268,6 @@ class Topology:
         begin = self.edge_ends(signed_edges[0])[0]
         return begin in set(self.chain_nodes(self.roots[self.main_id]["edges"]))
 
-    def _add_lateral_copy(self, signed_edges):
-        """A copy that starts on the main root is a new lateral, not a branch."""
-        root_id = (max(self.roots) + 1) if self.roots else 1
-        self.roots[root_id] = {
-            "parent": self.main_id, "edges": list(signed_edges), "available": False,
-        }
-        return root_id
-
     def _promote_if_lateral(self, root_id):
         if root_id in self.roots and root_id != self.main_id and self._begins_on_main(self.roots[root_id]["edges"]):
             self.roots[root_id]["parent"] = self.main_id
@@ -272,8 +277,6 @@ class Topology:
         edges = list(self.roots[root_id]["edges"])
         if not edges:
             raise TopologyError("Select one root first.")
-        if root_id != self.main_id and self._begins_on_main(edges):
-            return self._add_lateral_copy(edges)
         if edges in self.available or _reversed(edges) in self.available:
             raise TopologyError("That root is already duplicated.")
         self.available.append(edges)
@@ -319,6 +322,13 @@ class Topology:
         else:
             replacement = [-second_id, -first_id]
         chain[position:position + 1] = replacement
+        # The saved main chain must follow a split of the main. Leaving the old
+        # edge id there makes Keep fixes look up an edge that was just deleted.
+        if root_id == self.main_id or (
+            self.ownership(abs(signed)) == 0
+            and any(abs(item) == abs(signed) for item in self.main_spine)
+        ):
+            self.main_spine = self._rewrite_spine(signed, replacement)
         if self.ownership(abs(signed)) == 0:
             del self.edges[abs(signed)]
         left_length = polyline_length(self.edges[abs(replacement[0])].points)
@@ -331,8 +341,6 @@ class Topology:
         if position < 0 or position >= len(edges):
             raise TopologyError("Select one segment first.")
         segment = [edges[position]]
-        if root_id != self.main_id and self._begins_on_main(segment):
-            return self._add_lateral_copy(segment)
         if segment in self.available or [-segment[0]] in self.available:
             raise TopologyError("That segment is already available to connect.")
         self.available.append(segment)
@@ -372,6 +380,15 @@ class Topology:
             ],
             "available": [list(chain) for chain in self.available],
             "main_spine": list(self.main_spine),
+            "edges": {
+                str(edge_id): {
+                    "u": [int(edge.u[0]), int(edge.u[1])],
+                    "v": [int(edge.v[0]), int(edge.v[1])],
+                    "points": [[int(point[0]), int(point[1])] for point in edge.points],
+                    "root_type": None if edge.root_type is None else int(edge.root_type),
+                }
+                for edge_id, edge in self.edges.items()
+            },
         }
 
     @classmethod
@@ -811,7 +828,10 @@ def chains_from_polyline(points, edges, strict=False):
                 continue
             signed.append(link)
         signed.append(found)
-    return _drop_untouched_edges(signed, edges, points)
+    signed = _drop_untouched_edges(signed, edges, points)
+    if not signed:
+        return signed
+    return _clip_to_covered_ends(signed, edges, points)
 
 
 def _drop_untouched_edges(signed, edges, points):
@@ -834,6 +854,64 @@ def _drop_untouched_edges(signed, edges, points):
     if not covered:
         return signed
     return _longest_run(edges, covered)
+
+
+def _covered_end_run(directed, present):
+    """A covered prefix or suffix, when the rest of the segment is untouched."""
+    covered = [point in present for point in directed]
+    if len(covered) < 3 or all(covered) or not any(covered):
+        return None
+    if covered[0]:
+        end = 0
+        while end + 1 < len(covered) and covered[end + 1]:
+            end += 1
+        if end >= 1 and not any(covered[end + 1:]):
+            return 0, end
+    if covered[-1]:
+        start = len(covered) - 1
+        while start > 0 and covered[start - 1]:
+            start -= 1
+        if start <= len(covered) - 2 and not any(covered[:start]):
+            return start, len(covered) - 1
+    return None
+
+
+def _clip_to_covered_ends(signed, edges, points):
+    """Stop a loaded root at a cut instead of taking the rest of the segment."""
+    present = set(points)
+    order = {point: index for index, point in enumerate(points)}
+    clipped = []
+    for signed_id in signed:
+        edge = edges[abs(signed_id)]
+        directed = list(edge.points if signed_id > 0 else reversed(edge.points))
+        run = _covered_end_run(directed, present)
+        if run is None:
+            clipped.append(signed_id)
+            continue
+        start, stop = run
+        piece = directed[start:stop + 1]
+        if len(piece) < 2 or len(piece) == len(directed):
+            clipped.append(signed_id)
+            continue
+        new_id = None
+        sign = 1
+        for edge_id, existing in edges.items():
+            if existing.points == piece:
+                new_id = edge_id
+                break
+            if existing.points == list(reversed(piece)):
+                new_id = edge_id
+                sign = -1
+                break
+        if new_id is None:
+            new_id = (max(edges) + 1) if edges else 1
+            edges[new_id] = _Edge(piece[0], piece[-1], piece, edge.root_type)
+        first = order.get(piece[0], 0)
+        last = order.get(piece[-1], 0)
+        if first > last:
+            sign = -sign
+        clipped.append(new_id * sign)
+    return clipped
 
 
 def _longest_run(edges, signed_edges):
@@ -1022,6 +1100,47 @@ def automatic_topology(graph, colored, full_skel, image_name, uid, genotype, pru
     return topology_from_graph(graph, colored, plant_xml, prune)
 
 
+def _points_on_skeleton(edges, full_skel):
+    height, width = full_skel.shape[:2]
+    for edge in edges.values():
+        for x, y in edge.points:
+            if y < 0 or x < 0 or y >= height or x >= width or full_skel[y, x] == 0:
+                return False
+    return True
+
+
+def _restore_stored_edges(record, full_skel):
+    """Rebuild a kept tracing from its own segments.
+
+    A split replaces one skeleton segment with two new ones. Those ids are not
+    in the graph built again at save time, but their pixels are still on the
+    skeleton. A changed mask leaves the pixels, so the automatic tracing is used.
+    """
+    stored = record.get("edges") if isinstance(record, dict) else None
+    if not stored:
+        return None
+    edges = {}
+    for key, item in stored.items():
+        points = [tuple(int(value) for value in point) for point in item.get("points") or []]
+        if len(points) < 2:
+            return None
+        edges[int(key)] = _Edge(
+            tuple(int(value) for value in item["u"]),
+            tuple(int(value) for value in item["v"]),
+            points,
+            item.get("root_type"),
+        )
+    if full_skel is not None and not _points_on_skeleton(edges, full_skel):
+        return None
+    try:
+        topology = Topology.from_record(edges, record)
+    except (KeyError, TypeError, ValueError):
+        return None
+    if topology.signature() != record.get("graph_hash"):
+        return None
+    return topology
+
+
 def restore_saved(
     graph, colored, full_skel, image_name, uid, genotype, prune, record, plant_xml,
 ):
@@ -1030,6 +1149,9 @@ def restore_saved(
     Those edges are the skeleton after tiny unused stubs are dropped and the
     pieces between branches are joined, so the raw graph ids will not match.
     """
+    restored = _restore_stored_edges(record, full_skel)
+    if restored is not None:
+        return restored
     if plant_xml is not None:
         imported = import_plant(graph, colored, plant_xml, prune)
         if imported is not None:

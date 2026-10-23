@@ -207,7 +207,7 @@ class AnalyzerFileStatsWidget(DualRowFileStatsWidget):
 # ==========================================
 class UnifiedFileBrowser(QWidget):
     file_selected = pyqtSignal(dict)
-    refresh_requested = pyqtSignal(str)
+    refresh_requested = pyqtSignal(str, bool)
     save_progress_requested = pyqtSignal()
     finish_annotation_requested = pyqtSignal()
     input_dir_changed = pyqtSignal(str)
@@ -298,7 +298,7 @@ class UnifiedFileBrowser(QWidget):
         self.btn_up = QPushButton("⬆ Up Level")
         self.btn_up.clicked.connect(self.navigate_up)
         self.btn_refresh = QPushButton("Refresh")
-        self.btn_refresh.clicked.connect(self.request_refresh)
+        self.btn_refresh.clicked.connect(lambda _checked=False: self.request_refresh())
         nav_layout.addWidget(self.btn_up)
         nav_layout.addWidget(self.btn_refresh)
         layout.addLayout(nav_layout)
@@ -376,12 +376,9 @@ class UnifiedFileBrowser(QWidget):
         if self.current_dir in self.folder_cache:
             self.render_contents(self.folder_cache[self.current_dir], use_cache=False)
 
-    def request_refresh(self, force_refresh=True):
-        if force_refresh:
-            keys_to_delete = [k for k in self.folder_cache if k.startswith(self.current_dir)]
-            for k in keys_to_delete:
-                del self.folder_cache[k]
-        self.refresh_requested.emit(self.current_dir)
+    def request_refresh(self):
+        """The button's click sends False. Ignore that and reread this folder from disk."""
+        self.refresh_requested.emit(self.current_dir, True)
 
     def change_input_dir(self):
         d = QFileDialog.getExistingDirectory(self, "Select Dataset Folder", self.in_dir)
@@ -396,7 +393,7 @@ class UnifiedFileBrowser(QWidget):
         self._update_current_dir_label()
         self._persist_database_root(d)
         self.input_dir_changed.emit(d)
-        self.refresh_requested.emit(d)
+        self.refresh_requested.emit(d, True)
 
     def change_output_dir(self):
         if self.chk_output_with_input.isChecked():
@@ -479,7 +476,7 @@ class UnifiedFileBrowser(QWidget):
 
         self.current_dir = parent
         self._update_current_dir_label()
-        self.refresh_requested.emit(self.current_dir)
+        self.refresh_requested.emit(self.current_dir, False)
 
     def _persist_database_root(self, path):
         if not self.config_file:
@@ -814,7 +811,7 @@ class UnifiedFileBrowser(QWidget):
         if data["type"] == "dir":
             self.current_dir = data["path"]
             self._update_current_dir_label()
-            self.refresh_requested.emit(self.current_dir)
+            self.refresh_requested.emit(self.current_dir, False)
 
     def on_item_clicked(self, item):
         data = item.data(Qt.UserRole)

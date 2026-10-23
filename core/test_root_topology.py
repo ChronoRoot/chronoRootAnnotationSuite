@@ -22,6 +22,7 @@ from core.root_topology import (
     plant_element,
     polyline_length,
     read_rsml_plants,
+    restore_saved,
 )
 
 CROPS = (
@@ -185,19 +186,15 @@ def test_shared_trunk_can_be_copied_and_connected_either_way():
         4: {"parent": 2, "edges": [4], "available": False},
     }
     topology = Topology(edges, roots, 1, [])
-    copied = topology.copy_root(2)
-    assert topology.order_of(copied) == 1
-    assert topology.roots[copied]["parent"] == 1
-    assert topology.roots[copied]["edges"] == [2]
-    topology.connect(copied, 4)
+    assert topology.copy_root(2) is None
+    assert topology.available == [[2]]
+    topology.connect(4, "a0")
     assert topology.roots[2]["edges"] == [2]
-    assert topology.roots[copied]["edges"] == [2, 4]
-    assert topology.order_of(copied) == 1
+    assert topology.roots[4]["edges"] == [2, 4]
     assert topology.roots[3]["edges"] == [3]
-    assert _contiguous(topology, topology.roots[copied]["edges"])
-    first = topology.copy_segment(2, 0)
-    assert topology.order_of(first) == 1
-    assert topology.roots[first]["parent"] == 1
+    assert _contiguous(topology, topology.roots[4]["edges"])
+    assert topology.copy_segment(2, 0) is None
+    assert topology.available == [[2]]
 
 
 def test_tertiary_then_lateral_merges_in_the_only_direction():
@@ -253,7 +250,12 @@ def test_split_segment_extends_the_lateral_without_a_loop():
         topology.connect(2, 1)
         raise AssertionError("the main root was pulled into the lateral")
     except TopologyError as exc:
-        assert "main root" in str(exc).lower()
+        assert "copy" in str(exc).lower()
+    try:
+        topology.connect(1, 2)
+        raise AssertionError("a lateral was connected straight onto the main root")
+    except TopologyError as exc:
+        assert "copy" in str(exc).lower()
 
 
 def test_split_lateral_becomes_a_child():
@@ -315,6 +317,9 @@ def test_main_root_cannot_be_split_and_a_lateral_can_be_cut():
         assert "cannot split the main root" in str(exc).lower()
     shorter = topology.cut_polyline(1, 0, (0, 6))
     assert len(topology.roots[1]["edges"]) == 3
+    assert topology.main_spine == topology.roots[1]["edges"]
+    assert not topology._main_is_open()
+    topology.reconnect_main()
     assert _contiguous(topology, topology.roots[1]["edges"])
     assert topology.root_points(1)[0] == (0, 0)
     assert topology.root_points(1)[-1] == (0, 30)
@@ -332,6 +337,9 @@ def test_main_root_cannot_be_split_and_a_lateral_can_be_cut():
     original = list(fresh.edges[2].points)
     shorter = fresh.cut_polyline(2, 0, (0, 26))
     assert fresh.roots[1]["edges"] == [1, 2]
+    assert fresh.main_spine == [1, 2]
+    fresh.reconnect_main()
+    assert fresh.roots[1]["edges"] == [1, 2]
     assert fresh.edges[2].points == original
     assert len(fresh.roots[2]["edges"]) == 2
     assert _contiguous(fresh, fresh.roots[2]["edges"])
@@ -344,6 +352,49 @@ def test_main_root_cannot_be_split_and_a_lateral_can_be_cut():
     created = fresh.copy_segment(2, shorter)
     assert created is None
     assert fresh.available[-1] == [fresh.roots[2]["edges"][shorter]]
+
+
+def test_split_edges_restore_onto_the_same_skeleton():
+    import numpy as np
+    topology = Topology(
+        {1: _edge((0, 0), (0, 10)), 2: _edge((0, 10), (0, 20))},
+        {1: {"parent": None, "edges": [1, 2], "available": False}},
+        1, [],
+    )
+    topology.cut_polyline(1, 0, (0, 6))
+    record = topology.to_record()
+    assert "edges" in record
+    assert 1 not in {int(edge_id) for edge_id in record["edges"]}
+    skeleton = np.zeros((30, 5), dtype=np.uint8)
+    for item in record["edges"].values():
+        for x, y in item["points"]:
+            skeleton[y, x] = 1
+    restored = restore_saved(None, None, skeleton, "plate.png", 1, "Unknown", 5, record, None)
+    assert restored is not None
+    assert restored.roots[1]["edges"] == topology.roots[1]["edges"]
+    assert restored.signature() == topology.signature()
+    restored.reconnect_main()
+    blank = np.zeros_like(skeleton)
+    assert _restore_misses_blank(record, blank)
+
+
+def _restore_misses_blank(record, skeleton):
+    from core.root_topology import _restore_stored_edges
+    return _restore_stored_edges(record, skeleton) is None
+
+
+def test_a_cut_lateral_stops_at_the_cut_when_loaded():
+    full = _edge((0, 0), (0, 47))
+    edges = {10: full, 4: _edge((0, 0), (8, 0))}
+    covered = full.points[:36]
+    polyline = list(reversed(edges[4].points)) + covered[1:]
+    chain = chains_from_polyline(polyline, edges, strict=True)
+    assert chain is not None
+    piece = edges[abs(chain[-1])]
+    assert piece.points[0] == (0, 0)
+    assert piece.points[-1] == (0, 35)
+    assert edges[10].points[-1] == (0, 47)
+    assert chains_from_polyline(full.points, {10: full}, strict=True) == [10]
 
 
 def test_touching_the_end_does_not_copy_the_segment():
@@ -636,6 +687,8 @@ def main():
     test_split_lateral_becomes_a_child()
     test_laterals_that_do_not_touch_stay_apart()
     test_main_root_cannot_be_split_and_a_lateral_can_be_cut()
+    test_split_edges_restore_onto_the_same_skeleton()
+    test_a_cut_lateral_stops_at_the_cut_when_loaded()
     test_touching_the_end_does_not_copy_the_segment()
     test_connect_rejects_a_gap()
     test_target_plate_edges_round_trip_and_do_not_touch_the_file()
