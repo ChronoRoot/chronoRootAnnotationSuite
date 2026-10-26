@@ -239,27 +239,89 @@ def peek_task_summary(json_path, task_dir, base_name, out_dir=None, probe_analys
 
 
 # --- RLE codec ---
-def encode_rle(mask):
-    """Vectorized RLE encoding using NumPy."""
+def _encode_rle_scan(mask):
+    """RLE of every pixel, in row-major order."""
     pixels = mask.ravel()
-    if len(pixels) == 0: 
+    if len(pixels) == 0:
         return {"size": mask.shape, "counts": []}
-    
-    # Identify boolean array where transitions occur
+
     changes = np.concatenate(([True], pixels[1:] != pixels[:-1], [True]))
-    
-    # Get the integer indices of those transitions
-    run_indices = np.where(changes)[0]
-    
-    # Extract the values and calculate the lengths (counts) of each run
+    run_indices = np.flatnonzero(changes)
     vals = pixels[run_indices[:-1]]
     counts = np.diff(run_indices)
-    
-    # Interleave values and counts into a single 1D array
     rle = np.empty(vals.size * 2, dtype=int)
     rle[0::2] = vals
     rle[1::2] = counts
-    
+    return {"size": mask.shape, "counts": rle.tolist()}
+
+
+def _foreground_box(mask):
+    """Tight box of nonzero pixels. None when the mask is empty."""
+    x, y, width, height = cv2.boundingRect(mask)
+    if width == 0 or height == 0:
+        return None
+    return int(x), int(y), int(width), int(height)
+
+
+def encode_rle(mask):
+    """RLE encoding. Skips the empty margin around the foreground; counts match a full scan."""
+    if mask.ndim != 2 or mask.size == 0 or mask.dtype != np.uint8:
+        return _encode_rle_scan(mask)
+
+    box = _foreground_box(mask)
+    if box is None:
+        return {"size": mask.shape, "counts": [0, int(mask.size)]}
+    x, y, width, height = box
+    # A plant usually covers a small box on the plate. Scanning that box and
+    # inserting the surrounding zero runs is the same RLE as scanning the plate.
+    if width * height * 4 > mask.size:
+        return _encode_rle_scan(mask)
+
+    full_h, full_w = mask.shape
+    crop = np.ascontiguousarray(mask[y:y + height, x:x + width]).ravel()
+    changes = np.concatenate(([True], crop[1:] != crop[:-1], [True]))
+    run_indices = np.flatnonzero(changes)
+    vals = crop[run_indices[:-1]]
+    run_counts = np.diff(run_indices)
+
+    out_vals = []
+    out_counts = []
+
+    def emit(value, count):
+        count = int(count)
+        if count <= 0:
+            return
+        value = int(value)
+        if out_vals and out_vals[-1] == value:
+            out_counts[-1] += count
+        else:
+            out_vals.append(value)
+            out_counts.append(count)
+
+    emit(0, y * full_w + x)
+    row_pos = 0
+    rows_done = 0
+    for value, count in zip(vals.tolist(), run_counts.tolist()):
+        count = int(count)
+        while count:
+            room = width - row_pos
+            take = count if count < room else room
+            emit(value, take)
+            row_pos += take
+            count -= take
+            if row_pos == width:
+                rows_done += 1
+                row_pos = 0
+                if rows_done < height:
+                    emit(0, full_w - width)
+                else:
+                    emit(0, (full_w - x - width) + (full_h - y - height) * full_w)
+
+    if sum(out_counts) != mask.size:
+        return _encode_rle_scan(mask)
+    rle = np.empty(len(out_vals) * 2, dtype=int)
+    rle[0::2] = out_vals
+    rle[1::2] = out_counts
     return {"size": mask.shape, "counts": rle.tolist()}
 
 def decode_rle(rle_data):
@@ -751,32 +813,38 @@ class PlantImageModel:
         needs_metadata_update = False
         
         for uid, mask in list(self.masks.items()):
-            if np.sum(mask) == 0: 
+            box = _foreground_box(mask)
+            if box is None:
                 continue
+            x, y, bw, bh = box
             
-            # --- FASTER OPENCV CONNECTED COMPONENTS ---
-            num_features, labeled_mask = cv2.connectedComponents(mask, connectivity=8)
+            # Components can only exist inside the tight box, so label that crop.
+            crop = np.ascontiguousarray(mask[y:y + bh, x:x + bw])
+            num_features, labeled_mask = cv2.connectedComponents(crop, connectivity=8)
             num_features -= 1 # OpenCV counts background (0) as a feature
             
             valid_count = 0
+            changed = False
             if num_features > 0:
                 sizes = np.bincount(labeled_mask.ravel())
                 sizes[0] = 0 # Ignore background
                 
                 for i in range(1, num_features + 1):
                     if sizes[i] < 5:
-                        mask[labeled_mask == i] = 0
+                        crop[labeled_mask == i] = 0
+                        changed = True
                         self.dirty = True
                         needs_metadata_update = True
                     else:
                         valid_count += 1
+            if changed:
+                mask[y:y + bh, x:x + bw] = crop
                         
             if valid_count > 1:
                 return False, uid
                 
         if needs_metadata_update:
             self.regenerate_metadata() # Run exact calculation only when cleaning finishes
-                    
         return True, None
     
     def reindex_instances(self):
@@ -916,10 +984,19 @@ class PlantImageModel:
             
             # --- FASTER: Swap SciPy for OpenCV ---
             bin_data = (data > 0).astype(np.uint8)
-            num_features, labeled_map = cv2.connectedComponents(bin_data, connectivity=8)
+            num_features, labeled_map, stats, _centroids = cv2.connectedComponentsWithStats(
+                bin_data, connectivity=8
+            )
             
             for uid in range(1, num_features):
-                self.masks[int(uid)] = (labeled_map == uid).astype(np.uint8)
+                x, y, bw, bh, _area = (int(v) for v in stats[uid])
+                # Specks below 3px are discarded again after load; skip the full-frame copy.
+                if bw < 3 or bh < 3:
+                    continue
+                mask = np.zeros(labeled_map.shape, dtype=np.uint8)
+                roi = labeled_map[y:y + bh, x:x + bw]
+                mask[y:y + bh, x:x + bw] = (roi == uid).astype(np.uint8)
+                self.masks[int(uid)] = mask
         except Exception as e: print(f"NIfTI Error: {e}")
     
     def _load_from_json(self, json_path, shape):
@@ -954,10 +1031,10 @@ class PlantImageModel:
 
                 self.masks[uid] = mask
 
-                ys, xs = np.where(mask)
-                if len(xs) > 0 and "semantic_rle" in ann:
+                box = _foreground_box(mask)
+                if box is not None and "semantic_rle" in ann:
                     self.class_patches[uid] = (
-                        decode_rle(ann["semantic_rle"]), int(xs.min()), int(ys.min())
+                        decode_rle(ann["semantic_rle"]), int(box[0]), int(box[1])
                     )
         except Exception as e:
             print(f"JSON Error: {e}")
@@ -995,23 +1072,24 @@ class PlantImageModel:
                 output["annotations"].append(entry)
                 continue
 
-            if np.sum(mask) == 0:
+            box = _foreground_box(mask)
+            if box is None:
                 continue
-
-            ys, xs = np.where(mask)
-            if len(xs) == 0:
-                continue
+            bx, by, bw, bh = box
+            area = int(np.count_nonzero(mask[by:by + bh, bx:bx + bw]))
 
             patch, _, _ = self._get_class_patch(uid)
+            instance_rle = encode_rle(mask)
+            semantic_rle = encode_rle(patch)
             output["annotations"].append({
                 **entry,
-                "instance_rle": encode_rle(mask),
-                "semantic_rle": encode_rle(patch),
-                "area": float(np.sum(mask)),
+                "instance_rle": instance_rle,
+                "semantic_rle": semantic_rle,
+                "area": float(area),
                 "iscrowd": 0,
                 "bbox": [
-                    float(xs.min()), float(ys.min()),
-                    float(xs.max() - xs.min()), float(ys.max() - ys.min()),
+                    float(bx), float(by),
+                    float(bw - 1), float(bh - 1),
                 ],
             })
 
@@ -1175,7 +1253,11 @@ class PlantImageModel:
 
         mask = self.masks.get(uid)
         self.bboxes[uid] = box
-        self.areas[uid] = int(cv2.countNonZero(mask)) if mask is not None else 0
+        if mask is None:
+            self.areas[uid] = 0
+        else:
+            x, y, bw, bh = box
+            self.areas[uid] = int(np.count_nonzero(mask[y:y + bh, x:x + bw]))
         if uid not in self.color_map:
             self.color_map[uid] = HIGH_CONTRAST_COLORS[uid % len(HIGH_CONTRAST_COLORS)]
         return True
@@ -1463,7 +1545,7 @@ class PlantImageModel:
 
     def _sync_class_patch(self, uid, source_patch, bounds):
         """Align live class labels to the tight outline and fill new holes."""
-        box = self._plant_bbox(uid)
+        box = bounds if bounds is not None else self._plant_bbox(uid)
         if uid not in self.masks or box is None:
             self.class_patches.pop(uid, None)
             return None
@@ -1512,10 +1594,9 @@ class PlantImageModel:
         if uid not in self.masks: return None
         mask = self.masks[uid]
 
-        ys, xs = np.where(mask)
-        if len(xs) == 0: return None
-        x, y = int(xs.min()), int(ys.min())
-        w, h = int(xs.max() - x + 1), int(ys.max() - y + 1)
+        box = _foreground_box(mask)
+        if box is None: return None
+        x, y, w, h = box
 
         source_patch = None
         if self.original_multiclass is not None:

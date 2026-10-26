@@ -1577,12 +1577,17 @@ class ChronoRootAnnotationSuite(QMainWindow):
         return hashlib.sha1(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()
 
     def _rsml_needs_write(self):
+        """Write Topology.rsml only for root fixes that were actually applied.
+
+        Editing a mask marks the old tracing stale. Rebuilding every plant's
+        skeleton for that is a separate, slow job and is left to measurement.
+        """
         if not self._has_open_task():
             return False
         tab = self.workspaces.canvas_rsml
         if tab.has_unsaved_edits():
             return True
-        if not self.global_model.topology_overrides and not self.global_model.topology_decided:
+        if not self.global_model.topology_overrides:
             return False
         return self._rsml_token() != self._rsml_disk_token
 
