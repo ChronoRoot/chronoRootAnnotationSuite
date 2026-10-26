@@ -8,6 +8,8 @@ import nibabel as nib
 import cv2
 from scipy.ndimage import label, distance_transform_edt
 
+_MASK_UNCHANGED = object()
+
 # --- Constants ---
 LINE_THICKNESS = 1
 LOGICAL_THICKNESS = 2
@@ -367,6 +369,7 @@ class PlantImageModel:
         # Applied RSML edge chains. RAM only; Export is what writes Topology.rsml.
         self.topology_overrides = {}
         self.topology_decided = set()
+        self._content_changed = None
         self.content_epoch = 0
         self.class_colors = {
             0: (0, 0, 0, 0),        
@@ -395,11 +398,15 @@ class PlantImageModel:
     def register_history_callback(self, callback):
         self._history_callbacks.append(callback)
 
-    def _notify_data_changed(self):
+    def _notify_data_changed(self, changed_uids=None):
         if self.callbacks_muted:
             return
-        for callback in self._data_callbacks:
-            callback()
+        self._content_changed = None if changed_uids is None else {int(uid) for uid in changed_uids}
+        try:
+            for callback in self._data_callbacks:
+                callback()
+        finally:
+            self._content_changed = None
 
     def _notify_selection_changed(self):
         if self.callbacks_muted:
@@ -1265,7 +1272,7 @@ class PlantImageModel:
     def update_metadata_for_uid(self, uid):
         if not self._refresh_bbox_for_uid(uid):
             self.masks.pop(uid, None)
-        self._notify_data_changed()
+        self._notify_data_changed([uid])
 
     def regenerate_metadata(self):
         self.bboxes = {}
@@ -1321,7 +1328,7 @@ class PlantImageModel:
         self.update_metadata_for_uid(new_id)
         
         self.dirty = True
-        self._notify_data_changed()
+        self._notify_data_changed(list(ids) + [new_id])
         
         # Return the new ID so the GUI knows what to select
         return new_id
@@ -1356,15 +1363,17 @@ class PlantImageModel:
                 self.masks.pop(target_id, None)
                 self.bboxes.pop(target_id, None)
 
+                created = []
                 for comp in valid_components:
                     self.max_id += 1
                     new_mask = np.zeros_like(full_mask)
                     new_mask[y1:y2, x1:x2] = comp
                     self.masks[self.max_id] = new_mask
+                    created.append(self.max_id)
                     self.update_metadata_for_uid(self.max_id) 
                     
                 self.dirty = True
-                self._notify_data_changed() 
+                self._notify_data_changed([target_id, *created]) 
                 return True
                 
             elif len(valid_components) == 1:
@@ -1374,7 +1383,7 @@ class PlantImageModel:
                 if target_id in self.class_patches: del self.class_patches[target_id]
                 self.update_metadata_for_uid(target_id)
                 self.dirty = True
-                self._notify_data_changed() 
+                self._notify_data_changed([target_id]) 
                 return True
                 
             else:
@@ -1416,15 +1425,17 @@ class PlantImageModel:
             self.bboxes.pop(target_id, None)
             if target_id in self.class_patches: del self.class_patches[target_id]
             
+            created = []
             for comp in valid_components:
                 self.max_id += 1
                 new_mask = np.zeros_like(full_mask)
                 new_mask[y1:y2, x1:x2] = comp
                 self.masks[self.max_id] = new_mask
+                created.append(self.max_id)
                 self.update_metadata_for_uid(self.max_id)
                 
             self.dirty = True
-            self._notify_data_changed()
+            self._notify_data_changed([target_id, *created])
             return True
             
         return False
@@ -1445,7 +1456,7 @@ class PlantImageModel:
                 del self.class_patches[uid]
                 
         self.dirty = True
-        self._notify_data_changed()
+        self._notify_data_changed(list(ids))
 
     def apply_stroke(self, uid, points, brush_size, is_erase=False, record_undo=True):
         if not points or uid not in self.masks: return
@@ -1499,7 +1510,7 @@ class PlantImageModel:
         self._sync_class_patch(uid, previous_class_patch, None)
 
         self.dirty = True
-        self._notify_data_changed()
+        self._notify_data_changed([uid])
         
     def apply_class_stroke(self, uid, points, brush_size, class_id):
         if not points or class_id == 0 or uid not in self.masks: return 
@@ -1536,12 +1547,12 @@ class PlantImageModel:
         affected = (stroke_mask > 0) & (bin_crop > 0)
         if not np.any(affected) or not np.any(patch[affected] != class_id): return
 
-        self.save_state(target_uids=uid)
+        self.save_state(target_uids=uid, copy_mask=False)
         patch[affected] = class_id
         
         self.class_patches[uid] = (patch, x_off, y_off)
         self.dirty = True
-        self._notify_data_changed()
+        self._notify_data_changed([uid])
 
     def _sync_class_patch(self, uid, source_patch, bounds):
         """Align live class labels to the tight outline and fill new holes."""
@@ -1619,7 +1630,7 @@ class PlantImageModel:
         return final_map
 
     # --- Undo ---
-    def save_state(self, target_uids):
+    def save_state(self, target_uids, copy_mask=True):
         """Save the complete annotation state affected by one undoable action."""
         if isinstance(target_uids, int):
             target_uids = [target_uids]
@@ -1628,7 +1639,10 @@ class PlantImageModel:
         class_backup = {}
         metadata_backup = {}
         for uid in target_uids:
-            masks_backup[uid] = self.masks[uid].copy() if uid in self.masks else None
+            if not copy_mask and uid in self.masks:
+                masks_backup[uid] = _MASK_UNCHANGED
+            else:
+                masks_backup[uid] = self.masks[uid].copy() if uid in self.masks else None
 
             patch_data = self.class_patches.get(uid)
             if patch_data is None:
@@ -1662,7 +1676,9 @@ class PlantImageModel:
 
         # 1. Restore the exact state of every UID affected by the action.
         for uid, old_mask in last_state["masks"].items():
-            if old_mask is None:
+            if old_mask is _MASK_UNCHANGED:
+                pass
+            elif old_mask is None:
                 self.masks.pop(uid, None)
             else:
                 self.masks[uid] = old_mask
@@ -1721,6 +1737,6 @@ class PlantImageModel:
         self.dirty = last_state["dirty"]
 
         self._notify_history_changed()
-        self._notify_data_changed()
+        self._notify_data_changed(list(last_state["masks"]))
         self._notify_selection_changed()
         return True

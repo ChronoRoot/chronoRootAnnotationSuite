@@ -329,7 +329,9 @@ class RsmlCanvasTab(QWidget):
         for uid in list(self._seen_token):
             if uid not in live:
                 self._discard_rsml(uid)
-        for uid in live:
+        changed = self.model._content_changed
+        targets = live if changed is None else (live & changed)
+        for uid in targets:
             token = self._content_token(uid)
             previous = self._seen_token.get(uid)
             if previous is not None and previous != token:

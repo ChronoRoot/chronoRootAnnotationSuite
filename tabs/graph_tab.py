@@ -564,7 +564,7 @@ class GraphCanvasTab(QWidget):
         self.model.update_metadata_for_uid(uid)
         self.model.dirty = True
         
-        self.model._notify_data_changed()
+        self.model._notify_data_changed([uid])
         
     def numpy_to_qpixmap(self, img_array):
         h, w, ch = img_array.shape

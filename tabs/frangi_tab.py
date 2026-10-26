@@ -588,7 +588,7 @@ class FrangiCanvasTab(QWidget):
             self.model.dirty = True
         finally:
             self.model.callbacks_muted = False
-        self.model._notify_data_changed()
+        self.model._notify_data_changed([uid])
         applied = self.img_label_proposed._pixmap
         if applied is not None and not applied.isNull():
             self.img_label_old.setPixmap(applied)
