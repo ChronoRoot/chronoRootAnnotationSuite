@@ -55,6 +55,8 @@ class LoadingOverlay(QWidget):
             self.setGeometry(self.parentWidget().rect())
         self.show()
         self.raise_()
+        # Cover the whole window, including the plate list, until the job ends.
+        self.grabMouse()
         QTimer.singleShot(0, self._refresh_layout)
 
     def _refresh_layout(self):
@@ -63,4 +65,6 @@ class LoadingOverlay(QWidget):
         self.updateGeometry()
 
     def hide_overlay(self):
+        if QWidget.mouseGrabber() is self:
+            self.releaseMouse()
         self.hide()

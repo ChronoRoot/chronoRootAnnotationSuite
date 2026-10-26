@@ -30,7 +30,7 @@ HELP_ANNOTATION = """<b>Annotation</b><br><br>
 <b>Tools</b><br>
 • <b>Clear Selection</b> — deselect all plants.<br>
 • <b>Bounding Boxes</b> — show or hide plant boxes.<br>
-• <b>Review all labels</b> — see every label on the plate at once.<br>
+• <b>Review multiclass</b> — see every label on the plate at once.<br>
 • <b>Shape Paint</b> — left adds outline, right erases.<br>
 • <b>Split (Knife)</b> — cut fused plants; double-click to finish the line.<br>
 • <b>Split disconnected fragments</b> — one ID split into separate plants.<br>

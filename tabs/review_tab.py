@@ -444,9 +444,11 @@ class ReviewCanvasTab(QWidget):
         self.canvas.is_calibrating = state
 
     def set_mode(self, mode):
-        if self.current_mode == "SELECT" and mode not in ["SELECT", "GLOBAL"]:
-            self.previous_view_mode = "SELECT"
-            
+        # Remember the plate view so a tool can return to it. Both the instance
+        # colors and the multiclass review count; tools do not.
+        if self.current_mode in ("SELECT", "GLOBAL") and mode not in ("SELECT", "GLOBAL"):
+            self.previous_view_mode = self.current_mode
+
         self.current_mode = mode
         self.canvas.set_mode(mode)
         self.update_info_label()
@@ -625,7 +627,7 @@ class ReviewCanvasTab(QWidget):
                     "No plant selected. Click a plant on the canvas or in the list."
                 )
         elif mode == "GLOBAL":
-            self.lbl_info.setText("Review all labels — every plant and root part on the plate.")
+            self.lbl_info.setText("Review multiclass — every plant and root part on the plate.")
         elif mode == "PAINT":
             self.lbl_info.setText(
                 f"Plant {active} — Outline: left = add, right = erase."
@@ -792,7 +794,7 @@ class ReviewToolPanel(QWidget):
         row_actions.addWidget(self.btn_bbox)
         sl.addLayout(row_actions)
         
-        self.btn_global = QPushButton("Review all labels")
+        self.btn_global = QPushButton("Review multiclass")
         self.btn_global.setCheckable(True)
         self.btn_global.setToolTip("Show every plant and root part label on the plate at once.")
         self.btn_global.clicked.connect(lambda: self.toggle_mode("GLOBAL"))

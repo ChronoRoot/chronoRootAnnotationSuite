@@ -1202,16 +1202,19 @@ class ChronoRootAnnotationSuite(QMainWindow):
         self.workspaces.canvas_review.update_scene_ruler(cm_per_px)
 
     # --- Loading & Threading ---
-    def show_loading(self, message):
+    def show_loading(self, message, immediate=False):
         self._loading_depth += 1
         if self._loading_depth == 1:
             self._pending_loading_message = message
             self._loading_show_token += 1
             token = self._loading_show_token
-            QTimer.singleShot(
-                self.LOADING_SHOW_DELAY_MS,
-                lambda: self._reveal_loading_if_needed(token),
-            )
+            if immediate:
+                self._reveal_loading_if_needed(token)
+            else:
+                QTimer.singleShot(
+                    self.LOADING_SHOW_DELAY_MS,
+                    lambda: self._reveal_loading_if_needed(token),
+                )
 
     def _reveal_loading_if_needed(self, token):
         if token != self._loading_show_token:
@@ -1849,9 +1852,10 @@ class ChronoRootAnnotationSuite(QMainWindow):
             or (not mark_finished and normalize_annotation_status(self.global_model.status) == "completed"
                 and (write_masks or write_rsml or self.metadata_dirty))
         )
+        # Whether the .json is missing is a disk check. The save thread does it,
+        # so a network folder cannot freeze the window before the blocker appears.
         write_document = (self.metadata_dirty or status_changes) and not write_masks
-        if not write_masks and not write_document and not write_rsml:
-            return False
+        ensure_annotation = not write_masks
 
         shape = self.global_model.raw_image.shape if self.global_model.raw_image is not None else None
         plate_meta = self.panel_phenomics.capture_plate_meta(shape)
@@ -1864,16 +1868,16 @@ class ChronoRootAnnotationSuite(QMainWindow):
             cm_per_px = self.panel_phenomics.get_cm_per_px(shape)
         plants_meta = self.panel_phenomics.build_plants_meta_list()
         out_dir = self.browser.get_effective_output_dir(self.current_task_path) or self.current_task_path
-        os.makedirs(out_dir, exist_ok=True)
 
         self.global_model.callbacks_muted = True
         self.panel_review.update_undo_state()
         if write_masks:
-            self.show_loading("Saving progress...\n(Saving masks…)")
+            message = "Saving progress...\n(Saving masks…)"
         elif write_rsml:
-            self.show_loading("Saving root organization…")
+            message = "Saving root organization…"
         else:
-            self.show_loading("Saving…")
+            message = "Saving…"
+        self.show_loading(message, immediate=True)
         self._pending_mark_finished = mark_finished
 
         worker = ModelWorker(
@@ -1885,6 +1889,7 @@ class ChronoRootAnnotationSuite(QMainWindow):
             write_masks,
             write_document,
             write_rsml,
+            ensure_annotation,
             plants_meta,
             cm_per_px,
             self.workspaces.canvas_graph.p_prune,
@@ -1913,8 +1918,15 @@ class ChronoRootAnnotationSuite(QMainWindow):
 
     def _save_bundle(
         self, task_path, base_name, out_dir, mark_finished,
-        write_masks, write_document, write_rsml, plants_meta, cm_per_px, prune,
+        write_masks, write_document, write_rsml, ensure_annotation,
+        plants_meta, cm_per_px, prune,
     ):
+        os.makedirs(out_dir, exist_ok=True)
+        if ensure_annotation and not os.path.exists(os.path.join(task_path, f"{base_name}.json")):
+            write_document = True
+        if not write_masks and not write_document and not write_rsml:
+            return {"mapping": None, "warnings": [], "wrote_rsml": False}
+
         mapping = {uid: uid for uid in self.global_model.plant_uids()}
         warnings = []
         if write_masks:
