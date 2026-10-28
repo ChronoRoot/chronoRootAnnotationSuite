@@ -347,6 +347,10 @@ def decode_rle(rle_data):
     return pixels.reshape((h, w))
 
 # --- PlantImageModel ---
+class DisconnectedPieces(Exception):
+    """A plant mask has more than one piece. Saving stops; the GUI shows this message."""
+
+
 class PlantImageModel:
     """In-memory plant masks, annotation I/O, and editing tools. Analysis exports are separate files."""
 
@@ -782,9 +786,11 @@ class PlantImageModel:
         h, w = self.raw_image.shape[:2]
         
         if os.path.exists(json_path):
-            self._load_mask_from_nifti(nii_path, (h, w))
+            # The JSON holds the masks. A missing .nii.gz is normal and is not an error.
+            if os.path.exists(nii_path):
+                self._load_mask_from_nifti(nii_path, (h, w))
             self._load_from_json(json_path, (h, w))
-        else:
+        elif os.path.exists(nii_path):
             self._load_instances_from_nifti(nii_path, (h, w))
 
         # Filter out spurious instances (width < 3 or height < 3)
@@ -919,8 +925,13 @@ class PlantImageModel:
         # 1. CLEANUP AND VALIDATE
         is_valid, bad_uid = self.clean_and_validate_masks()
         if not is_valid:
-            raise ValueError(
-                f"Plant {bad_uid} has disconnected pieces.\n"
+            # The list and the Plant # column show plant_num. The mask id can differ
+            # after plants are reordered, so the warning must use the number on screen.
+            shown = str((self.plants_meta.get(bad_uid) or {}).get("plant_num") or "").strip()
+            if not shown:
+                shown = str(bad_uid)
+            raise DisconnectedPieces(
+                f"Plant {shown} has disconnected pieces.\n"
                 "Connect them in Annotation with Shape Paint, or split into separate plants."
             )
 

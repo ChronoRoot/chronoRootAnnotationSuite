@@ -16,6 +16,7 @@ from PyQt5.QtGui import QIcon
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QSize, QTimer
 
 from core.model import (
+    DisconnectedPieces,
     PlantImageModel,
     annotation_status_display,
     canonical_topology_name,
@@ -1930,9 +1931,17 @@ class ChronoRootAnnotationSuite(QMainWindow):
         mapping = {uid: uid for uid in self.global_model.plant_uids()}
         warnings = []
         if write_masks:
-            mapping = self.global_model.save_current_task(
-                task_path, base_name, mark_finished=mark_finished,
-            )
+            try:
+                mapping = self.global_model.save_current_task(
+                    task_path, base_name, mark_finished=mark_finished,
+                )
+            except DisconnectedPieces as exc:
+                return {
+                    "mapping": None,
+                    "warnings": [],
+                    "wrote_rsml": False,
+                    "notice": str(exc),
+                }
         elif write_document:
             mapping = self.global_model.update_annotation_document(
                 task_path, base_name, mark_finished=mark_finished,
@@ -1961,6 +1970,11 @@ class ChronoRootAnnotationSuite(QMainWindow):
         if mapping is None:
             self._pending_export_plate_meta = None
             self._pending_measure = None
+            notice = payload.get("notice") if isinstance(payload, dict) else None
+            if notice:
+                self._is_closing = False
+                self._pending_load_data = None
+                QMessageBox.warning(self, "Disconnected pieces", notice)
             return
 
         new_selection = [mapping[uid] for uid in self.global_model.selected_uids if uid in mapping]
