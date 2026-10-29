@@ -1062,42 +1062,137 @@ def _main_chain(graph, edges):
     return chain
 
 
-def build_graph(patch, x_off, y_off, bin_crop, img_shape, prune_iters=5):
+def _shift_point(point, dx, dy):
+    return (int(point[0]) + dx, int(point[1]) + dy)
+
+
+def _shift_graph(graph, dx, dy):
+    """Move every node and polyline from crop coordinates into plate coordinates."""
+    if dx == 0 and dy == 0 or graph is None or len(graph.nodes) == 0:
+        return graph
+    import networkx as nx
+    mapping = {node: _shift_point(node, dx, dy) for node in list(graph.nodes)}
+    shifted = nx.relabel_nodes(graph, mapping, copy=True)
+    for _node, data in shifted.nodes(data=True):
+        if "pos" in data:
+            data["pos"] = _shift_point(data["pos"], dx, dy)
+    for _u, _v, data in shifted.edges(data=True):
+        if data.get("points"):
+            data["points"] = [_shift_point(point, dx, dy) for point in data["points"]]
+        for key in ("canonical_start", "canonical_end"):
+            if data.get(key) is not None:
+                data[key] = _shift_point(data[key], dx, dy)
+    return shifted
+
+
+def _shift_topology(topology, dx, dy):
+    if topology is None or (dx == 0 and dy == 0):
+        return topology
+    for edge in topology.edges.values():
+        edge.u = _shift_point(edge.u, dx, dy)
+        edge.v = _shift_point(edge.v, dx, dy)
+        edge.points = [_shift_point(point, dx, dy) for point in edge.points]
+    return topology
+
+
+def _paste(crop, shape, y, x):
+    canvas = np.zeros(shape, dtype=crop.dtype)
+    height, width = crop.shape[:2]
+    y2 = min(shape[0], y + height)
+    x2 = min(shape[1], x + width)
+    if y2 > y and x2 > x:
+        canvas[y:y2, x:x2] = crop[:y2 - y, :x2 - x]
+    return canvas
+
+
+def _node_bounds(graph, shape, pad=3):
+    height, width = shape[:2]
+    xs = [int(node[0]) for node in graph.nodes]
+    ys = [int(node[1]) for node in graph.nodes]
+    x0 = max(0, min(xs) - pad)
+    y0 = max(0, min(ys) - pad)
+    x1 = min(width, max(xs) + pad + 1)
+    y1 = min(height, max(ys) + pad + 1)
+    return x0, y0, x1, y1
+
+
+def build_graph(
+    patch, x_off, y_off, bin_crop, img_shape, prune_iters=5, *,
+    classes=(1, 2), cancel=None, initialize=True,
+):
+    """Trace one plant on its own box, then report points in plate coordinates.
+
+    Phenomics and the root editor use the default: main root and lateral root,
+    then the main-root search and the edge polylines. The tracing check passes
+    the classes that are checked in its panel and leaves initialize off, because
+    that panel runs the main-root search again when the user moves the start
+    or the tip. A plate change sets cancel["stop"] so this returns instead of
+    finishing the plant the user already left.
+    """
+    if cancel is not None and cancel.get("stop"):
+        return None
     img_h, img_w = img_shape
-    root_bin = np.zeros((img_h, img_w), dtype=np.uint8)
-    class_skel = np.zeros((img_h, img_w), dtype=np.uint8)
-    for class_id in (1, 2):
+    plant_h, plant_w = bin_crop.shape[:2]
+    pad = 5
+    top = min(pad, int(y_off))
+    left = min(pad, int(x_off))
+    bottom = min(pad, img_h - (int(y_off) + plant_h))
+    right = min(pad, img_w - (int(x_off) + plant_w))
+    origin_x = int(x_off) - left
+    origin_y = int(y_off) - top
+
+    root_bin = np.zeros((top + plant_h + bottom, left + plant_w + right), dtype=np.uint8)
+    class_skel = np.zeros_like(root_bin)
+    for class_id in classes:
         active = (patch == class_id) & (bin_crop > 0)
         rows, cols = np.where(active)
         if len(rows):
-            root_bin[rows + y_off, cols + x_off] = 1
-            class_skel[rows + y_off, cols + x_off] = class_id
-    full_skel, _branches, endpoints, is_valid = extract_skeleton(root_bin, prune_iters)
-    if not is_valid:
+            root_bin[rows + top, cols + left] = 1
+            class_skel[rows + top, cols + left] = class_id
+
+    if cancel is not None and cancel.get("stop"):
         return None
-    rows, cols = np.where(full_skel > 0)
+    skel, _branches, endpoints, is_valid = extract_skeleton(root_bin, prune_iters)
+    if not is_valid or (cancel is not None and cancel.get("stop")):
+        return None
+    rows, cols = np.where(skel > 0)
     base = [int(cols[np.argmin(rows)]), int(rows[np.argmin(rows)])]
-    graph, _actual, colored = createGraph(full_skel.copy(), class_skel, base, endpoints, _branches)
-    try:
-        graph = graphInit(graph, main_root_class=1)
-    except Exception:
+    graph, _actual, colored = createGraph(skel.copy(), class_skel, base, endpoints, _branches)
+    if graph is None or len(graph.nodes) == 0 or (cancel is not None and cancel.get("stop")):
         return None
-    assign_edge_polylines(graph, colored)
-    return graph, colored, full_skel
+    # The search rewrites the main path as root type 10. The tracing check
+    # still needs the original class on each edge, so it skips this step.
+    if initialize:
+        try:
+            graph = graphInit(graph, main_root_class=1)
+        except Exception:
+            return None
+        assign_edge_polylines(graph, colored)
+    graph = _shift_graph(graph, origin_x, origin_y)
+    return (
+        graph,
+        _paste(colored, (img_h, img_w), origin_y, origin_x),
+        _paste(skel, (img_h, img_w), origin_y, origin_x),
+    )
 
 
 def automatic_topology(graph, colored, full_skel, image_name, uid, genotype, prune=5):
     plant_xml = None
+    x0, y0, x1, y1 = _node_bounds(graph, full_skel.shape)
+    local_graph = _shift_graph(graph, -x0, -y0)
+    local_skel = full_skel[y0:y1, x0:x1]
+    local_colored = colored[y0:y1, x0:x1]
     try:
         tree, _count = createTree(
             {"fileKey": f"UID_{uid}_{genotype}", "sequenceLabel": "Static_Extraction",
              "Plant": f"Plant_{uid}_{genotype}"},
-            0, [image_name or "plate.png"], graph, full_skel, colored,
+            0, [image_name or "plate.png"], local_graph, local_skel, local_colored,
         )
         plant_xml = tree.find(".//plant")
     except Exception:
         plant_xml = None
-    return topology_from_graph(graph, colored, plant_xml, prune)
+    topology = topology_from_graph(local_graph, local_colored, plant_xml, prune)
+    return _shift_topology(topology, x0, y0)
 
 
 def _points_on_skeleton(edges, full_skel):

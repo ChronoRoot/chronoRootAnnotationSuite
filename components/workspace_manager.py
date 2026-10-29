@@ -38,7 +38,7 @@ class WorkspaceManager(QTabWidget):
         self.addTab(self.canvas_frangi, "Centerline Cleanup")
         
         # 3. Topology Graphing
-        self.canvas_graph = GraphCanvasTab(self.model)
+        self.canvas_graph = GraphCanvasTab(self.model, self.main_window)
         self.addTab(self.canvas_graph, "Root Tracing Check")
 
         # 4. Optional RSML connection editor

@@ -1203,7 +1203,14 @@ class ChronoRootAnnotationSuite(QMainWindow):
         self.workspaces.canvas_review.update_scene_ruler(cm_per_px)
 
     # --- Loading & Threading ---
-    def show_loading(self, message, immediate=False):
+    def show_loading(self, message, immediate=False, already_shown=False):
+        # A second request while the blocker is already up only changes the text.
+        # Incrementing again would leave the blocker on screen after one hide.
+        if already_shown:
+            self._pending_loading_message = message
+            if self._loading_overlay.isVisible():
+                self._loading_overlay.show_message(message)
+            return
         self._loading_depth += 1
         if self._loading_depth == 1:
             self._pending_loading_message = message

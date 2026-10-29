@@ -14,6 +14,7 @@ from PyQt5.QtGui import QImage, QPixmap, QColor, QPainter, QIcon
 from PyQt5.QtCore import Qt, pyqtSignal, QThread
 
 from components.ui_help import HELP_RSML, show_help
+from core.model import mask_is_disconnected
 from core.root_topology import (
     Topology,
     TopologyError,
@@ -468,7 +469,7 @@ class RsmlCanvasTab(QWidget):
             self._set_info("")
             self.state_changed.emit()
             return
-        if _mask_is_disconnected(self.model.masks[uid]):
+        if mask_is_disconnected(self.model.masks[uid]):
             self._clear()
             self._popup(
                 "This mask is disconnected. Merge the pieces in Annotation, "
@@ -571,7 +572,15 @@ class RsmlCanvasTab(QWidget):
         """Changes when the mask, the root-part labels, or the prune setting change."""
         if uid is None or uid not in self.model.masks:
             return None
-        parts = [str(self._prune()).encode(), np.ascontiguousarray(self.model.masks[uid]).tobytes()]
+        mask = self.model.masks[uid]
+        box = self.model.bboxes.get(uid) or (0, 0, mask.shape[1], mask.shape[0])
+        x, y, width, height = box
+        x2 = min(mask.shape[1], x + width)
+        y2 = min(mask.shape[0], y + height)
+        x = max(0, x)
+        y = max(0, y)
+        crop = np.ascontiguousarray(mask[y:y2, x:x2])
+        parts = [str(self._prune()).encode(), f"{x},{y}".encode(), crop.tobytes()]
         patch_data = self.model._get_class_patch(uid)
         if patch_data is not None:
             parts.append(np.ascontiguousarray(patch_data[0]).tobytes())
@@ -1192,14 +1201,6 @@ def _polyline_distance(point, points):
         return 1e9
     array = np.asarray(points, dtype=float)
     return float(np.min(np.hypot(array[:, 0] - point[0], array[:, 1] - point[1])))
-
-
-def _mask_is_disconnected(mask):
-    binary = (mask > 0).astype(np.uint8)
-    if np.sum(binary) == 0:
-        return False
-    count, _labels = cv2.connectedComponents(binary, connectivity=8)
-    return count > 2
 
 
 def _basename(path):

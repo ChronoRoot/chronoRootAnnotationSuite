@@ -8,12 +8,47 @@ from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QPushButton,
                              QListWidget, QListWidgetItem,
                              QHBoxLayout, QSizePolicy)
 from PyQt5.QtGui import QImage, QPixmap, QColor, QPainter
-from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtCore import Qt, QThread, pyqtSignal
 
 from components.ui_help import HELP_GRAPH, show_help
+from core.model import mask_is_disconnected
+from core.root_graph_builder import graphInit
+from core.root_topology import build_graph
 
-# Import the isolated builder
-from core.root_graph_builder import extract_skeleton, createGraph, graphInit
+
+class GraphWorker(QThread):
+    finished = pyqtSignal(int, object)
+    error = pyqtSignal(str)
+
+    def __init__(self, generation, snapshot):
+        super().__init__()
+        self.generation = generation
+        self.snapshot = snapshot
+
+    def run(self):
+        # Same trace Phenomics uses. Initialization stays in the panel:
+        # the user can still move the start and the tip after this returns.
+        snap = self.snapshot
+        try:
+            built = build_graph(
+                snap["patch"], snap["x_off"], snap["y_off"], snap["bin_crop"],
+                snap["img_shape"], int(snap["prune"]),
+                classes=tuple(snap["target_classes"]),
+                cancel=snap["cancel"],
+                initialize=False,
+            )
+            if built is None or snap["cancel"].get("stop"):
+                self.finished.emit(self.generation, None)
+                return
+            graph, colored, skeleton = built
+            self.finished.emit(self.generation, {
+                "graph": graph,
+                "colored": colored,
+                "skeleton": skeleton,
+            })
+        except Exception:
+            self.error.emit(__import__("traceback").format_exc())
+
 
 class AspectRatioLabel(QWidget):
     def __init__(self):
@@ -68,9 +103,14 @@ class InteractiveGraphLabel(AspectRatioLabel):
 # 1. THE MAIN VIEWPORT (CANVAS)
 # ==========================================
 class GraphCanvasTab(QWidget):
-    def __init__(self, model):
+    def __init__(self, model, main_window=None):
         super().__init__()
         self.model = model
+        self.main_window = main_window
+        self._graph_generation = 0
+        self._graph_cancel = None
+        self._graph_worker = None
+        self._graph_busy = False
         
         self.p_thick = 1
         self.p_prune = 5
@@ -164,13 +204,6 @@ class GraphCanvasTab(QWidget):
         self.current_graph = None
         self.colored_skeleton = None
 
-    def _mask_is_disconnected(self, mask):
-        bin_mask = (mask > 0).astype(np.uint8)
-        if np.sum(bin_mask) == 0:
-            return False
-        num_features, _ = cv2.connectedComponents(bin_mask, connectivity=8)
-        return num_features > 2
-
     def refresh_graph_preview(self):
         """Regenerate skeleton preview when the tracing tab is actually showing."""
         if self.model.active_uid and self.isVisible():
@@ -239,7 +272,7 @@ class GraphCanvasTab(QWidget):
             self.last_prune_val = self.p_prune
         
         mask = self.model.masks[uid]
-        if self._mask_is_disconnected(mask):
+        if mask_is_disconnected(mask):
             self.info_label.setText(
                 "Disconnected mask — merge or connect pieces in Annotation, "
                 "or use Split disconnected fragments."
@@ -295,49 +328,85 @@ class GraphCanvasTab(QWidget):
         self.lbl_sem.setPixmap(self.numpy_to_qpixmap(sem_vis))
         # -------------------------------------------
         
-        root_bin_canvas = np.zeros((img_h, img_w), dtype=np.uint8)
+        # The skeleton and graph are the slow part. They run off the interface
+        # thread; the popup stays up until this request, not an older one, finishes.
+        if self._graph_cancel is not None:
+            self._graph_cancel["stop"] = True
+        self._graph_generation += 1
+        generation = self._graph_generation
+        self._graph_cancel = {"stop": False}
+        plant_bin = mask[y_off:y_off + patch.shape[0], x_off:x_off + patch.shape[1]].copy()
+        snapshot = {
+            "patch": patch.copy(),
+            "bin_crop": plant_bin,
+            "x_off": int(x_off),
+            "y_off": int(y_off),
+            "img_shape": (int(img_h), int(img_w)),
+            "prune": int(self.p_prune),
+            "target_classes": list(self.p_target_classes),
+            "cancel": self._graph_cancel,
+            "uid": int(uid),
+            "crop": [int(h), int(w)],
+        }
+        self._show_graph_busy("Checking the root graph…")
+        worker = GraphWorker(generation, snapshot)
+        self._graph_worker = worker
+        worker.finished.connect(self._on_graph_finished)
+        worker.error.connect(self._on_graph_error)
+        worker.start()
 
-        # ONLY extract the user-targeted classes for the skeletonizer
-        for cid in self.p_target_classes:
-            active = (patch == cid) & (bin_crop > 0)
-            p_y, p_x = np.where(active)
-            root_bin_canvas[p_y + y_off, p_x + x_off] = 1
-                    
-        full_skel, branches, endpoints, is_valid = extract_skeleton(
-            root_bin_canvas, self.p_prune
-        )
-        
-        # Skeleton drawn directly over full-brightness image
-        skel_vis = self.base_rgb.copy()
-        skel_crop = full_skel[self.crop_y:y2, self.crop_x:x2]
-        skel_vis[skel_crop > 0] = [255, 255, 255]
-        self.lbl_skel.setPixmap(self.numpy_to_qpixmap(skel_vis))
-        
-        if not is_valid:
+    def _show_graph_busy(self, message):
+        if self.main_window is None:
+            return
+        if self._graph_busy:
+            self.main_window.show_loading(message, immediate=True, already_shown=True)
+            return
+        self._graph_busy = True
+        self.main_window.show_loading(message, immediate=True)
+
+    def _hide_graph_busy(self):
+        if not self._graph_busy or self.main_window is None:
+            self._graph_busy = False
+            return
+        self._graph_busy = False
+        self.main_window.hide_loading()
+
+    def _on_graph_finished(self, generation, result):
+        worker = self.sender()
+        if worker is self._graph_worker:
+            self._graph_worker = None
+        if worker is not None:
+            worker.deleteLater()
+        # An older plate or plant finished after a newer request started.
+        if generation != self._graph_generation:
+            return
+        self._hide_graph_busy()
+        if not result:
             self.info_label.setText(
                 "Cannot trace this plant. Check Main Root and Lateral Root labels in Annotation."
             )
             self.clear_graph_panels()
             return
-            
-        self.mc_skel_bin = np.zeros((img_h, img_w), dtype=np.uint8)
-        for cid in self.p_target_classes: 
-            active = (patch == cid) & (bin_crop > 0)
-            p_y, p_x = np.where(active)
-            self.mc_skel_bin[p_y + y_off, p_x + x_off] = cid
-        self.mc_skel_bin[full_skel == 0] = 0
 
-        skel_ys, skel_xs = np.where(full_skel > 0)
-        top_idx = np.argmin(skel_ys)
-        root_base = [skel_xs[top_idx], skel_ys[top_idx]]
-        
-        self.current_graph, self.actual_base, self.colored_skeleton = createGraph(full_skel.copy(), self.mc_skel_bin, root_base, endpoints, branches)
-        
-        if self.current_graph:
-            for u, v, data in self.current_graph.edges(data=True):
-                data['orig_root_type'] = data.get('root_type', 2)
-        
+        full_skel = result["skeleton"]
+        skel_vis = self.base_rgb.copy()
+        skel_crop = full_skel[self.crop_y:self.crop_y + self.mask_crop.shape[0], self.crop_x:self.crop_x + self.mask_crop.shape[1]]
+        skel_vis[skel_crop > 0] = [255, 255, 255]
+        self.lbl_skel.setPixmap(self.numpy_to_qpixmap(skel_vis))
+
+        self.current_graph = result["graph"]
+        self.colored_skeleton = result["colored"]
+        for u, v, data in self.current_graph.edges(data=True):
+            data['orig_root_type'] = data.get('root_type', 2)
         self.update_graph_visuals()
+
+    def _on_graph_error(self, message):
+        if self.sender() is self._graph_worker:
+            self._graph_worker = None
+        # _on_thread_error closes the popup. Do not hide a second time.
+        self._graph_busy = False
+        if self.main_window is not None:
+            self.main_window._on_thread_error(message)
 
     def update_graph_visuals(self):
         if not self.current_graph: return
@@ -477,7 +546,10 @@ class GraphCanvasTab(QWidget):
                 final_mc_skel[self.colored_skeleton == e_col] = r_type
 
         kernel = np.ones((3, 3), np.uint8)
-        dilated_canvas = np.zeros_like(final_mc_skel)
+        # Thicken only the plant window. The rest of the plate is empty.
+        h, w = self.mask_crop.shape
+        window = final_mc_skel[self.crop_y:self.crop_y + h, self.crop_x:self.crop_x + w]
+        dilated_crop = np.zeros_like(window)
 
         # Define what gets drawn last (highest priority at the end of the list)
         draw_order = [6, 5, 4, 3, 2, 1] 
@@ -486,13 +558,10 @@ class GraphCanvasTab(QWidget):
         ordered_targets = sorted(self.p_target_classes, key=lambda c: draw_order.index(c) if c in draw_order else -1)
 
         for cls in ordered_targets:
-            cls_skel = (final_mc_skel == cls).astype(np.uint8)
+            cls_skel = (window == cls).astype(np.uint8)
             if np.sum(cls_skel) == 0: continue
             dilated = cv2.dilate(cls_skel, kernel, iterations=self.p_thick)
-            dilated_canvas[dilated > 0] = cls
-
-        h, w = self.mask_crop.shape
-        dilated_crop = dilated_canvas[self.crop_y : self.crop_y + h, self.crop_x : self.crop_x + w]
+            dilated_crop[dilated > 0] = cls
 
         # --- THE MERGE LOGIC ---
         recolored_semantic = np.zeros_like(self.mask_crop)

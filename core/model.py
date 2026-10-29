@@ -15,6 +15,8 @@ LINE_THICKNESS = 1
 LOGICAL_THICKNESS = 2
 MAX_HISTORY = 10
 SCHEMA_VERSION = 1
+# An 8-connected group smaller than this is noise, not a second plant.
+MIN_PIECE_AREA = 5
 # Half-size of the box drawn around a seed placeholder, which has no mask of its own.
 SEED_MARKER_RADIUS = 8
 
@@ -263,6 +265,43 @@ def _foreground_box(mask):
     if width == 0 or height == 0:
         return None
     return int(x), int(y), int(width), int(height)
+
+
+def label_foreground(mask, min_area=MIN_PIECE_AREA):
+    """8-connected pieces inside the tight box.
+
+    Returns (x, y, labels, large, small). labels covers the box. large and
+    small are (label, area, x, y, width, height) in full-mask coordinates.
+    A piece is large when its area is at least min_area. None when empty.
+    """
+    box = _foreground_box(mask)
+    if box is None:
+        return None
+    x, y, width, height = box
+    crop = np.ascontiguousarray((mask[y:y + height, x:x + width] > 0).astype(np.uint8))
+    count, labels, stats, _centroids = cv2.connectedComponentsWithStats(crop, connectivity=8)
+    large = []
+    small = []
+    for label_id in range(1, count):
+        area = int(stats[label_id, cv2.CC_STAT_AREA])
+        left = int(stats[label_id, cv2.CC_STAT_LEFT])
+        top = int(stats[label_id, cv2.CC_STAT_TOP])
+        piece_w = int(stats[label_id, cv2.CC_STAT_WIDTH])
+        piece_h = int(stats[label_id, cv2.CC_STAT_HEIGHT])
+        item = (label_id, area, x + left, y + top, piece_w, piece_h)
+        if area < min_area:
+            small.append(item)
+        else:
+            large.append(item)
+    return x, y, labels, large, small
+
+
+def mask_is_disconnected(mask):
+    """True when two pieces are each large enough to be their own plant."""
+    labeled = label_foreground(mask)
+    if labeled is None:
+        return False
+    return len(labeled[3]) > 1
 
 
 def encode_rle(mask):
@@ -826,34 +865,17 @@ class PlantImageModel:
         needs_metadata_update = False
         
         for uid, mask in list(self.masks.items()):
-            box = _foreground_box(mask)
-            if box is None:
+            labeled = label_foreground(mask)
+            if labeled is None:
                 continue
-            x, y, bw, bh = box
-            
-            # Components can only exist inside the tight box, so label that crop.
-            crop = np.ascontiguousarray(mask[y:y + bh, x:x + bw])
-            num_features, labeled_mask = cv2.connectedComponents(crop, connectivity=8)
-            num_features -= 1 # OpenCV counts background (0) as a feature
-            
-            valid_count = 0
-            changed = False
-            if num_features > 0:
-                sizes = np.bincount(labeled_mask.ravel())
-                sizes[0] = 0 # Ignore background
-                
-                for i in range(1, num_features + 1):
-                    if sizes[i] < 5:
-                        crop[labeled_mask == i] = 0
-                        changed = True
-                        self.dirty = True
-                        needs_metadata_update = True
-                    else:
-                        valid_count += 1
-            if changed:
-                mask[y:y + bh, x:x + bw] = crop
-                        
-            if valid_count > 1:
+            x, y, labels, large, small = labeled
+            if small:
+                view = mask[y:y + labels.shape[0], x:x + labels.shape[1]]
+                for label_id, _area, _px, _py, _pw, _ph in small:
+                    view[labels == label_id] = 0
+                self.dirty = True
+                needs_metadata_update = True
+            if len(large) > 1:
                 return False, uid
                 
         if needs_metadata_update:
@@ -1409,47 +1431,31 @@ class PlantImageModel:
         if target_id not in self.masks: return False
         
         full_mask = self.masks[target_id]
-        
-        x, y, w, h = self.bboxes[target_id]
-        pad = 2
-        x1, y1 = max(0, x-pad), max(0, y-pad)
-        x2, y2 = min(full_mask.shape[1], x+w+pad), min(full_mask.shape[0], y+h+pad)
-        roi = full_mask[y1:y2, x1:x2]
-        
-        # --- FASTER OPENCV CONNECTED COMPONENTS ---
-        num_features, sub_labels = cv2.connectedComponents(roi, connectivity=8)
-        num_features -= 1 # Ignore background
-        
-        valid_components = []
-        if num_features > 1:
-            for i in range(1, num_features + 1):
-                component_mask = (sub_labels == i).astype(np.uint8)
-                coords = cv2.findNonZero(component_mask)
-                if coords is not None:
-                    _, _, bw, bh = cv2.boundingRect(coords)
-                    if bw >= 3 and bh >= 3:
-                        valid_components.append(component_mask)
-                        
-        if len(valid_components) > 1:
-            self.save_state(target_uids=target_id)
-            self.masks.pop(target_id, None)
-            self.bboxes.pop(target_id, None)
-            if target_id in self.class_patches: del self.class_patches[target_id]
-            
-            created = []
-            for comp in valid_components:
-                self.max_id += 1
-                new_mask = np.zeros_like(full_mask)
-                new_mask[y1:y2, x1:x2] = comp
-                self.masks[self.max_id] = new_mask
-                created.append(self.max_id)
-                self.update_metadata_for_uid(self.max_id)
-                
-            self.dirty = True
-            self._notify_data_changed([target_id, *created])
-            return True
-            
-        return False
+        labeled = label_foreground(full_mask)
+        if labeled is None:
+            return False
+        x, y, labels, large, _small = labeled
+        if len(large) < 2:
+            return False
+
+        self.save_state(target_uids=target_id)
+        self.masks.pop(target_id, None)
+        self.bboxes.pop(target_id, None)
+        if target_id in self.class_patches:
+            del self.class_patches[target_id]
+
+        created = []
+        for label_id, _area, _px, _py, _pw, _ph in large:
+            self.max_id += 1
+            new_mask = np.zeros_like(full_mask)
+            new_mask[y:y + labels.shape[0], x:x + labels.shape[1]] = (labels == label_id).astype(np.uint8)
+            self.masks[self.max_id] = new_mask
+            created.append(self.max_id)
+            self.update_metadata_for_uid(self.max_id)
+
+        self.dirty = True
+        self._notify_data_changed([target_id, *created])
+        return True
     
     def delete_instances(self, ids):
         if not ids: return

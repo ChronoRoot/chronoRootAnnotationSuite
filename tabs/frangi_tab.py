@@ -15,18 +15,27 @@ from skimage.filters import frangi, apply_hysteresis_threshold
 from core.root_graph_builder import extract_skeleton
 from scipy.ndimage import label, distance_transform_edt
 
-def fixed_frangi(image, sigmas=range(1, 10, 1), **kwargs):
-    # Create an empty array to hold our maximum values
-    filtered_max = np.zeros_like(image, dtype=float)
-    
-    # Loop through the scales ourselves
+def fixed_frangi(image, sigmas=range(1, 10, 1), cancel=None, scale_bank=None, **kwargs):
+    # skimage's own multi-scale Frangi divides every scale by the strongest
+    # one, so the weaker radii disappear. Each radius is filtered on its own
+    # and the brightest pixel across radii is kept. That per-radius image is
+    # what takes the time (several seconds each on a large plant).
+    #
+    # scale_bank remembers those images for this photo and these preprocessing
+    # settings. Thresholds, width, gaps and the search margin only read the
+    # combined map, so they reuse the bank. A new radius computes only the
+    # radii that are not stored yet. Stored arrays are never modified.
+    filtered_max = np.zeros(image.shape, dtype=np.float64)
     for sigma in sigmas:
-        # Call the original frangi, but force it to look at only ONE scale
-        current_result = frangi(image, sigmas=[sigma], **kwargs)
-        
-        # Combine by keeping the brightest pixels
+        if cancel is not None and cancel.get("stop"):
+            return None
+        key = float(sigma)
+        current_result = None if scale_bank is None else scale_bank.get(key)
+        if current_result is None:
+            current_result = frangi(image, sigmas=[sigma], **kwargs)
+            if scale_bank is not None:
+                scale_bank[key] = current_result
         filtered_max = np.maximum(filtered_max, current_result)
-    
     return filtered_max
 
 
@@ -91,11 +100,23 @@ def compute_frangi_proposal(snapshot):
     params = snapshot["params"]
     class_colors = snapshot["class_colors"]
 
+    # The root-strength map depends on the photo, the channel, the contrast,
+    # the smoothing, and whether roots are dark. Each radius is stored on its
+    # own. The two thresholds, the final width, the gap bridge, the search
+    # margin and the classes only read that map; they do not filter again.
+    bank = snapshot.get("scale_bank")
     if params["centerline_correction"]:
         frangi_scales = np.arange(
             params["min_sigma"], params["max_sigma"] + 1, params["sigma_step"]
         )
-        vesselness = fixed_frangi(gray_crop, black_ridges=params["roots_dark"], sigmas=frangi_scales)
+        vesselness = fixed_frangi(
+            gray_crop, black_ridges=params["roots_dark"], sigmas=frangi_scales,
+            cancel=snapshot.get("cancel"), scale_bank=bank,
+        )
+        if vesselness is None:
+            return None
+        # The search margin only hides the combined map outside the mask.
+        # The per-radius images in the bank are separate arrays and stay intact.
         vesselness[search_mask == 0] = 0
     else:
         vesselness = np.zeros(gray_crop.shape, dtype=np.float32)
@@ -132,10 +153,12 @@ def compute_frangi_proposal(snapshot):
         sizes = np.bincount(labeled_frangi.ravel())
         sizes[0] = 0
 
-        core_fragments = np.zeros_like(binary_vessels, dtype=np.uint8)
-        for i in range(1, num_frangi + 1):
-            if sizes[i] >= params["min_part"]:
-                core_fragments[labeled_frangi == i] = 1
+        # One lookup keeps every piece at least min_part pixels. Scanning the
+        # crop once per piece is the same mask, and on a broken-up threshold
+        # that scan was as slow as the filter itself.
+        keep = sizes >= params["min_part"]
+        keep[0] = False
+        core_fragments = keep[labeled_frangi].astype(np.uint8)
 
         labeled_valid, num_valid = label(core_fragments, structure=np.ones((3, 3)))
 
@@ -280,6 +303,17 @@ class FrangiCanvasTab(QWidget):
         self.main_window = main_window
         self._frangi_worker = None
         self._frangi_generation = 0
+        self._frangi_cancel = None
+        self._frangi_busy = False
+        self._frangi_rerun = False
+        self._frangi_sig = None
+        self._job_key = None
+        self._job_check = None
+        # Per-radius Frangi images for the current photo and preprocessing.
+        # Threshold edits reuse this instead of filtering the plant again.
+        self._vessel_bank = {}
+        self._vessel_key = None
+        self._vessel_check = None
         self.active_workers = set()
         
         # Processing Parameters 
@@ -435,21 +469,29 @@ class FrangiCanvasTab(QWidget):
         }
 
     def _on_frangi_finished(self, generation, result):
-        if self.main_window:
-            self.main_window.hide_loading()
         worker = self.sender()
         if worker in self.active_workers:
             self.active_workers.remove(worker)
             worker.deleteLater()
         if worker is self._frangi_worker:
             self._frangi_worker = None
+        # The plate or the plant changed while this estimate was running.
+        # Leave the popup up: it belongs to the request that replaced this one.
         if generation != self._frangi_generation:
+            return
+        # A threshold or radius edit arrived while this estimate was running.
+        # The radii already stored stay in the bank; build the proposal again
+        # with the controls as they are now, and leave the popup up.
+        if self._frangi_rerun:
+            self._frangi_rerun = False
+            self.generate_and_display_proposal()
+            return
+        self._hide_frangi_busy()
+        if result is None:
             return
         self._apply_proposal_result(result)
 
     def _on_frangi_error(self, message):
-        if self.main_window:
-            self.main_window.hide_loading()
         worker = self.sender()
         if worker in self.active_workers:
             self.active_workers.remove(worker)
@@ -458,8 +500,26 @@ class FrangiCanvasTab(QWidget):
             self._frangi_worker = None
         if hasattr(worker, "generation") and worker.generation != self._frangi_generation:
             return
+        self._frangi_rerun = False
+        self._frangi_busy = False
         if self.main_window:
             self.main_window._on_thread_error(message)
+
+    def _show_frangi_busy(self, message):
+        if self.main_window is None:
+            return
+        if self._frangi_busy:
+            self.main_window.show_loading(message, immediate=True, already_shown=True)
+            return
+        self._frangi_busy = True
+        self.main_window.show_loading(message, immediate=True)
+
+    def _hide_frangi_busy(self):
+        if not self._frangi_busy or self.main_window is None:
+            self._frangi_busy = False
+            return
+        self._frangi_busy = False
+        self.main_window.hide_loading()
 
     def _apply_proposal_result(self, result):
         self.proposed_full_mask = result["proposed_full_mask"]
@@ -546,14 +606,64 @@ class FrangiCanvasTab(QWidget):
             "class_colors": dict(self.model.class_colors),
         }
 
+        # The bank is the per-radius filter for this photo. A new photo,
+        # channel, contrast, smoothing, or light/dark setting starts it over.
+        gray_check = int(np.sum(gray_crop, dtype=np.int64))
+        vessel_key = (
+            str(self.model.image_path or ""), int(uid),
+            int(x1), int(y1), int(x2), int(y2),
+            self.p_channel_mode, self.p_clahe_mode, self.p_smooth_mode,
+            bool(self.p_roots_dark),
+        )
+        if vessel_key != self._vessel_key or gray_check != self._vessel_check:
+            self._vessel_key = vessel_key
+            self._vessel_check = gray_check
+            self._vessel_bank = {}
+        snapshot["scale_bank"] = self._vessel_bank
+        proposal_sig = (
+            tuple(sorted(
+                (key, tuple(value) if isinstance(value, list) else value)
+                for key, value in snapshot["params"].items()
+            )),
+            int(np.sum(mask_crop, dtype=np.int64)),
+            int(np.sum(current_cls_crop, dtype=np.int64)),
+        )
+
         if self.main_window is None:
             self._apply_proposal_result(compute_frangi_proposal(snapshot))
             return
 
+        # Same photo, filter already running: keep that work. Applying the
+        # new thresholds happens once the radii are stored, instead of
+        # cancelling the radius it is halfway through.
+        running = self._frangi_worker is not None and self._frangi_worker.isRunning()
+        if running and self._job_key == vessel_key and self._job_check == gray_check:
+            self._frangi_rerun = proposal_sig != self._frangi_sig
+            return
+
+        self._frangi_rerun = False
+        if self._frangi_cancel is not None:
+            self._frangi_cancel["stop"] = True
+        self._frangi_cancel = {"stop": False}
+        snapshot["cancel"] = self._frangi_cancel
         self._frangi_generation += 1
+        self._frangi_sig = proposal_sig
+        self._job_key = vessel_key
+        self._job_check = gray_check
         generation = self._frangi_generation
 
-        self.main_window.show_loading(self.FRANGI_LOADING_MSG)
+        # Thresholds and width only rebuild the mask from the stored map.
+        # The long message is for a radius that still has to be filtered.
+        scales_missing = False
+        if self.p_centerline_correction:
+            for sigma in np.arange(self.p_min_sigma, self.p_max_sigma + 1, self.p_sigma_step):
+                if float(sigma) not in self._vessel_bank:
+                    scales_missing = True
+                    break
+        if scales_missing:
+            self._show_frangi_busy(self.FRANGI_LOADING_MSG)
+        else:
+            self._show_frangi_busy("Updating the proposal…")
 
         worker = FrangiWorker(generation, snapshot)
         self._frangi_worker = worker
