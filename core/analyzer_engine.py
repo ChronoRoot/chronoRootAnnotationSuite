@@ -123,6 +123,7 @@ def analyze_prepared_plant(
     topology, warning, imported = _choose_topology(
         graph, colored_skel, full_skel, prepared["image_name"], uid, genotype,
         prune_iters, topology_record, decided, plant_xml,
+        (prepared["x_off"], prepared["y_off"], prepared["patch"].shape[1], prepared["patch"].shape[0]),
     )
     if topology is None:
         return None
@@ -175,12 +176,13 @@ def analyze_prepared_plant(
 
 def _choose_topology(
     graph, colored, full_skel, image_name, uid, genotype, prune,
-    topology_record, decided, plant_xml,
+    topology_record, decided, plant_xml, box=None,
 ):
     stale = None
     if topology_record:
         restored = restore_saved(
             graph, colored, full_skel, image_name, uid, genotype, prune, topology_record, plant_xml,
+            box,
         )
         if restored is not None:
             return restored, None, False
@@ -189,11 +191,11 @@ def _choose_topology(
         imported = import_plant(graph, colored, plant_xml, prune)
         if imported is not None:
             return imported, None, True
-        return automatic_topology(graph, colored, full_skel, image_name, uid, genotype, prune), (
+        return automatic_topology(graph, colored, full_skel, image_name, uid, genotype, prune, box), (
             f"Plant {uid}: the exported RSML does not match this skeleton, so the automatic tracing was used."
         ), False
     try:
-        return automatic_topology(graph, colored, full_skel, image_name, uid, genotype, prune), stale, False
+        return automatic_topology(graph, colored, full_skel, image_name, uid, genotype, prune, box), stale, False
     except Exception as exc:
         print(f"RSML generation failed for UID {uid}: {exc}")
         return None, str(exc), False

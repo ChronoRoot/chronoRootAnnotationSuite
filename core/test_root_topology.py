@@ -395,6 +395,8 @@ def test_a_cut_lateral_stops_at_the_cut_when_loaded():
     assert piece.points[-1] == (0, 35)
     assert edges[10].points[-1] == (0, 47)
     assert chains_from_polyline(full.points, {10: full}, strict=True) == [10]
+    almost = full.points[:-1]
+    assert chains_from_polyline(almost, {10: full}, strict=True) == [10]
 
 
 def test_touching_the_end_does_not_copy_the_segment():

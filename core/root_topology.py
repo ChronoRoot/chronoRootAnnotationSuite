@@ -865,13 +865,13 @@ def _covered_end_run(directed, present):
         end = 0
         while end + 1 < len(covered) and covered[end + 1]:
             end += 1
-        if end >= 1 and not any(covered[end + 1:]):
+        if end >= 1 and len(covered) - end - 1 >= 2 and not any(covered[end + 1:]):
             return 0, end
     if covered[-1]:
         start = len(covered) - 1
         while start > 0 and covered[start - 1]:
             start -= 1
-        if start <= len(covered) - 2 and not any(covered[:start]):
+        if start >= 2 and start <= len(covered) - 2 and not any(covered[:start]):
             return start, len(covered) - 1
     return None
 
@@ -1105,14 +1105,27 @@ def _paste(crop, shape, y, x):
     return canvas
 
 
-def _node_bounds(graph, shape, pad=3):
-    height, width = shape[:2]
-    xs = [int(node[0]) for node in graph.nodes]
-    ys = [int(node[1]) for node in graph.nodes]
-    x0 = max(0, min(xs) - pad)
-    y0 = max(0, min(ys) - pad)
-    x1 = min(width, max(xs) + pad + 1)
-    y1 = min(height, max(ys) + pad + 1)
+def _dense_bounds(box, shape, pad=5):
+    """The stored dense-segmentation box, plus the pad used while skeletonizing."""
+    x, y, width, height = box
+    image_h, image_w = shape[:2]
+    x0 = max(0, int(x) - pad)
+    y0 = max(0, int(y) - pad)
+    x1 = min(image_w, int(x) + int(width) + pad)
+    y1 = min(image_h, int(y) + int(height) + pad)
+    return x0, y0, x1, y1
+
+
+def _content_bounds(image, pad=1):
+    """Box around every skeleton pixel, including curves that bow past the nodes."""
+    height, width = image.shape[:2]
+    rows, cols = np.where(image > 0)
+    if len(rows) == 0:
+        return 0, 0, width, height
+    x0 = max(0, int(cols.min()) - pad)
+    y0 = max(0, int(rows.min()) - pad)
+    x1 = min(width, int(cols.max()) + pad + 1)
+    y1 = min(height, int(rows.max()) + pad + 1)
     return x0, y0, x1, y1
 
 
@@ -1176,9 +1189,19 @@ def build_graph(
     )
 
 
-def automatic_topology(graph, colored, full_skel, image_name, uid, genotype, prune=5):
+def automatic_topology(
+    graph, colored, full_skel, image_name, uid, genotype, prune=5, box=None,
+):
+    """Build the automatic tracing inside the plant's dense-segmentation box.
+
+    ``box`` is ``(x, y, width, height)`` in plate pixels, the same rectangle
+    drawn in the review tab. Without it, the box is taken from the skeleton.
+    """
     plant_xml = None
-    x0, y0, x1, y1 = _node_bounds(graph, full_skel.shape)
+    if box is None:
+        x0, y0, x1, y1 = _content_bounds(colored if np.any(colored) else full_skel)
+    else:
+        x0, y0, x1, y1 = _dense_bounds(box, full_skel.shape)
     local_graph = _shift_graph(graph, -x0, -y0)
     local_skel = full_skel[y0:y1, x0:x1]
     local_colored = colored[y0:y1, x0:x1]
@@ -1238,6 +1261,7 @@ def _restore_stored_edges(record, full_skel):
 
 def restore_saved(
     graph, colored, full_skel, image_name, uid, genotype, prune, record, plant_xml,
+    box=None,
 ):
     """Match a kept tracing to the edges the editor actually uses.
 
@@ -1255,7 +1279,7 @@ def restore_saved(
                 return restored
     try:
         automatic = automatic_topology(
-            graph, colored, full_skel, image_name, uid, genotype, prune,
+            graph, colored, full_skel, image_name, uid, genotype, prune, box,
         )
     except Exception:
         return None

@@ -167,7 +167,10 @@ def _trace_plant(
                 # copying it into the overrides would make the plate look unsaved.
                 return {"uid": uid, "topology": imported, "note": note}
             note = "The exported RSML does not match this skeleton. Showing the automatic tracing."
-    topology = automatic_topology(graph, colored, full_skel, image_name, uid, genotype, prune)
+    topology = automatic_topology(
+        graph, colored, full_skel, image_name, uid, genotype, prune,
+        (x_off, y_off, patch.shape[1], patch.shape[0]),
+    )
     return {"uid": uid, "topology": topology, "note": note}
 
 
