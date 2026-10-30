@@ -13,7 +13,7 @@ from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from components.ui_help import HELP_GRAPH, show_help
 from core.model import mask_is_disconnected
 from core.root_graph_builder import graphInit
-from core.root_topology import build_graph
+from core.root_topology import TopologyError, build_graph
 
 
 class GraphWorker(QThread):
@@ -46,6 +46,9 @@ class GraphWorker(QThread):
                 "colored": colored,
                 "skeleton": skeleton,
             })
+        except TopologyError as exc:
+            self.finished.emit(self.generation, {"error": str(exc)})
+            return
         except Exception:
             self.error.emit(__import__("traceback").format_exc())
 
@@ -387,6 +390,10 @@ class GraphCanvasTab(QWidget):
             )
             self.clear_graph_panels()
             return
+        if result.get("error"):
+            self.info_label.setText(result["error"])
+            self.clear_graph_panels()
+            return
 
         full_skel = result["skeleton"]
         skel_vis = self.base_rgb.copy()
@@ -476,13 +483,26 @@ class GraphCanvasTab(QWidget):
         # 4. RENDER GRAPH TO CANVAS
         # =================================================================
         graph_vis = self.base_rgb.copy()
-        
+        # Draw the skeleton pixels of each edge. A straight line between the
+        # nodes hides a loop whose two ends are the same place.
+        colored_crop = None
+        if self.colored_skeleton is not None:
+            colored_crop = self.colored_skeleton[
+                self.crop_y:self.crop_y + graph_vis.shape[0],
+                self.crop_x:self.crop_x + graph_vis.shape[1],
+            ]
         for u, v, data in self.current_graph.edges(data=True):
             r_type = data.get('root_type', 0)
             col = (255, 0, 0) if r_type == 1 else (0, 255, 0) if r_type == 2 else (150, 150, 150)
-            pt1 = (int(u[0]) - self.crop_x, int(u[1]) - self.crop_y)
-            pt2 = (int(v[0]) - self.crop_x, int(v[1]) - self.crop_y)
-            cv2.line(graph_vis, pt1, pt2, col, 2)
+            edge_color = data.get('color')
+            painted = False
+            if colored_crop is not None and edge_color is not None and np.any(colored_crop == edge_color):
+                graph_vis[colored_crop == edge_color] = col
+                painted = True
+            if not painted:
+                pt1 = (int(u[0]) - self.crop_x, int(u[1]) - self.crop_y)
+                pt2 = (int(v[0]) - self.crop_x, int(v[1]) - self.crop_y)
+                cv2.line(graph_vis, pt1, pt2, col, 2)
             
         for node in self.current_graph.nodes:
             pt = (int(node[0]) - self.crop_x, int(node[1]) - self.crop_y)

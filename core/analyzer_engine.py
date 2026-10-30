@@ -6,6 +6,7 @@ import json
 from .metrics import compute_metrics
 from .root_topology import (
     Topology,
+    TopologyError,
     automatic_topology,
     build_graph,
     header_for,
@@ -113,10 +114,13 @@ def analyze_prepared_plant(
     """
     if not prepared:
         return None
-    built = build_graph(
-        prepared["patch"], prepared["x_off"], prepared["y_off"],
-        prepared["bin_crop"], prepared["img_shape"], prune_iters,
-    )
+    try:
+        built = build_graph(
+            prepared["patch"], prepared["x_off"], prepared["y_off"],
+            prepared["bin_crop"], prepared["img_shape"], prune_iters,
+        )
+    except TopologyError:
+        return None
     if built is None:
         return None
     graph, colored_skel, full_skel = built

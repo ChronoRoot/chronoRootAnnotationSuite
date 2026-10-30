@@ -151,13 +151,18 @@ class Topology:
 
     def status_text(self):
         parts = []
+        if getattr(self, "left_behind", 0):
+            parts.append(f"{self.left_behind} skeleton pixels are not on any root.")
         if self.available:
             noun = "segment" if len(self.available) == 1 else "segments"
             parts.append(f"{len(self.available)} {noun} can be connected.")
         if self._main_is_open():
             parts.append("Apply puts the main root back together.")
         if parts:
-            return " ".join(parts) + " Copied segments stay on the main root too."
+            text = " ".join(parts)
+            if self.available or self._main_is_open():
+                text += " Copied segments stay on the main root too."
+            return text
         if not self._ready():
             return "Every graph edge must belong to a root before this can be applied."
         return "Ready to apply. Nothing is written until Export."
@@ -613,7 +618,9 @@ def edges_from_graph(graph):
         points = [_point(point) for point in data.get("points") or []]
         if len(points) < 2:
             continue
-        edges[int(data["edge_id"])] = _Edge(points[0], points[-1], points, data.get("root_type"))
+        edges[int(data["edge_id"])] = _Edge(
+            points[0], points[-1], points, data.get("root_type"), data.get("orig_root_type"),
+        )
     merged, _mapping = _merge_unbranched_edges(edges)
     return merged
 
@@ -643,7 +650,7 @@ def _merge_unbranched_edges(edges):
                 continue
             if not _same_tissue(edges[ids[0]], edges[ids[1]]):
                 # A class change on a straight root is not a branch. Joining
-                # those edges would hand the main-root side to the lateral.
+                # those edges would hand one side of the color change to the other.
                 skipped.add(point)
                 continue
             node = point
@@ -660,7 +667,9 @@ def _merge_unbranched_edges(edges):
             break
         del edges[left_id]
         del edges[right_id]
-        edges[next_id] = _Edge(points[0], points[-1], points, _joined_tissue(left, right))
+        edges[next_id] = _Edge(
+            points[0], points[-1], points, _joined_tissue(left, right), left.orig_root_type,
+        )
         parts[next_id] = (
             [(old, sign * left_sign) for old, sign in parts.pop(left_id)]
             + [(old, sign * right_sign) for old, sign in parts.pop(right_id)]
@@ -754,15 +763,23 @@ def _join_at(left, right, node):
     return head + tail
 
 
-def _tissue(root_type):
-    """Main-path edges are marked 10, but they are the same tissue as class 1."""
-    if root_type in (1, 10):
+def _tissue(edge):
+    """The class painted on the skeleton, not the main-path mark.
+
+    Type 10 means the edge lies on the chosen main path. It is class 1 only
+    when the skeleton itself was class 1. A class-2 edge on that path stays
+    class 2, so a straight color change is not joined into one segment.
+    """
+    kind = getattr(edge, "orig_root_type", None)
+    if kind is None:
+        kind = getattr(edge, "root_type", None)
+    if kind in (1, 10):
         return 1
-    return root_type
+    return kind
 
 
 def _same_tissue(left, right):
-    return _tissue(getattr(left, "root_type", None)) == _tissue(getattr(right, "root_type", None))
+    return _tissue(left) == _tissue(right)
 
 
 def _joined_tissue(left, right):
@@ -772,11 +789,12 @@ def _joined_tissue(left, right):
 
 
 class _Edge:
-    def __init__(self, u, v, points, root_type=None):
+    def __init__(self, u, v, points, root_type=None, orig_root_type=None):
         self.u = u
         self.v = v
         self.points = points
         self.root_type = root_type
+        self.orig_root_type = root_type if orig_root_type is None else orig_root_type
 
 
 def _step_index(edge):
@@ -816,7 +834,9 @@ def chains_from_polyline(points, edges, strict=False):
             if strict:
                 return None
             continue
-        if signed and signed[-1] == found:
+        # Going straight back along the segment just taken traces the same
+        # pixels twice. A loop is kept once.
+        if signed and abs(signed[-1]) == abs(found):
             continue
         if signed and _signed_ends(edges, signed[-1])[1] != _signed_ends(edges, found)[0]:
             link = _bridge(
@@ -1167,7 +1187,16 @@ def build_graph(
         return None
     skel, _branches, endpoints, is_valid = extract_skeleton(root_bin, prune_iters)
     if not is_valid or (cancel is not None and cancel.get("stop")):
-        return None
+        if cancel is not None and cancel.get("stop"):
+            return None
+        n_ends = 0 if endpoints is None else len(endpoints)
+        n_pixels = int((skel > 0).sum()) if skel is not None else 0
+        if n_pixels == 0:
+            raise TopologyError("This plant has no skeleton to trace.")
+        raise TopologyError(
+            f"This plant was not traced. The skeleton has {n_pixels} pixels and {n_ends} free tip. "
+            "A main root is a connected path between two ends. A closed loop does not give two ends, so the graph is not built."
+        )
     rows, cols = np.where(skel > 0)
     base = [int(cols[np.argmin(rows)]), int(rows[np.argmin(rows)])]
     graph, _actual, colored = createGraph(skel.copy(), class_skel, base, endpoints, _branches)
@@ -1215,7 +1244,28 @@ def automatic_topology(
     except Exception:
         plant_xml = None
     topology = topology_from_graph(local_graph, local_colored, plant_xml, prune)
-    return _shift_topology(topology, x0, y0)
+    topology = _shift_topology(topology, x0, y0)
+    _mark_left_behind(topology, full_skel)
+    return topology
+
+
+def _mark_left_behind(topology, full_skel):
+    """Count skeleton pixels that no root received.
+
+    A cycle whose two ends are the same place used to be stored as a one-pixel
+    step, so the rest of that segment belonged to nobody. Those pixels must be
+    on a root. If any remain, the tracing says so.
+    """
+    if topology is None or full_skel is None:
+        return
+    used = set()
+    for root_id in topology.roots:
+        used.update(map(tuple, topology.root_points(root_id)))
+    for chain in topology.available:
+        used.update(map(tuple, topology.chain_points(chain)))
+    rows, cols = np.where(full_skel > 0)
+    missing = sum((int(x), int(y)) not in used for y, x in zip(rows, cols))
+    topology.left_behind = missing
 
 
 def _points_on_skeleton(edges, full_skel):

@@ -377,6 +377,12 @@ def graphInit(graph, main_root_class=1):
     if len(graph.nodes) == 0:
         raise Exception("Cannot initialize empty graph")
 
+    # Keep the class the skeleton was painted with. The search below rewrites
+    # the chosen path to type 10, and that mark must not be read as class 1.
+    for _u, _v, data in graph.edges(data=True):
+        if "orig_root_type" not in data:
+            data["orig_root_type"] = data.get("root_type")
+
     # 1. Identify Main Root Sub-components & Set Traversal Costs EARLY
     c1_edges = [(u, v) for u, v, data in graph.edges(data=True) 
                 if data.get('orig_root_type', data.get('root_type')) == main_root_class]
@@ -557,19 +563,38 @@ def assign_edge_polylines(graph, colored_skeleton):
 
 
 def _polyline_between(start, end, pixels):
-    pool = set(pixels)
-    pool.add(start)
-    pool.add(end)
+    """The pixels of this edge, in order from start to end.
+
+    Rule: every pixel of an edge belongs to that edge. The two ends of a cycle
+    can be the same place, one pixel apart. The shortest step is then only that
+    gap, and the rest of the root would be left on no root. Follow the pixels.
+    """
+    short = _shortest_pixel_path(start, end, set(pixels) | {start, end})
+    missed = [pixel for pixel in pixels if pixel not in short]
+    if len(missed) < 10:
+        return short
+    trail = _follow_edge_pixels(start, end, pixels)
+    if trail is None or trail[0] != start or trail[-1] != end:
+        return short
+    if len([pixel for pixel in pixels if pixel not in trail]) > len(missed):
+        return short
+    return trail
+
+
+def _shortest_pixel_path(start, end, pool):
     if start == end:
         return [start]
     previous = {start: None}
     queue = deque([start])
-    found = False
     while queue:
         current = queue.popleft()
         if current == end:
-            found = True
-            break
+            path = []
+            while current is not None:
+                path.append(current)
+                current = previous[current]
+            path.reverse()
+            return path
         x, y = current
         for ny in range(y - 1, y + 2):
             for nx in range(x - 1, x + 2):
@@ -577,12 +602,79 @@ def _polyline_between(start, end, pixels):
                 if nxt in pool and nxt not in previous:
                     previous[nxt] = current
                     queue.append(nxt)
-    if not found:
-        return [start, end]
-    path = []
-    current = end
-    while current is not None:
+    return [start, end]
+
+
+def _pixel_neighbors(point, pool):
+    x, y = point
+    return [
+        (x + dx, y + dy)
+        for dy in (-1, 0, 1) for dx in (-1, 0, 1)
+        if (dx or dy) and (x + dx, y + dy) in pool
+    ]
+
+
+def _walk_edge_pixels(start, nxt, stop, adjacent):
+    path = [start]
+    previous, current = start, nxt
+    while len(path) <= len(adjacent) + 2:
         path.append(current)
-        current = previous[current]
-    path.reverse()
-    return path
+        if current == stop:
+            return path
+        choices = [pixel for pixel in adjacent.get(current, []) if pixel != previous]
+        if len(choices) != 1:
+            return None
+        previous, current = current, choices[0]
+    return None
+
+
+def _follow_edge_pixels(start, end, pixels):
+    """Order the pixels of one edge from start to end, the long way."""
+    body = set(pixels)
+    if len(body) < 3:
+        return None
+    adjacent = {pixel: _pixel_neighbors(pixel, body) for pixel in body}
+    if not {len(neighbours) for neighbours in adjacent.values()} <= {1, 2}:
+        return None
+    ends = [pixel for pixel, neighbours in adjacent.items() if len(neighbours) == 1]
+    if len(ends) == 2:
+        trail = _walk_edge_pixels(ends[0], adjacent[ends[0]][0], ends[1], adjacent)
+        if trail is None or len(trail) != len(body):
+            return None
+        return _attach_edge_ends(start, end, trail)
+    if ends:
+        return None
+    entries = [start] if start in body else _pixel_neighbors(start, body)
+    exits = [end] if end in body else _pixel_neighbors(end, body)
+    best = None
+    for entry in entries:
+        if entry not in adjacent:
+            continue
+        for leave in exits:
+            if leave not in adjacent:
+                continue
+            for nxt in adjacent[entry]:
+                arc = _walk_edge_pixels(entry, nxt, leave, adjacent)
+                if arc is not None and (best is None or len(arc) > len(best)):
+                    best = arc
+    if best is None:
+        return None
+    return _attach_edge_ends(start, end, best)
+
+
+def _attach_edge_ends(start, end, trail):
+    points = list(trail)
+    pool = set(points)
+    if points[0] == end:
+        points.reverse()
+    elif end in _pixel_neighbors(points[0], pool | {end}) and end not in _pixel_neighbors(points[-1], pool | {end}):
+        points.reverse()
+    if points[0] != start:
+        if start not in _pixel_neighbors(points[0], pool | {start}):
+            return None
+        points.insert(0, start)
+    if points[-1] != end:
+        if end not in _pixel_neighbors(points[-1], set(points) | {end}):
+            return None
+        points.append(end)
+    return points
