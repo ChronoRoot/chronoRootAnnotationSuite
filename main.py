@@ -42,7 +42,9 @@ from components.genotype_manager import GenotypeManagerDialog
 from components.workspace_manager import WorkspaceManager
 from components.instance_list import InstanceListPanel
 from components.loading_overlay import LoadingOverlay
-from components.error_report import install_gui_error_handler, report_error_text
+from components.error_report import (
+    install_gui_error_handler, report_error_text, set_error_context_provider,
+)
 
 from tabs.review_tab import ReviewToolPanel
 from tabs.frangi_tab import FrangiToolPanel
@@ -94,6 +96,7 @@ class ChronoRootAnnotationSuite(QMainWindow):
         self.current_task_path = ""
         self.current_base_name = ""
         self.current_file_path = ""
+        set_error_context_provider(self._error_context)
         self._pending_load_data = None
         self._pending_open_annotation_tab = False
         self._pending_mark_finished = False
@@ -755,6 +758,16 @@ class ChronoRootAnnotationSuite(QMainWindow):
         self.panel_review.force_mode("SELECT")
         self.update_overlay_labels()
         self.metadata_dirty = True
+
+    def _error_context(self):
+        model = self.global_model
+        uid = model.active_uid
+        plant = ""
+        if uid is not None:
+            meta = model.plants_meta.get(uid) or {}
+            number = meta.get("plant_num") or uid
+            plant = f"{number} (uid {uid})"
+        return {"file": self.current_file_path, "plant": plant}
 
     def _has_open_task(self):
         return bool(self.current_file_path and self.global_model.plant_uids())

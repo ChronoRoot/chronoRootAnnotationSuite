@@ -409,9 +409,19 @@ def graphInit(graph, main_root_class=1):
         
         # Find isolated nodes (degree 1)
         c1_endpoints = [n for n in c1_nodes if graph.degree(n) == 1]
+        # A degree-2 color change is the start when a real tip sits only a
+        # pixel or two higher. Other plates already have that node as the top.
+        color_tips = []
+        if graph.degree(abs_top_node) == 1:
+            color_tips = [
+                node for node in c1_nodes
+                if node != abs_top_node
+                and abs(node[1] - abs_top_node[1]) <= 2
+                and _is_color_change_tip(graph, node, main_root_class)
+            ]
         
         # Expand candidates: Endpoints UNION Absolute Extremities
-        candidates = list(set(c1_endpoints + [abs_top_node, abs_bottom_node]))
+        candidates = list(set(c1_endpoints + [abs_top_node, abs_bottom_node] + color_tips))
         
         if len(candidates) >= 2:
             max_phys_length = -1
@@ -433,11 +443,19 @@ def graphInit(graph, main_root_class=1):
                         continue
                         
             if best_pair[0] is not None:
-                # Sort the winning pair by Y-coordinate
-                if best_pair[0][1] < best_pair[1][1]:
-                    ini_node, ftip_node = best_pair[0], best_pair[1]
+                # The color-change node is the start, even when a tip sits one
+                # pixel higher. Otherwise the higher node is the start.
+                first, second = best_pair
+                first_change = _is_color_change_tip(graph, first, main_root_class)
+                second_change = _is_color_change_tip(graph, second, main_root_class)
+                if first_change and not second_change:
+                    ini_node, ftip_node = first, second
+                elif second_change and not first_change:
+                    ini_node, ftip_node = second, first
+                elif first[1] <= second[1]:
+                    ini_node, ftip_node = first, second
                 else:
-                    ini_node, ftip_node = best_pair[1], best_pair[0]
+                    ini_node, ftip_node = second, first
             else:
                 ini_node, ftip_node = abs_top_node, abs_bottom_node
         else:
@@ -486,6 +504,19 @@ def graphInit(graph, main_root_class=1):
             print(f"Warning: Disconnected graph structure between {ini_node} and {ftip_node}.")
 
     return graph
+
+
+def _is_color_change_tip(graph, node, main_root_class):
+    """Degree 2, with one main-root edge and one edge of another tissue."""
+    if graph.degree(node) != 2:
+        return False
+    kinds = {
+        data.get("orig_root_type", data.get("root_type"))
+        for _, _, data in graph.edges(node, data=True)
+    }
+    return main_root_class in kinds and any(
+        kind not in (None, main_root_class, 10) for kind in kinds
+    )
 
 
 def _as_point(point):

@@ -567,7 +567,11 @@ class GraphCanvasTab(QWidget):
         recolored_semantic = np.zeros_like(self.mask_crop)
         
         # 1. Fetch the original patch to salvage the non-targeted classes
-        patch, x_off, y_off = self.model._get_class_patch(self.model.active_uid)
+        patch_data = self.model._get_class_patch(self.model.active_uid)
+        if not patch_data:
+            recolored_semantic[dilated_crop > 0] = dilated_crop[dilated_crop > 0]
+            return recolored_semantic
+        patch, x_off, y_off = patch_data
         
         # 2. Map the original patch to our current crop coordinates
         orig_mc_crop = np.zeros_like(self.mask_crop)
