@@ -119,6 +119,9 @@ class GenotypeManagerDialog(QDialog):
 class GenotypeHelper:
     """Shared genotype combobox logic extracted from the Analyzer."""
 
+    # analyzer_panel registers new genotypes through GenotypeHelper
+    _persist_genotypes = GenotypeManagerDialog._persist_genotypes
+
     @staticmethod
     def resolve_genotype_text(raw_text, genotypes):
         """

@@ -1,6 +1,8 @@
 # ChronoRoot Annotation Suite: Official User Guide
 
-Manual annotation of complex root systems is a demanding task. This tool provides a streamlined, biology-first workflow for correcting model segmentations, validating root tracing, and exporting phenotypic measurements.
+Manual annotation of complex root systems is a demanding task. This tool provides a biology-first workflow for correcting model segmentations, validating root tracing, and exporting phenotypic measurements.
+
+The plant-by-plant annotation scenarios (split, merge, create) use screenshots from the Etiolation plate `2024-08-03_20-03-24_1`. The side panel in those figures may look slightly older; button names in the text match the **current** app. All other figures are current-UI screenshots.
 
 
 ## 0. Input Files per Plate
@@ -10,199 +12,262 @@ Each plate frame uses the **same base name** in one folder:
 | File | Description |
 |------|-------------|
 | `PlateName.png` | Scanner photo of the petri dish |
-| `PlateName.nii.gz` | **Automatic segmentation** from your model — the starting draft, not ground truth |
-| `PlateName.json` | Your saved edits (created when you click **Save Progress**) |
+| `PlateName.nii.gz` | Automatic segmentation from your model — the starting draft, not ground truth |
+| `PlateName.json` | Your saved edits (created when you click **Save Progress** or **Finish Annotation**) |
 
 After measurement and export:
 
 | File | Description |
 |------|-------------|
-| `PlateName_Metrics.json` | Per-plant morphometrics, plate metadata |
+| `PlateName_Metrics.json` | Per-plant morphometrics and plate metadata |
 | `PlateName_Topology.rsml` | Root architecture (RSML format) |
 
-The model may miss plants or fuse neighbors. You correct those in **Annotation**. If you paint a **wide** mask to capture faint roots, use **Centerline Cleanup (optional)** to thin it before the tracing check.
+The model may miss plants or fuse neighbors. You correct those in **Annotation**. If you paint a **wide** mask to capture faint roots, use **Centerline Cleanup** (optional) to thin it before the tracing check.
 
-> Finish **Finish Annotation** when mask and tracing work is done. Sections 7–8 cover trait measurement and batch comparison.
+> Click **Finish Annotation** when mask and tracing work are done. Later sections cover trait measurement and batch comparison.
 
 
 ## 1. Getting Started: The File Browser
 
-The application tracks progress so you can see which frames still need work.
+1. **Dataset folder:** Click the **`...`** button to select your experiment folder.
+2. **Navigate:** Double-click folders. Folder summaries show counts by status.
+3. **Statuses:** **Without Annotation**, **Pending**, **In Progress**, **Completed**.
+4. **Hide non-annotated images** — hides photo-only plates.
+5. **Load a task:** Click an image.
 
-1. **Dataset folder:** Click the **`...`** button to select your experiment folder (e.g. `ArabidopsisDataset`).
-2. **Navigate:** Double-click folders. Progress bars show **To annotate**, **In progress**, and **Done** counts.
-3. **Load a task:** Click any image marked **Missing** or **In Progress**. The tool loads the `.png` photo and model `.nii.gz` (plus `.json` if you saved before).
-
-![Main interface of ChronoRoot Annotation Suite showing the file browser.](tutorialImages/1_main_interface.png) 
-![Selecting a specific task folder from the database.](tutorialImages/2_selecting_a_task.png) 
-![A loaded task displaying the raw root image and plant list.](tutorialImages/3_task_loaded.png)
+![File browser showing plate statuses.](tutorialImages/01_browser_folder.png)
+![Annotation workspace with a loaded plate, plant list, and tools.](tutorialImages/02_annotation_overview.png)
 
 
 ## 2. Canvas Navigation & Controls
 
 * **Pan:** Hold **Ctrl + Left-Click** and drag.
 * **Zoom:** Use the **Mouse Wheel**.
-* **Brush Size:** Adjust stroke thickness in the left panel.
-* **Overlay Opacity:** See the raw root beneath painted masks.
-* **Bounding Boxes:** Toggle boxes showing plant extents.
+* **Brush Size** / **Overlay Opacity** — paint width and mask transparency.
+* **Bounding Boxes** — plant extents.
+* **Canvas Label Settings** — show **Plant #** / **Genotype**, choose Text or Index, and set **Font size** (try **18**) so labels stay readable when zoomed in.
 
-![Overlay opacity set to high, obscuring the raw root.](tutorialImages/4_opacity_slider_1.png) 
-![Overlay opacity lowered to clearly see the raw root beneath the mask.](tutorialImages/5_opacity_slider_2.png) 
-![Canvas view with plant bounding boxes toggled off.](tutorialImages/6_bounding_boxes_off.png)
+![Overlay opacity set high.](tutorialImages/03_opacity_high.png)
+![Overlay opacity lowered to see the raw root beneath the mask.](tutorialImages/04_opacity_low.png)
+![Canvas with plant bounding boxes turned off.](tutorialImages/05_bboxes_off.png)
 
 
 ## 3. The Plant-by-Plant Workflow: Examples
 
-The model provides a starting point but will make mistakes. For every plant, cycle through:
+For every plant, cycle through: **+ New / Merge / Split** → **Shape Paint** → **Multi-Class Paint**.
 
-1. **+ New / Merge / Split** — create, join, or separate plants.
-2. **Shape Paint** — left = add, right = erase.
-3. **Root Part Labels** — **Multi-Class Paint** (Main Root, Lateral Root, Hypocotyl, etc.).
+Plant list: **+ New**, **Merge**, **Delete**, **Reset Plant IDs**.
+
+Tools: **Clear Selection**, **Bounding Boxes**, **Review multiclass**, **Shape Paint**, **Split (Knife)**, **Split disconnected fragments**, **Undo Last Action**, **Multi-Class Paint**.
 
 ### Scenario A: The Fused or Overlapping Plant (Splitting)
 
-1. **Split:** Select the fused plant. **Split (Knife)** → draw a red line across the connection → **double-click** to cut.
-2. **Fix Overlaps (Shape Paint):** Repaint shared crossing areas on each plant.
-3. **Multi-Class Paint:** Assign biological labels to separated structures.
+1. **Split (Knife)** — draw a red line across the fusion → **double-click** to cut.
+2. **Shape Paint** — fix shared crossing pixels.
+3. **Multi-Class Paint** — assign biological labels.
 
-![Two distinct root systems merged into one ID.](tutorialImages/7_example_fused_plants.png) 
-![Drawing the red cut line across the fusion.](tutorialImages/8_example_splitting.png) 
-![Plants successfully separated into two distinct IDs.](tutorialImages/9_a_example_splitted.png) 
-![Showing the structural overlap of the two plants.](tutorialImages/9c_overlapped_plants_example.png)
-![Repainting the shared crossing pixels using Shape Paint.](tutorialImages/9_b_fixing_with_shape.png) 
-![Applying the correct biological labels to the separated roots.](tutorialImages/9_d_fixing_multiclass.png) 
+![Two distinct root systems merged into one ID.](tutorialImages/scenario_a_01_fused.png)
+![Drawing the red cut line across the fusion with Split (Knife).](tutorialImages/scenario_a_02_knife.png)
+![Plants successfully separated into two distinct IDs.](tutorialImages/scenario_a_03_split.png)
+![Structural overlap remaining after the split.](tutorialImages/scenario_a_04_overlap.png)
+![Repainting shared crossing pixels with Shape Paint.](tutorialImages/scenario_a_05_shape_paint.png)
+![Applying biological labels with Multi-Class Paint.](tutorialImages/scenario_a_06_multiclass.png)
 
 ### Scenario B: The Broken Plant (Merging)
 
-1. **Merge:** Shift+click fragments in the plant list → **Merge**.
-2. **Shape Paint:** Connect gaps between fragments.
-3. **Multi-Class Paint:** Label the full structure.
+1. Shift+click fragments → **Merge**.
+2. **Shape Paint** to connect gaps.
+3. **Multi-Class Paint**.
 
-![A single root split into multiple fragments by the model.](tutorialImages/10_broken_plant.png)
-![Selecting all fragment IDs in the left-hand list.](tutorialImages/11_dual_selection.png)
-![The fragments successfully merged into a single Plant ID.](tutorialImages/12_a_merged.png)
-![Painting](tutorialImages/12_b_fixing_with_painter.png) 
-![Painting 2](tutorialImages/12_c_painter_green_adds.png) 
-![Painting multiclass](tutorialImages/12_d_reviewing_multiclass.png)
+![A single root split into multiple fragments by the model.](tutorialImages/scenario_b_01_broken.png)
+![Selecting fragment IDs in the plant list.](tutorialImages/scenario_b_02_select.png)
+![Fragments merged into a single Plant ID.](tutorialImages/scenario_b_03_merged.png)
+![Connecting gaps with Shape Paint.](tutorialImages/scenario_b_04_shape_paint.png)
+![Left-click adds mask (green stroke).](tutorialImages/scenario_b_05_paint_add.png)
+![Reviewing multiclass labels on the merged plant.](tutorialImages/scenario_b_06_multiclass.png)
 
 ### Scenario C: The Missing Plant (Creating)
 
-1. **+ New** — create a plant the model missed.
-2. **Shape Paint** — outline the plant (a wide stroke is fine for faint roots).
-3. **Multi-Class Paint** — label seed, root, hypocotyl.
+1. **+ New** → **Shape Paint** → **Multi-Class Paint**.
 
-![An unannotated plant visible in the raw image.](tutorialImages/13_missing_plant_noticed.png)
-![Clicking the Create New Plant button.](tutorialImages/14_creation_button.png) 
-![The newly painted binary mask for the plant.](tutorialImages/15_binary_creation.png) 
-![Applying semantic classes to the newly created plant.](tutorialImages/16_multiclass_labels.png)
+![An unannotated plant visible in the raw image.](tutorialImages/scenario_c_01_missing.png)
+![Creating a new plant from the plant list.](tutorialImages/scenario_c_02_new.png)
+![The newly painted binary mask.](tutorialImages/scenario_c_03_shape.png)
+![Applying semantic classes to the new plant.](tutorialImages/scenario_c_04_multiclass.png)
 
 
-## 4. Final Annotation Review
+## 4. Reset Plant IDs & Final Review
 
-Before finishing, verify the whole plate:
+**Reset Plant IDs** re-numbers plants **left-to-right in rows**. Genotypes stay on the same physical plant. Use it before exporting genotypes for other timepoints of the same plate.
 
-1. Click **Review all labels** — all plants and root part labels at once.
-2. Check: tight bounding boxes, no label bleed, crossings accounted for.
-3. **Save Progress** (yellow) — pause and resume later (writes `.json`).
-4. **Finish Annotation** (green) — marks the plate completed.
+![Plant numbers intentionally out of order before reset.](tutorialImages/06_before_reset_plant_ids.png)
+![After Reset Plant IDs: numbers follow left-to-right row order.](tutorialImages/07_after_reset_plant_ids.png)
 
-![Review all labels — whole-plate validation before Finish.](tutorialImages/17_final_validation.png)
+1. **Review multiclass** — whole-plate labels.
+2. **Save Progress** or **Finish Annotation**.
 
-### Automated Validation on Finish
+![Review multiclass — whole-plate label check.](tutorialImages/08_review_multiclass.png)
+![Whole-plate validation view before Finish.](tutorialImages/scenario_review_all.png)
 
-If one Plant ID has **disconnected floating pieces**, Finish is blocked. Connect pieces with Shape Paint, or use **Split disconnected fragments** / Split tools to separate into distinct IDs.
-
-
-## 5. Centerline Cleanup (optional)
-
-Use the **Centerline Cleanup** tab when:
-
-* You painted a **wide** mask in Annotation to capture faint roots.
-* Masks look thick or uneven and you want them centered on the root.
-
-**Skip this tab** if Annotation masks already look thin and accurate.
-
-1. Select one plant.
-2. Compare the four panels (grayscale, current mask, root-strength map, proposed refinement).
-3. Adjust parameters if needed.
-4. **Apply to this plant** — then **Save Progress** or **Finish Annotation** to persist.
+If one Plant ID has disconnected pieces, Finish is blocked — connect with **Shape Paint** or split into separate IDs.
 
 
-## 6. Root Tracing Check (before Finish)
+## 5. Centerline Cleanup (optional) — both image types
 
-**Check every plant** on the **Root Tracing Check** tab before **Finish Annotation**.
+Use when masks are thick/uneven. **Skip** if Annotation masks already look thin.
 
-### Hard problem: disconnected mask
+| Image source | Typical look | **Dark Roots** | Parameter tip |
+|--------------|--------------|----------------|---------------|
+| ChronoRoot / ManyRoots | Dark roots on light background | **On** | **Min/Max Root Radius** often **1–10**; set **Contrast Enhancement** and **Smooth Filter** |
+| ScanPlates / scanner agar | Light roots on dark agar | **Off** | Smaller radii often suffice; still check contrast/smoothing |
 
-If the plant mask is not **one connected piece**, tracing cannot proceed. Return to **Annotation**:
+1. Select a plant → set **Dark Roots** correctly.
+2. Tune **Min/Max Root Radius**, then **Contrast Enhancement** and **Smooth Filter** until the root-strength map and proposed refinement look right.
+3. **Apply to this plant** → **Save Progress** / **Finish Annotation**.
 
-* **Merge** fragments, or **Shape Paint** to connect pieces.
-* **Split disconnected fragments** if one ID should be several plants.
+### ChronoRoot / ManyRoots (Dark Roots On, Max Radius 10)
 
-### Soft problem: wrong main-root path
+Tune **Image Adjustments** carefully: **Contrast Enhancement** (e.g. Before Smoothing) and **Smooth Filter** (e.g. Medium) matter as much as the radius range for recovering faint ChronoRoot roots. Example settings also use a larger **Radius Step**, **Final Width**, and **Bridge Gaps** when roots are thin or broken.
 
-The white **skeleton** may look fine, but the colored **main root path** may be wrong. The software could not place the automatic start/end correctly.
+![Centerline Cleanup on ManyRoots with Dark Roots on; contrast enhancement and smoothing enabled so the proposed centerline follows the root.](tutorialImages/09_manyroots_centerline_dark_on.png)
 
-**Fix options:**
+### ScanPlates-style plate (Dark Roots Off)
 
-1. On the interactive graph: set **Start** (green) and **End** (blue) nodes; use yellow waypoints if needed → **Save root tracing for this plant**.
-2. Return to Annotation and adjust Main Root / Lateral Root labels or outline.
+![Centerline Cleanup on a scanner plate with Dark Roots off.](tutorialImages/11_scanplates_centerline_dark_off.png)
 
-When skeleton and main-root path look correct for every plant, proceed to **Finish Annotation**. You are done here unless you continue to trait measurement.
+
+## 6. Root Tracing Check — review every plant
+
+**Root Tracing Check** builds the skeleton and main-root path from your masks. It is also a place to **clean up the segmentation so the main root is one continuous path**: wrong colors / broken main roots can be corrected by setting Start/End nodes (and waypoints) and clicking **Save root tracing for this plant**, which writes the traced colors back into the plant mask.
+
+**Review every plant** on the plate. If something looks wrong, fix it here (or return to Annotation) and **Save root tracing for this plant** before moving on.
+
+Disconnected masks cannot be traced — fix connectivity in Annotation first.
+
+### ChronoRoot / ManyRoots
+
+![Root Tracing Check on a ManyRoots plant.](tutorialImages/10_manyroots_root_tracing.png)
+
+### ScanPlates-style plate
+
+![Root Tracing Check on the scanner plate used for RSML fixes.](tutorialImages/12_scanplates_root_tracing.png)
 
 
 ## 7. RSML Lateral Root Fixes (optional)
 
-Skip this tab when the automatic root tracing is already right.
+Skip when the automatic tracing is already right. Use it when a lateral is broken into a tertiary past a cross, or when parallel laterals were fused.
 
-Use **RSML Lateral Root Fixes** when a lateral crosses another root and everything past the cross is stored as a tertiary, or when two laterals running in parallel were skeletonized as one thick root.
+### Example: merge Lateral 3 with its tertiary
 
-1. Select the plant.
-2. The view matches Phenomics review: **Raw image**, **Dense segmentation**, **RSML**, or **Each lateral root**. **Each lateral root** is the default. The list names every root. Segments that are not in a root yet are under **Available segments**. **Show only the selected root** hides the others.
-3. The mouse wheel zooms. Ctrl-drag or the middle button pans.
-4. Click a row to select it. Ctrl or Shift selects a second row: the first is the target and the second is the source.
-5. **Show direction** draws arrows from the beginning of each root to its end. **Show nodes** draws the joins. **Show only the selected root** hides the others. The selected root is drawn on top.
-6. A click selects one segment. Shift-click or Ctrl-click adds a second. **Connect** joins them only when they share an endpoint.
-7. **Split** on the main root copies the next segment and leaves the main root connected. On a lateral, the tip side becomes a child of that lateral. **Reverse direction** is only for a root that begins and ends at a branch, not one that reaches a tip.
-8. **Reuse segment** keeps the segment in its root and adds a copy to Available segments, for a lateral that runs along the same thick shaft. **Remove copy** deletes an extra copy. The last copy stays.
-9. **Keep fixes for this plant** keeps the edit in memory. It does not write a file. **Export** writes every active plant into `Topology.rsml`.
+On plant 1, automatic tracing sometimes splits a continuous lateral into **Lateral 3** plus **Lateral 3 · tertiary 1**. Merge them with **Connect**:
+
+1. Open **RSML Lateral Root Fixes**, select the plant, enable **Each lateral root** (and **Show direction** / **Show nodes** while debugging).
+2. Click **Lateral 3** in the list (or on the canvas). Zoom in on the break.
+3. **Shift-click** or **Ctrl-click** the tertiary segment so the legend shows **1 Target: Lateral 3** and **2 Source: … tertiary …**.
+4. Click **Connect** (pieces must share an endpoint).
+5. Click **Keep fixes for this plant** (memory only). Measurement / **Save Results** write `Topology.rsml`.
+
+**Reset** rebuilds the automatic tracing if you want to start over.
+
+![Lateral 3 selected (zoomed).](tutorialImages/13_rsml_lateral3_selected.png)
+![Lateral 3 + its tertiary selected — click Connect.](tutorialImages/14_rsml_lateral3_and_tertiary_selected.png)
+![After Connect: one continuous Lateral 3.](tutorialImages/15_rsml_after_connect_lateral3.png)
+![Keep fixes for this plant stores the curated topology in memory.](tutorialImages/15b_rsml_keep_fixes.png)
 
 
-## 8. Measurement & Export (optional)
+## 8. Plant Metadata, Genotypes & Measurement
 
-Skip this section unless you need phenotypic traits or batch comparisons.
-
-Open the middle panel sub-tab **Plant Metadata** (beside Annotation Controls).
+Open the middle panel sub-tab **Plant Metadata**. Keep **Canvas Label Settings → Font size** at **18** so plant numbers and genotypes stay readable when zoomed in on a few plants (not the full plate).
 
 ### Plate information & scale
 
-* **Plate ID**, **Condition**, **Timepoint** — stored in exports and batch reports.
-* **Calibration** — Scanner DPI, known plate height/width, or **Set via Measurement** on a known distance.
-* **Check scale on image** — test the ruler without changing calibration.
+**Plate ID**, **Condition**, **Timepoint**, and **Calibration** (Scanner DPI, known size, or **Set via Measurement**). Use **Check scale on image** to verify the ruler.
 
-### Per-plant identification
+### Fill plate metadata for every plate
 
-* **Plant** — internal ID (spatial order on plate).
-* **Genotype** and **Plant #** — your experiment labels.
-* Bulk-assign: select table rows → choose genotype → **Apply**.
+**Plate ID**, **Condition**, **Timepoint**, and scale must be filled **per plate** (they travel into `_Metrics.json` and Batch Reports).
+
+![Empty Plate ID / Condition / Timepoint fields and blank Genotype column — fill plate fields here; canvas shows plant boxes (Nº 1, Nº 2 ignored, …) without genotype names yet.](tutorialImages/17b_metadata_plate_fields_empty.png)
+
+### Genotype List
+
+**Genotype List…** manages saved genotype names for the dropdowns (examples: `Genotype_A`, `Genotype_B`, `Genotype_C`).
+
+![Manage Saved Genotypes dialog listing Genotype_A, Genotype_B, Genotype_C — use + Add Row / Save_Close to keep the list.](tutorialImages/17_genotype_list_dialog.png)
+
+### Assigning genotypes on the plate
+
+Select table rows → **Bulk genotype** → **Apply** (or edit cells one by one). Canvas labels update immediately when **Show → Genotype** is on.
+
+![Before assign: Genotype column blank; canvas labels are plant numbers only (Nº 1, Nº 2 ignored, Nº 3) at font size 18, zoomed on the top plants.](tutorialImages/18_metadata_genotypes_before.png)
+![After Bulk Apply Genotype_A: every row shows Genotype_A; canvas reads “Nº 1 Genotype_A”, “Nº 2 Genotype_A (ignored)”, “Nº 3 Genotype_A”.](tutorialImages/19_metadata_genotypes_assigned.png)
+![After Bulk Apply Genotype_B on plants 2–4: table rows 2–4 show Genotype_B (plant 1 still Genotype_A); canvas shows “Nº 1 Genotype_A” next to “Nº 2 Genotype_B (ignored)”.](tutorialImages/19b_metadata_bulk_apply_genotype_b.png)
+
+### Import / Export Genotypes across timepoints
+
+For the **same physical plate** at several timepoints:
+
+1. **Reset Plant IDs** so **Plant #** matches left-to-right order on every timepoint.
+2. **Export Genotypes** → `{ "1": "Genotype_A", … }`.
+3. On another timepoint (or after clearing), **Import Genotypes**.
+
+**Plant # must match.** Unmatched numbers are reported — add missing seeds with **+ Non-Germinated** (or fix Plant #), then import again.
+
+![Genotypes cleared again: Genotype column blank and canvas back to plant numbers only — ready to click Import Genotypes.](tutorialImages/19c_metadata_cleared_before_import.png)
+![After Import Genotypes: Plant # → genotype map restored (Genotype_A / Genotype_B as exported); canvas labels match the table again.](tutorialImages/20_metadata_after_import.png)
+
+Also: **+ Non-Germinated** (traits = 0) and **Ignore** (excluded from results).
 
 ### Run analysis
 
-1. **Measure** — computes traits; opens **Phenomics Inspector**. Requires **Finish Annotation** first.
-2. **Export** — writes trait outputs for this plate.
+1. **Run Measurements** — computes traits (plate should be finished first). The app then switches to the **Phenomics Inspector** tab (covered in the next section).
+2. **Save Results** — writes `_Metrics.json` / topology for this plate.
+
+After that, analyzed plates show **Analysis: Analyzed** in the left file browser (Annotation still open — this is not the Inspector yet):
+
+![Left file browser on the phenomics folder: green checkmarks with Annotation: Completed and Analysis: Analyzed; Annotation tab still active with plants 1–3 zoomed.](tutorialImages/16_phenomics_browser.png)
 
 
-## 9. Phenomics Inspector & Batch Reports (optional)
+## 9. Phenomics Inspector
 
-### Phenomics Inspector
+Review traits and overlays per plant after **Run Measurements** (this is the Inspector tab, not the Annotation workspace).
 
-Read-only review after Measure.
+Toggle **Show Convex Hull** and angle modes (**Hide Angles**, **Lateral emergence angle (2 mm)**, **Overall Tip Angles**). Use **Export Editable Vector (.SVG)** to save qualitative figures for papers and slides.
 
-### Batch Reports
+![Inspector without convex hull.](tutorialImages/21_inspector_no_hull.png)
+![Inspector with convex hull.](tutorialImages/22_inspector_with_hull.png)
+![Inspector with lateral emergence angles.](tutorialImages/23_inspector_with_angles.png)
+![Another plant on the same plate.](tutorialImages/24_inspector_other_plant.png)
 
-Lists exported plates from your dataset. Check plates → **Load Selected Data** → configure plots and statistics → **Add to Report** → **Generate Report**.
 
-Use the in-app **Help** button on the Batch Reports tab for statistical test details.
+## 10. Batch Reports
+
+1. Check plates → **Load Selected Data**.
+2. Choose **Plot Type**, metric, axes, hue, and **Statistics** (compare factor, test, alpha).
+3. **Add to Report** for each figure.
+4. **Generate Report** writes queued figures + stats files.
+5. **Export Table (.CSV)** for your own analysis.
+
+![Batch Reports plate picker.](tutorialImages/25_batch_reports_list.png)
+
+### Different plot types and metrics
+
+![Box plot — Main Root Length by genotype.](tutorialImages/26_batch_box_main_root.png)
+![Violin plot — Lateral Root Length by genotype.](tutorialImages/27_batch_violin_lateral.png)
+![Swarm plot — Convex Hull Area, with statistics panel.](tutorialImages/28_batch_swarm_hull_stats.png)
+![Qualitative Atlas — average root-system shapes by genotype (architecture overview).](tutorialImages/29_batch_qualitative_atlas.png)
+
+### What gets exported
+
+**Generate Report** creates a folder with SVG figures, aggregated data, and statistical summaries:
+
+![Contents of the exported report folder.](tutorialImages/30_batch_exported_folder.png)
+
+**Export Table (.CSV)** / master aggregated CSV columns (plant traits + plate metadata) for external analysis:
+
+![Preview of exported table columns.](tutorialImages/31_batch_exported_table_columns.png)
+
+Use the in-app **Help** on Batch Reports for statistical test details.
 
 ---
 

@@ -668,7 +668,7 @@ class PlantImageModel:
                     try:
                         if entry.is_dir(follow_symlinks=False):
                             dir_names.append(entry.name)
-                        elif entry.is_file(follow_symlinks=False):
+                        elif entry.is_file(follow_symlinks=True):
                             file_names.append(entry.name)
                     except OSError:
                         continue

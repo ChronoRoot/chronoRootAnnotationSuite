@@ -2,7 +2,7 @@ import math
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QListWidget, 
                              QListWidgetItem, QPushButton, QLabel, QGraphicsView, 
                              QGraphicsScene, QGraphicsPixmapItem, QGraphicsRectItem, 
-                             QMessageBox, QSlider, QGraphicsSimpleTextItem, QSizePolicy)
+                             QMessageBox, QSlider, QSpinBox, QGraphicsSimpleTextItem, QSizePolicy)
 
 from PyQt5.QtCore import Qt, pyqtSignal, QRectF
 from PyQt5.QtGui import (QImage, QPixmap, QPainter, QPainterPath, QPen, QColor, 
@@ -303,7 +303,7 @@ class PaintCanvas(BaseCanvas):
             
         super().mouseMoveEvent(event)
 
-    def update_overlays(self, bboxes, color_map, labels_dict, show_bboxes, show_labels, show_num=False, show_geno=False, geno_fmt="TEXT"):
+    def update_overlays(self, bboxes, color_map, labels_dict, show_bboxes, show_labels, show_num=False, show_geno=False, geno_fmt="TEXT", font_size=None):
         """Draws boundaries and dynamically constructs labels based on toggled preferences."""
         for item in self.bbox_group.childItems(): 
             self.scene.removeItem(item)
@@ -311,7 +311,9 @@ class PaintCanvas(BaseCanvas):
         if not show_bboxes and not show_labels:
             return
             
-        if self.cm_per_px and self.cm_per_px > 0:
+        if font_size is not None and font_size > 0:
+            font_px = int(font_size)
+        elif self.cm_per_px and self.cm_per_px > 0:
             font_px = max(12, int(0.2 / self.cm_per_px))
         else:
             font_px = 12
@@ -408,6 +410,8 @@ class ReviewCanvasTab(QWidget):
         
         self.lbl_info = QLabel()
         self.lbl_info.setStyleSheet("background-color: #eee; padding: 5px; font-weight: bold;")
+        self.lbl_info.setWordWrap(True)
+        self.lbl_info.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         rl.addWidget(self.lbl_info)
         
         self.canvas = PaintCanvas()
@@ -454,13 +458,15 @@ class ReviewCanvasTab(QWidget):
         self.update_info_label()
         self.refresh_canvas()
 
-    def set_label_preferences(self, show_num, show_geno, geno_format):
+    def set_label_preferences(self, show_num, show_geno, geno_format, font_size=None):
         """Receives display preferences from the Analyzer UI and updates the canvas."""
         # Auto-enable the master label toggle if either specific option is checked
         self.show_labels = show_num or show_geno 
         self.label_show_num = show_num
         self.label_show_geno = show_geno
         self.label_geno_format = geno_format
+        if font_size is not None:
+            self.label_font_size = int(font_size)
         self.refresh_canvas()
 
     def set_opacity(self, val):
@@ -563,6 +569,7 @@ class ReviewCanvasTab(QWidget):
         s_num = getattr(self, 'label_show_num', False)
         s_geno = getattr(self, 'label_show_geno', False)
         g_fmt = getattr(self, 'label_geno_format', "TEXT")
+        f_size = getattr(self, 'label_font_size', None)
         
         # 1. GLOBAL MULTI-CLASS VIEW
         if self.current_mode == "GLOBAL":
@@ -570,7 +577,7 @@ class ReviewCanvasTab(QWidget):
             overlay_pixmap = _bytes_to_pixmap(overlay_data, is_rgba=True)
             self.canvas.update_view(base_pixmap, overlay_pixmap)
             self.canvas.update_overlays(self.model.bboxes, self.model.color_map, self.overlay_labels, 
-                                        self.show_bboxes, self.show_labels, s_num, s_geno, g_fmt)
+                                        self.show_bboxes, self.show_labels, s_num, s_geno, g_fmt, f_size)
 
         # 2. SELECT MODE (SEED keeps the same view so seeds can be placed between plants)
         elif self.current_mode in ["SELECT", "SEED"]:
@@ -579,7 +586,7 @@ class ReviewCanvasTab(QWidget):
             overlay_pixmap = _bytes_to_pixmap(overlay_data, is_rgba=True)
             self.canvas.update_view(base_pixmap, overlay_pixmap)
             self.canvas.update_overlays(self.model.bboxes, self.model.color_map, self.overlay_labels, 
-                                        self.show_bboxes, self.show_labels, s_num, s_geno, g_fmt)
+                                        self.show_bboxes, self.show_labels, s_num, s_geno, g_fmt, f_size)
             
         # 3. INDIVIDUAL MULTI-CLASS EDITING
         elif self.current_mode == "SEMANTIC" and self.model.active_uid in self.model.masks:
@@ -620,8 +627,7 @@ class ReviewCanvasTab(QWidget):
                     f"Plant {active} selected. Shift+click to add more plants."
                 )
             elif len(selected) > 1:
-                ids_str = ", ".join(str(i) for i in sorted(selected))
-                self.lbl_info.setText(f"{len(selected)} plants selected ({ids_str}).")
+                self.lbl_info.setText(f"{len(selected)} plants selected.")
             else:
                 self.lbl_info.setText(
                     "No plant selected. Click a plant on the canvas or in the list."
@@ -846,24 +852,39 @@ class ReviewToolPanel(QWidget):
         sl.addWidget(QLabel("Brush Size:"))
         size_layout = QHBoxLayout()
         self.slider_size = QSlider(Qt.Horizontal)
-        self.slider_size.setRange(1, 30); self.slider_size.setValue(5)
+        self.slider_size.setRange(1, 50); self.slider_size.setValue(5)
         self.slider_size.setToolTip("Width of the paint and erase brush.")
-        self.lbl_size_val = QLabel("5px") 
-        self.lbl_size_val.setFixedWidth(40)
-        self.slider_size.valueChanged.connect(self.update_brush_size) 
+        self.spin_size = QSpinBox()
+        self.spin_size.setRange(1, 50)
+        self.spin_size.setValue(5)
+        self.spin_size.setSuffix("px")
+        self.spin_size.setFixedWidth(64)
+        self.spin_size.setToolTip("Type or scroll a brush width in pixels.")
+        self.slider_size.valueChanged.connect(self.spin_size.setValue)
+        self.spin_size.valueChanged.connect(self.slider_size.setValue)
+        self.slider_size.valueChanged.connect(self.update_brush_size)
         size_layout.addWidget(self.slider_size)
-        size_layout.addWidget(self.lbl_size_val)
+        size_layout.addWidget(self.spin_size)
         sl.addLayout(size_layout)
         
         sl.addWidget(QLabel("Overlay Opacity:"))
         op_layout = QHBoxLayout()
+        self.btn_overlay = QPushButton("On")
+        self.btn_overlay.setCheckable(True)
+        self.btn_overlay.setChecked(True)
+        self.btn_overlay.setFixedWidth(36)
+        self.btn_overlay.setToolTip(
+            "Show or hide the mask overlay. Opacity stays on the slider for when you turn it back on."
+        )
+        self.btn_overlay.clicked.connect(self.toggle_overlay)
         self.slider_opacity = QSlider(Qt.Horizontal)
         self.slider_opacity.setRange(0, 100); self.slider_opacity.setValue(40)
         self.slider_opacity.setToolTip("Transparency of painted masks over the raw image.")
         self.lbl_op_val = QLabel("40%")
         self.lbl_op_val.setFixedWidth(40)
         self.slider_opacity.valueChanged.connect(lambda v: self.lbl_op_val.setText(f"{v}%"))
-        self.slider_opacity.sliderReleased.connect(lambda: self.canvas_tab.set_opacity(self.slider_opacity.value()))
+        self.slider_opacity.sliderReleased.connect(self.apply_opacity)
+        op_layout.addWidget(self.btn_overlay)
         op_layout.addWidget(self.slider_opacity)
         op_layout.addWidget(self.lbl_op_val)
         sl.addLayout(op_layout)
@@ -910,8 +931,19 @@ class ReviewToolPanel(QWidget):
         self.setFixedHeight(self.sizeHint().height())
 
     def update_brush_size(self, val):
-        self.lbl_size_val.setText(f"{val}px")
         self.canvas_tab.set_brush_size(val)
+
+    def apply_opacity(self):
+        if self.btn_overlay.isChecked():
+            self.canvas_tab.set_opacity(self.slider_opacity.value())
+
+    def toggle_overlay(self):
+        on = self.btn_overlay.isChecked()
+        self.btn_overlay.setText("On" if on else "Off")
+        if on:
+            self.canvas_tab.set_opacity(self.slider_opacity.value())
+        else:
+            self.canvas_tab.set_opacity(0)
 
     def update_undo_state(self):
         self.btn_undo.setEnabled(

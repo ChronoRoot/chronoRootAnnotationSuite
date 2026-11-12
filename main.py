@@ -11,7 +11,7 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QHBoxLayout, QV
                              QSplitter, QStackedWidget, QMessageBox,
                              QLabel, QFrame, QInputDialog, QTabWidget, QGroupBox,
                              QCheckBox, QRadioButton, QPushButton, QSizePolicy, QToolButton,
-                             QStyle)
+                             QStyle, QSpinBox)
 from PyQt5.QtGui import QIcon
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QSize, QTimer
 
@@ -199,6 +199,7 @@ class ChronoRootAnnotationSuite(QMainWindow):
                 "show_num": self.chk_show_num_global.isChecked(),
                 "show_geno": self.chk_show_geno_global.isChecked(),
                 "label_format": "TEXT" if self.rad_fmt_text_global.isChecked() else "NUMBER",
+                "label_font_size": self.sp_label_font.value(),
             }
 
             f_targets = [
@@ -364,8 +365,22 @@ class ChronoRootAnnotationSuite(QMainWindow):
         row_fmt.addWidget(self.rad_fmt_num_global)
         row_fmt.addStretch()
 
+        row_font = QHBoxLayout()
+        row_font.addWidget(QLabel("Font size:"))
+        self.sp_label_font = QSpinBox()
+        self.sp_label_font.setRange(8, 48)
+        self.sp_label_font.setSuffix(" px")
+        self.sp_label_font.setValue(int(r_cfg.get("label_font_size", 14)))
+        self.sp_label_font.setToolTip(
+            "Pixel size of Plant # / Genotype overlays. Lower it when long "
+            "genotype names collide on dense plates."
+        )
+        row_font.addWidget(self.sp_label_font)
+        row_font.addStretch()
+
         gl.addLayout(row_show)
         gl.addLayout(row_fmt)
+        gl.addLayout(row_font)
 
         controls_container = QWidget()
         controls_layout = QVBoxLayout(controls_container)
@@ -607,6 +622,7 @@ class ChronoRootAnnotationSuite(QMainWindow):
 
         self.chk_show_num_global.toggled.connect(self._apply_global_label_preferences)
         self.chk_show_geno_global.toggled.connect(self._apply_global_label_preferences)
+        self.sp_label_font.valueChanged.connect(self._apply_global_label_preferences)
         self.rad_fmt_text_global.toggled.connect(self._apply_global_label_preferences)
         self.rad_fmt_num_global.toggled.connect(self._apply_global_label_preferences)
         self._apply_global_label_preferences()
@@ -1119,13 +1135,17 @@ class ChronoRootAnnotationSuite(QMainWindow):
         self.rad_fmt_text_global.setEnabled(show_geno)
         self.rad_fmt_num_global.setEnabled(show_geno)
         fmt = "TEXT" if self.rad_fmt_text_global.isChecked() else "NUMBER"
-        self.workspaces.canvas_review.set_label_preferences(show_num, show_geno, fmt)
+        font_size = self.sp_label_font.value()
+        self.workspaces.canvas_review.set_label_preferences(
+            show_num, show_geno, fmt, font_size=font_size
+        )
 
         if "review" not in self.config:
             self.config["review"] = {}
         self.config["review"]["show_num"] = show_num
         self.config["review"]["show_geno"] = show_geno
         self.config["review"]["label_format"] = fmt
+        self.config["review"]["label_font_size"] = font_size
 
     # --- Calibration (from Analyzer) ---
     def start_calibration_flow(self):

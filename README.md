@@ -14,11 +14,11 @@ An open-source desktop tool for correcting automatic root segmentations on petri
 ## Traits workflow
 
 1. **Plant Metadata** — plate info, image scale, genotypes.
-2. **Measure** then **Export**.
+2. **Run Measurements** then **Save Results**.
 3. **Phenomics Inspector** — review per plant.
 4. **Batch Reports** — compare plates.
 
-Measure requires the plate to be finished first.
+Run Measurements requires the plate to be finished first.
 
 ## Installation
 

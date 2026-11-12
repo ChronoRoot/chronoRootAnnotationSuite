@@ -36,7 +36,8 @@ HELP_ANNOTATION = """<b>Annotation</b><br><br>
 • <b>Split disconnected fragments</b> — one ID split into separate plants.<br>
 • <b>Undo Last Action</b> — undo the last paint, seed, split, merge, delete, Graph, Frangi, or saved RSML action. History resets after save or load.<br>
 • <b>Multi-Class Paint</b> — Main Root, Lateral Root, Hypocotyl, and other root-part labels.<br><br>
-<b>Brush Size</b> and <b>Overlay Opacity</b> — adjust paint brush and mask transparency.<br><br>
+<b>Brush Size</b> and <b>Overlay Opacity</b> — adjust paint brush and mask transparency.<br>
+• <b>Canvas Label Settings → Font size</b> — shrink overlays when long genotype names collide.<br><br>
 <b>Navigation:</b> Ctrl+drag to pan, wheel to zoom."""
 
 HELP_FRANGI = """<b>Root Cleanup Tools</b><br><br>
