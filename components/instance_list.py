@@ -127,6 +127,7 @@ class InstanceListPanel(QWidget):
             self.list_instances.setSortingEnabled(True)
             return
 
+        scroll = self.list_instances.verticalScrollBar().value()
         self.list_instances.blockSignals(True)
         self.list_instances.clearSelection()
         self.list_instances.setSortingEnabled(False)
@@ -159,6 +160,7 @@ class InstanceListPanel(QWidget):
 
         self.list_instances.setSortingEnabled(True)
         self.list_instances.blockSignals(False)
+        self.list_instances.verticalScrollBar().setValue(scroll)
         self.list_instances.viewport().update()
 
     def sync_selection(self):
@@ -245,8 +247,9 @@ class InstanceListPanel(QWidget):
     def action_delete(self):
         if self.model.selected_uids:
             uids_to_delete = list(self.model.selected_uids)
-            self.model.delete_instances(uids_to_delete)
+            # Clear first so data-change handlers do not re-select another plant.
             self.model.set_selection([])
+            self.model.delete_instances(uids_to_delete)
 
     def set_review_tool_panel(self, panel):
         self.review_tool_panel = panel

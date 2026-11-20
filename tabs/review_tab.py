@@ -633,7 +633,22 @@ class ReviewCanvasTab(QWidget):
                     "No plant selected. Click a plant on the canvas or in the list."
                 )
         elif mode == "GLOBAL":
-            self.lbl_info.setText("Review multiclass — every plant and root part on the plate.")
+            n = len(selected)
+            if n == 0:
+                self.lbl_info.setText(
+                    "Review multiclass — every plant and root part on the plate. "
+                    "No plants selected."
+                )
+            elif n == 1:
+                self.lbl_info.setText(
+                    f"Review multiclass — every plant and root part on the plate. "
+                    f"1 plant selected (Plant {active})."
+                )
+            else:
+                self.lbl_info.setText(
+                    f"Review multiclass — every plant and root part on the plate. "
+                    f"{n} plants selected."
+                )
         elif mode == "PAINT":
             self.lbl_info.setText(
                 f"Plant {active} — Outline: left = add, right = erase."

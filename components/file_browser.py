@@ -310,6 +310,13 @@ class UnifiedFileBrowser(QWidget):
         self.chk_hide_non_annotated.toggled.connect(self._on_hide_filter_toggled)
         layout.addWidget(self.chk_hide_non_annotated)
 
+        self.chk_hide_completed = QCheckBox("Hide completed files")
+        self.chk_hide_completed.setToolTip(
+            "Hide plates whose annotation status is Completed."
+        )
+        self.chk_hide_completed.toggled.connect(self._on_hide_filter_toggled)
+        layout.addWidget(self.chk_hide_completed)
+
         layout.addWidget(QLabel("CONTENTS:"))
         self.task_list = QListWidget()
         self.task_list.itemDoubleClicked.connect(self.on_item_double_clicked)
@@ -364,17 +371,30 @@ class UnifiedFileBrowser(QWidget):
 
     def set_browser_controls_visible(self, expanded):
         self.chk_hide_non_annotated.setVisible(expanded)
+        self.chk_hide_completed.setVisible(expanded)
 
     def set_hide_non_annotated(self, checked):
         self.chk_hide_non_annotated.blockSignals(True)
         self.chk_hide_non_annotated.setChecked(checked)
         self.chk_hide_non_annotated.blockSignals(False)
-        if self.current_dir in self.folder_cache:
-            self.render_contents(self.folder_cache[self.current_dir], use_cache=False)
+        self._rerender_current_dir()
+
+    def set_hide_completed(self, checked):
+        self.chk_hide_completed.blockSignals(True)
+        self.chk_hide_completed.setChecked(checked)
+        self.chk_hide_completed.blockSignals(False)
+        self._rerender_current_dir()
 
     def _on_hide_filter_toggled(self, _checked):
+        self._rerender_current_dir()
+
+    def _rerender_current_dir(self):
         if self.current_dir in self.folder_cache:
-            self.render_contents(self.folder_cache[self.current_dir], use_cache=False)
+            self.render_contents(
+                self.folder_cache[self.current_dir],
+                use_cache=False,
+                preserve_scroll=True,
+            )
 
     def request_refresh(self):
         """The button's click sends False. Ignore that and reread this folder from disk."""
@@ -626,7 +646,11 @@ class UnifiedFileBrowser(QWidget):
                 current_iter_dir = parent_dir
 
         if self.current_dir in self.folder_cache:
-            self.render_contents(self.folder_cache[self.current_dir], use_cache=False)
+            self.render_contents(
+                self.folder_cache[self.current_dir],
+                use_cache=False,
+                preserve_scroll=True,
+            )
         return {
             "file_path": target["path"],
             "file_dir": file_dir,
@@ -647,10 +671,11 @@ class UnifiedFileBrowser(QWidget):
             },
         }
 
-    def render_contents(self, contents, use_cache=True):
+    def render_contents(self, contents, use_cache=True, preserve_scroll=False):
         if use_cache:
             self.folder_cache[self.current_dir] = contents
 
+        scroll = self.task_list.verticalScrollBar().value() if preserve_scroll else None
         self._update_current_dir_label()
         self.task_list.clearSelection()
         self.task_list.clear()
@@ -679,10 +704,13 @@ class UnifiedFileBrowser(QWidget):
 
             elif item["type"] == "file":
                 annotation_status = item.get("annotation_status") or item.get("status", "without_annotation")
+                normalized = normalize_annotation_status(annotation_status)
                 if (
                     self.chk_hide_non_annotated.isChecked()
-                    and normalize_annotation_status(annotation_status) == "without_annotation"
+                    and normalized == "without_annotation"
                 ):
+                    continue
+                if self.chk_hide_completed.isChecked() and normalized == "completed":
                     continue
 
                 list_item = QListWidgetItem()
@@ -711,6 +739,8 @@ class UnifiedFileBrowser(QWidget):
                 self.task_list.setItemWidget(list_item, widget)
                 self._bind_row_menu(widget, list_item)
         self.select_open_file(self._open_file_path)
+        if scroll is not None:
+            self.task_list.verticalScrollBar().setValue(scroll)
 
     def render_analyzer_contents(self, contents):
         """Renders the analyzer-style browser (simple folder icons, analyzer file widgets)."""

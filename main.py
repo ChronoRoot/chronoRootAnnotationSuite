@@ -156,9 +156,13 @@ class ChronoRootAnnotationSuite(QMainWindow):
         if "panel_sizes_report" not in self.config:
             self.config["panel_sizes_report"] = [250, 320, 930]
         if "browser" not in self.config:
-            self.config["browser"] = {"hide_non_annotated": False}
-        elif "hide_non_annotated" not in self.config["browser"]:
-            self.config["browser"]["hide_non_annotated"] = False
+            self.config["browser"] = {
+                "hide_non_annotated": False,
+                "hide_completed": False,
+            }
+        else:
+            self.config["browser"].setdefault("hide_non_annotated", False)
+            self.config["browser"].setdefault("hide_completed", False)
 
     def save_interface_config(self):
         try:
@@ -236,6 +240,7 @@ class ChronoRootAnnotationSuite(QMainWindow):
 
             cfg["browser"] = {
                 "hide_non_annotated": self.browser.chk_hide_non_annotated.isChecked(),
+                "hide_completed": self.browser.chk_hide_completed.isChecked(),
             }
 
             self.config = cfg
@@ -283,6 +288,7 @@ class ChronoRootAnnotationSuite(QMainWindow):
         browser_panel_layout.addWidget(self.browser, stretch=1)
         b_cfg = self.config.get("browser", {})
         self.browser.set_hide_non_annotated(b_cfg.get("hide_non_annotated", False))
+        self.browser.set_hide_completed(b_cfg.get("hide_completed", False))
         self.splitter.addWidget(self.browser_panel)
 
         self.workspaces = WorkspaceManager(self, self.global_model)
@@ -967,7 +973,7 @@ class ChronoRootAnnotationSuite(QMainWindow):
             self.expand_middle_panel()
 
     def ensure_active_plant(self):
-        """Guarantee a valid active plant when plants exist but selection is empty or stale."""
+        """Drop stale plant ids from the selection. Empty selection is intentional and kept."""
         model = self.global_model
         valid_uids = set(model.plant_uids())
         if not valid_uids:
@@ -981,8 +987,9 @@ class ChronoRootAnnotationSuite(QMainWindow):
         selected = [uid for uid in model.selected_uids if uid in valid_uids]
 
         if not selected:
-            first_uid = sorted(valid_uids)[0]
-            self._apply_plant_selection([first_uid], source="auto", zoom=False)
+            if model.selected_uids:
+                # Deleted/stale ids only — clear, do not jump to another plant by id.
+                self._apply_plant_selection([], source="auto", zoom=False)
         elif len(selected) != len(model.selected_uids):
             self._apply_plant_selection(selected, source="auto", zoom=False)
 
@@ -1782,6 +1789,8 @@ class ChronoRootAnnotationSuite(QMainWindow):
                 )
                 self.panel_phenomics.enable_tools(True)
                 self.ensure_active_plant()
+                if not self.global_model.selected_uids:
+                    self._apply_plant_selection([uids[0]], source="auto", zoom=False)
                 self.workspaces.canvas_graph.refresh_graph_preview()
             else:
                 self.panel_phenomics.clear_table()
